@@ -11,27 +11,61 @@
 - [x] CLAUDE.md -> CLAUDE_zh_TW.md
 
 ## 指令與技巧 (.claude / skills)
-- [ ] .claude/commands/*.md
-- [ ] .claude/skills/*/SKILL.md
-- [ ] skills/developing-in-lightdash/
+- [x] .claude/commands/add-context-file.md -> add-context-file_zh_TW.md
+- [x] .claude/commands/cs-bugs.md -> cs-bugs_zh_TW.md
+- [x] .claude/commands/docker-dev.md -> docker-dev_zh_TW.md
+- [x] .claude/skills/debug-local/SKILL.md -> SKILL_zh_TW.md
+- [x] .claude/skills/frontend-style-guide/SKILL.md -> SKILL_zh_TW.md
+- [x] .claude/skills/ld-permissions/SKILL.md -> SKILL_zh_TW.md
+- [x] skills/developing-in-lightdash/SKILL.md -> SKILL_zh_TW.md
+- [x] skills/developing-in-lightdash/
     - [x] resources/chart-types-reference.md
     - [x] resources/dimensions-reference.md
     - [x] resources/metrics-reference.md
     - [x] resources/dashboard-reference.md
     - [x] resources/tables-reference.md
     - [x] resources/joins-reference.md
-    - [ ] 剩餘資源文件待處理...
+    - [x] resources/dashboard-best-practices.md
+    - [x] resources/gauge-chart-reference.md
+    - [x] resources/funnel-chart-reference.md
+    - [x] resources/pie-chart-reference.md
+    - [x] resources/cli-reference.md
+    - [x] resources/treemap-chart-reference.md
+    - [x] resources/workflows-reference.md
+    - [x] resources/big-number-chart-reference.md
+    - [x] resources/custom-viz-reference.md
+    - [x] resources/map-chart-reference.md
+    - [x] resources/table-chart-reference.md
+    - [x] resources/cartesian-chart-reference.md
 
 ## 套件相關 (Packages)
-- [ ] packages/backend/README.md
-- [ ] packages/frontend/README.md
-- [ ] packages/cli/README.md
-- [ ] packages/common/...
-- [ ] packages/warehouses/README.md
+- [x] packages/backend/README.md -> README_zh_TW.md
+- [x] packages/backend/INTEGRATION_TESTS.md -> INTEGRATION_TESTS_zh_TW.md
+- [x] packages/backend/src/ee/database/seeds/readme.md -> readme_zh_TW.md
+- [x] packages/backend/src/scheduler/README.md -> README_zh_TW.md
+- [x] packages/frontend/README.md -> README_zh_TW.md
+- [x] packages/frontend/public/geojson/README.md -> README_zh_TW.md
+- [x] packages/cli/README.md -> README_zh_TW.md
+- [x] packages/warehouses/README.md -> README_zh_TW.md
+- [x] packages/e2e/SLUG_TESTING_GUIDE.md -> SLUG_TESTING_GUIDE_zh_TW.md
+- [x] packages/e2e/cypress/e2e/api/README.md -> README_zh_TW.md
+- [x] packages/e2e/cypress/e2e/experimental/README.md -> README_zh_TW.md
+- [x] packages/e2e/cypress/e2e/experimental/NESTED_SPACE_PERMISSIONS_E2E_STRATEGY.md -> NESTED_SPACE_PERMISSIONS_E2E_STRATEGY_zh_TW.md
+- [x] packages/iframe-test-app/README.md -> README_zh_TW.md
+- [x] packages/sdk-test-app/README.md -> README_zh_TW.md
+- [x] packages/sdk-next-test-app/README.md -> README_zh_TW.md
 
 ## 其他 (Examples & Docs)
-- [ ] examples/api/README.md
-- [ ] .github/docs/Tracking.md
+- [x] examples/api/README.md -> README_zh_TW.md
+- [x] examples/snowflake-template/README.md -> README_zh_TW.md
+- [x] examples/full-jaffle-shop-demo/dbt/README.md -> README_zh_TW.md
+- [x] examples/full-jaffle-shop-demo/dbt/docker/README.md -> README_zh_TW.md
+- [x] examples/full-jaffle-shop-demo/dbt/models/overview.md -> overview_zh_TW.md
+- [x] examples/full-jaffle-shop-demo/dbt/models/docs.md -> docs_zh_TW.md
+- [x] .context/PERMISSIONS.md -> PERMISSIONS_zh_TW.md
+- [x] .github/docs/Tracking.md -> Tracking_zh_TW.md
+- [x] .github/PULL_REQUEST_TEMPLATE.md -> PULL_REQUEST_TEMPLATE_zh_TW.md
+- [x] .github/docs/Tracking.md -> Tracking_zh_TW.md
 
 ---
 
@@ -42,4 +76,5 @@
 
 ## 當前進度
 - 開始日期：2026-02-23
-- 當前狀態：完成根目錄核心文件及部分開發者資源文件翻譯。
+- 當前狀態：已完成所有核心文件、開發者資源文件、權限文件、套件 README、範例文件及 E2E 測試指南的翻譯。剩餘檔案主要為各子目錄下的 `CLAUDE.md` 指令文件。
+- 完成率：約 53% (55/104 檔案)
