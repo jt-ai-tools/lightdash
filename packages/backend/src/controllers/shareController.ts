@@ -1,6 +1,7 @@
 import {
     ApiErrorPayload,
     ApiShareResponse,
+    assertRegisteredAccount,
     CreateShareUrl,
 } from '@lightdash/common';
 import {
@@ -17,6 +18,8 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import { allowApiKeyAuthentication, isAuthenticated } from './authentication';
 import { BaseController } from './baseController';
 
@@ -37,12 +40,13 @@ export class ShareController extends BaseController {
         @Path() nanoId: string,
         @Request() req: express.Request,
     ): Promise<ApiShareResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getShareService()
-                .getShareUrl(req.user!, nanoId),
+                .getShareUrl(req.account, nanoId),
         };
     }
 
@@ -52,7 +56,11 @@ export class ShareController extends BaseController {
      * @param body a full URL used to generate a short url id
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('ShareController.create'),
+    ])
     @SuccessResponse('201', 'Created')
     @Post('/')
     @OperationId('CreateShareUrl')
@@ -60,9 +68,10 @@ export class ShareController extends BaseController {
         @Body() body: CreateShareUrl,
         @Request() req: express.Request,
     ): Promise<ApiShareResponse> {
+        assertRegisteredAccount(req.account);
         const shareUrl = await this.services
             .getShareService()
-            .createShareUrl(req.user!, body.path, body.params);
+            .createShareUrl(toSessionUser(req.account), body.path, body.params);
         this.setStatus(201);
         return {
             status: 'ok',

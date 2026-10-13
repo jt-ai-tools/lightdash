@@ -6,17 +6,18 @@ import {
     type FC,
     type PropsWithChildren,
 } from 'react';
-import CustomInputs from './CustomInputs';
-import DailyInputs from './DailyInputs';
-import FrequencySelect from './FrequencySelect';
-import HourlyInputs from './HourlyInputs';
-import MonthlyInputs from './MonthlyInputs';
-import WeeklyInputs from './WeeklyInputs';
 import {
     Frequency,
     getFrequencyCronExpression,
     mapCronExpressionToFrequency,
 } from './cronInputUtils';
+import CustomInputs from './CustomInputs';
+import DailyInputs from './DailyInputs';
+import FrequencySelect from './FrequencySelect';
+import HourlyInputs from './HourlyInputs';
+import MonthlyInputs from './MonthlyInputs';
+import WeekdaysInputs from './WeekdaysInputs';
+import WeeklyInputs from './WeeklyInputs';
 
 type CronInternalInputsProps = {
     name: string;
@@ -51,7 +52,7 @@ export const CronInternalInputs: FC<
     );
 
     return (
-        <Group spacing="sm" align="flex-start">
+        <Group gap="sm" align="flex-start">
             <FrequencySelect
                 value={frequency}
                 disabled={disabled}
@@ -62,6 +63,9 @@ export const CronInternalInputs: FC<
             )}
             {frequency === Frequency.DAILY && (
                 <DailyInputs cronExpression={value} onChange={onChange} />
+            )}
+            {frequency === Frequency.WEEKDAYS && (
+                <WeekdaysInputs cronExpression={value} onChange={onChange} />
             )}
             {frequency === Frequency.WEEKLY && (
                 <WeeklyInputs cronExpression={value} onChange={onChange} />

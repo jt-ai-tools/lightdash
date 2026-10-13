@@ -9,64 +9,62 @@ import {
     SuccessResponse,
     Tags,
 } from '@tsoa/runtime';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
+import {
+    secureFetch,
+    SecureFetchError,
+} from '../utils/secureFetch/secureFetch';
 import { allowApiKeyAuthentication, isAuthenticated } from './authentication';
 import { BaseController } from './baseController';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const TIMEOUT_MS = 30000; // 30 seconds
 
-// Private IP ranges to block (SSRF protection)
-const PRIVATE_IP_PATTERNS = [
-    /^10\./, // 10.0.0.0/8
-    /^172\.(1[6-9]|2[0-9]|3[0-1])\./, // 172.16.0.0/12
-    /^192\.168\./, // 192.168.0.0/16
-    /^127\./, // 127.0.0.0/8 (loopback)
-    /^169\.254\./, // 169.254.0.0/16 (link-local)
-    /^0\./, // 0.0.0.0/8
-    /^::1$/, // IPv6 loopback
-    /^fc00:/, // IPv6 unique local
-    /^fe80:/, // IPv6 link-local
-];
-
-const isPrivateHost = (hostname: string): boolean => {
-    // Block localhost variants
-    if (
-        hostname === 'localhost' ||
-        hostname === '127.0.0.1' ||
-        hostname === '::1'
-    ) {
-        return true;
+// Translate the generic secureFetch failure reasons into the ParameterError
+// messages this endpoint returned before it was refactored onto secureFetch.
+const toParameterError = (error: SecureFetchError): ParameterError => {
+    switch (error.reason) {
+        case 'invalid_url':
+            return new ParameterError('Invalid URL format');
+        case 'non_https':
+            return new ParameterError('Only HTTPS protocol is allowed');
+        case 'blocked_ip':
+            return new ParameterError(
+                'Access to private/internal addresses is not allowed',
+            );
+        case 'redirect':
+            return new ParameterError(
+                'Redirects are not supported for security reasons',
+            );
+        case 'timeout':
+            return new ParameterError('Failed to fetch GeoJSON: timed out');
+        case 'too_large':
+            return new ParameterError(
+                `File too large (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`,
+            );
+        case 'disallowed_content_type':
+            return new ParameterError('Failed to fetch GeoJSON: invalid type');
+        case 'request_failed':
+        default:
+            return new ParameterError(
+                `Failed to fetch GeoJSON: ${error.message}`,
+            );
     }
-    // Block private IP ranges
-    return PRIVATE_IP_PATTERNS.some((pattern) => pattern.test(hostname));
 };
 
-const validateUrl = (url: string) => {
+const validateGeoJsonUrlSyntax = (url: string): void => {
     if (!url) {
         throw new ParameterError('URL parameter is required');
     }
-
-    // Validate URL format
     let parsedUrl: URL;
     try {
         parsedUrl = new URL(url);
-    } catch (error) {
+    } catch {
         throw new ParameterError('Invalid URL format');
     }
-
-    // Only allow HTTPS protocol
     if (parsedUrl.protocol !== 'https:') {
         throw new ParameterError('Only HTTPS protocol is allowed');
     }
-
-    // Block private/internal IP addresses (SSRF protection)
-    if (isPrivateHost(parsedUrl.hostname)) {
-        throw new ParameterError(
-            'Access to private/internal addresses is not allowed',
-        );
-    }
-
-    // Only allow .json files
     const pathname = parsedUrl.pathname.toLowerCase();
     if (
         !pathname.endsWith('.json') &&
@@ -78,53 +76,6 @@ const validateUrl = (url: string) => {
         );
     }
 };
-const readResponseWithSizeLimit = async (
-    response: globalThis.Response,
-): Promise<string> => {
-    // Check content-length header first (early rejection)
-    const contentLength = response.headers.get('content-length');
-    if (contentLength && parseInt(contentLength, 10) > MAX_FILE_SIZE) {
-        throw new ParameterError(
-            `File too large (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`,
-        );
-    }
-
-    // Stream the body with size limit to prevent memory exhaustion
-    const reader = response.body?.getReader();
-    if (!reader) {
-        throw new ParameterError('Unable to read response body');
-    }
-
-    const chunks: Uint8Array[] = [];
-    let receivedLength = 0;
-
-    const processChunk = async (): Promise<void> => {
-        const { done, value } = await reader.read();
-        if (done) return;
-
-        receivedLength += value.length;
-        if (receivedLength > MAX_FILE_SIZE) {
-            await reader.cancel();
-            throw new ParameterError(
-                `File too large (max ${MAX_FILE_SIZE / 1024 / 1024}MB)`,
-            );
-        }
-        chunks.push(value);
-        await processChunk();
-    };
-
-    await processChunk();
-
-    // Combine chunks and decode to string
-    const combined = new Uint8Array(receivedLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-        combined.set(chunk, offset);
-        offset += chunk.length;
-    }
-
-    return new TextDecoder().decode(combined);
-};
 
 @Route('/api/v1/geojson-proxy')
 @Response<ApiErrorPayload>('default', 'Error')
@@ -135,35 +86,48 @@ export class GeoJsonProxyController extends BaseController {
      * @param url the URL of the GeoJSON file
      * @summary Proxy GeoJSON
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('GeoJsonProxyController.get'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get()
     @OperationId('getGeoJson')
     async get(@Query() url: string): Promise<Record<string, unknown>> {
-        validateUrl(url);
+        // Extension allowlist is geoJson-specific and stays here, not in the util.
+        validateGeoJsonUrlSyntax(url);
 
-        const response = await fetch(url, {
-            signal: AbortSignal.timeout(TIMEOUT_MS),
-        });
-
-        if (!response.ok) {
-            throw new ParameterError(
-                `Failed to fetch GeoJSON: ${response.status}`,
-            );
+        let bodyText: string;
+        try {
+            const result = await secureFetch(url, {
+                method: 'GET',
+                timeoutMs: TIMEOUT_MS,
+                maxResponseBytes: MAX_FILE_SIZE,
+                // Empty list = no content-type restriction: parity with the
+                // original controller, which accepted any content-type.
+                allowedContentTypes: [],
+            });
+            // secureFetch forwards non-2xx responses; keep rejecting them here.
+            if (result.status >= 400) {
+                throw new ParameterError(
+                    `Failed to fetch GeoJSON: Request failed with status ${result.status}`,
+                );
+            }
+            bodyText = result.bodyText;
+        } catch (error) {
+            if (error instanceof SecureFetchError) {
+                throw toParameterError(error);
+            }
+            throw error;
         }
 
-        // Read body with streaming size limit
-        const text = await readResponseWithSizeLimit(response);
-
-        // Parse JSON
         let data: unknown;
         try {
-            data = JSON.parse(text);
-        } catch (error) {
+            data = JSON.parse(bodyText);
+        } catch {
             throw new ParameterError('Invalid JSON format');
         }
-
-        // Validate it's an object (GeoJSON/TopoJSON are always objects)
         if (typeof data !== 'object' || data === null || Array.isArray(data)) {
             throw new ParameterError('Invalid GeoJSON: expected an object');
         }

@@ -7,12 +7,13 @@
         "build": "vite build"
     },
     "dependencies": {
-        "@modelcontextprotocol/ext-apps": "^1.0.1",
-        "echarts": "^5.6.0"
+        "@lightdash/common": "workspace:*",
+        "@modelcontextprotocol/ext-apps": "1.7.1",
+        "echarts": "5.6.0"
     },
     "devDependencies": {
-        "typescript": "^5.7.0",
-        "vite": "^6.3.0",
-        "vite-plugin-singlefile": "^2.0.3"
+        "typescript": "7.0.2",
+        "vite": "8.0.16",
+        "vite-plugin-singlefile": "2.3.2"
     }
 }

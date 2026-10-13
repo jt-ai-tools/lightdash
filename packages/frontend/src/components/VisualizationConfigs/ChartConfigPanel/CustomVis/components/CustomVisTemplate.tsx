@@ -1,10 +1,9 @@
 import {
-    type ItemsMap,
     sortedItemsForXAxis,
     sortedItemsForYAxis,
+    type ItemsMap,
 } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
-import { Button } from '@mantine/core';
+import { Menu, Button } from '@mantine/core';
 import {
     IconChartBar,
     IconChartBubble,
@@ -67,7 +66,6 @@ export const SelectTemplate = ({
 
     return (
         <Menu
-            shadow="md"
             position="bottom"
             withArrow
             closeOnClickOutside
@@ -96,11 +94,10 @@ export const SelectTemplate = ({
             </Menu.Dropdown>
             <Menu.Target>
                 <Button
-                    size="sm"
                     variant="default"
-                    compact
+                    size="compact-sm"
                     fz="xs"
-                    leftIcon={<MantineIcon icon={IconPlus} />}
+                    leftSection={<MantineIcon icon={IconPlus} />}
                 >
                     Insert template
                 </Button>

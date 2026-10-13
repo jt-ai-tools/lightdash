@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { SEED_PROJECT } from '@lightdash/common';
 
 describe('Pivot Tables', () => {
@@ -28,6 +27,8 @@ describe('Pivot Tables', () => {
             `/projects/${SEED_PROJECT.project_uuid}/tables/orders?create_saved_chart_version=%7B%22tableName%22%3A%22orders%22%2C%22metricQuery%22%3A%7B%22exploreName%22%3A%22%22%2C%22dimensions%22%3A%5B%22orders_order_date_week%22%2C%22orders_status%22%2C%22orders_is_completed%22%5D%2C%22metrics%22%3A%5B%22orders_total_order_amount%22%5D%2C%22filters%22%3A%7B%7D%2C%22sorts%22%3A%5B%7B%22fieldId%22%3A%22orders_order_date_week%22%2C%22descending%22%3Atrue%7D%5D%2C%22limit%22%3A500%2C%22tableCalculations%22%3A%5B%5D%2C%22additionalMetrics%22%3A%5B%5D%2C%22metricOverrides%22%3A%7B%7D%7D%2C%22tableConfig%22%3A%7B%22columnOrder%22%3A%5B%22orders_order_date_week%22%2C%22orders_status%22%2C%22orders_is_completed%22%2C%22orders_total_order_amount%22%5D%7D%2C%22chartConfig%22%3A%7B%22type%22%3A%22table%22%2C%22config%22%3A%7B%22showColumnCalculation%22%3Afalse%2C%22showRowCalculation%22%3Afalse%2C%22showTableNames%22%3Atrue%2C%22showResultsTotal%22%3Afalse%2C%22showSubtotals%22%3Afalse%2C%22columns%22%3A%7B%7D%2C%22hideRowNumbers%22%3Afalse%2C%22conditionalFormattings%22%3A%5B%5D%2C%22metricsAsRows%22%3Afalse%7D%7D%7D`,
         );
 
+        cy.findByTestId('page-spinner', { timeout: 30000 }).should('not.exist');
+
         // run query
         cy.get('button').contains('Run query').click();
 
@@ -36,15 +37,19 @@ describe('Pivot Tables', () => {
         cy.contains('Drag dimensions into this area to pivot your table');
 
         const dragSelector =
-            '[role="tabpanel"] [data-rfd-drag-handle-draggable-id="orders_is_completed"]';
-        const dropSelector = '[data-rfd-droppable-id="COLUMNS"]';
+            '[role="tabpanel"] [data-rfd-drag-handle-draggable-id="orders_is_completed"]:visible';
+        const dropSelector = '[data-rfd-droppable-id="COLUMNS"]:visible';
 
         cy.dragAndDrop(dragSelector, dropSelector);
+
+        // Pivoting now runs in SQL, so re-run the query to fetch pivoted results.
+        cy.get('button').contains('Run query').click();
 
         cy.get('[data-testid="visualization"]').as('chartArea'); // Using an alias aviod querying the DOM for the same element multiple times
 
         cy.get('@chartArea').findByText('Loading chart').should('not.exist');
-        cy.get('@chartArea').contains('Is completed'); // Check that the chart updated successfully with the pivot table(containing 'is completed' column)
+        // Generous timeout to cover the pivoted query round-trip.
+        cy.get('@chartArea').contains('Is completed', { timeout: 30000 }); // Check that the chart updated successfully with the pivot table(containing 'is completed' column)
     });
 
     // todo: remove
@@ -56,9 +61,9 @@ describe('Pivot Tables', () => {
 
         // Save a pivot table
         cy.contains('Save chart').click();
-        cy.get('[data-testid="ChartCreateModal/NameInput"]').type(
-            'My Pivot Table Chart',
-        );
+        cy.get('[data-testid="ChartCreateModal/NameInput"]')
+            .clear()
+            .type('My Pivot Table Chart');
         cy.findByText('Next').click();
         cy.findByText('Save').click();
         cy.contains('Chart was saved');

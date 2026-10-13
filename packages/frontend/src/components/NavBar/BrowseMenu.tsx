@@ -1,3 +1,12 @@
+import { subject } from '@casl/ability';
+import {
+    assertUnreachable,
+    FeatureFlags,
+    getResourceViewItemName,
+    getDocumentUrl,
+    ResourceViewItemType,
+    type ResourceViewItem,
+} from '@lightdash/common';
 import {
     Box,
     Button,
@@ -8,43 +17,60 @@ import {
     Menu,
     ScrollArea,
     Text,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconCategory,
     IconChartAreaLine,
     IconChevronDown,
     IconChevronRight,
+    IconAppWindow,
+    IconFileText,
     IconFolder,
     IconFolders,
     IconLayoutDashboard,
+    IconPuzzle,
 } from '@tabler/icons-react';
-import { type FC, useState } from 'react';
+import { useState, type FC } from 'react';
 import { Link } from 'react-router';
-import {
-    ResourceViewItemType,
-    assertUnreachable,
-    type ResourceViewItem,
-} from '@lightdash/common';
+import { ReviewRequestsMenuItem } from '../../ee/features/contentReview';
+import { useChartTypesEnabled } from '../../features/chartTypes/hooks/useChartTypesEnabled';
 import { useHasMetricsInCatalog } from '../../features/metricsCatalog/hooks/useMetricsCatalog';
 import { useFavorites } from '../../hooks/favorites/useFavorites';
+import { useOptionalProjectRoute } from '../../hooks/useProjectRoute';
+import { useServerFeatureFlag } from '../../hooks/useServerOrClientFeatureFlag';
 import { useSpaceSummaries } from '../../hooks/useSpaces';
+import useApp from '../../providers/App/useApp';
+import scrollAreaClasses from '../../styles/ScrollArea.module.css';
 import MantineIcon from '../common/MantineIcon';
 import { PolymorphicGroupButton } from '../common/PolymorphicGroupButton';
 import TruncatedText from '../common/TruncatedText';
 import { MetricsLink } from './MetricsLink';
+import { useNavBarMenuProps } from './NavBarPortalContext';
 
 interface Props {
     projectUuid: string;
 }
 
-const getFavoriteItemUrl = (projectUuid: string, item: ResourceViewItem) => {
+const getFavoriteItemUrl = (
+    projectUuid: string,
+    projectUrlIdentifier: string,
+    item: ResourceViewItem,
+) => {
     switch (item.type) {
         case ResourceViewItemType.DASHBOARD:
-            return `/projects/${projectUuid}/dashboards/${item.data.uuid}/view`;
+            return `/projects/${projectUrlIdentifier}/dashboards/${item.data.slug}/view`;
         case ResourceViewItemType.CHART:
-            return `/projects/${projectUuid}/saved/${item.data.uuid}`;
+            return `/projects/${projectUrlIdentifier}/saved/${item.data.slug}`;
         case ResourceViewItemType.SPACE:
-            return `/projects/${projectUuid}/spaces/${item.data.uuid}`;
+            return `/projects/${projectUrlIdentifier}/spaces/${item.data.uuid}`;
+        case ResourceViewItemType.DATA_APP:
+            return `/projects/${projectUuid}/apps/${item.data.uuid}/view`;
+        case ResourceViewItemType.DOCUMENT:
+            return getDocumentUrl(
+                projectUrlIdentifier,
+                item.data.uuid,
+                item.data.slug,
+            );
         default:
             return assertUnreachable(item, `Unknown favorite item type`);
     }
@@ -58,12 +84,20 @@ const getFavoriteItemIcon = (item: ResourceViewItem) => {
             return IconChartAreaLine;
         case ResourceViewItemType.SPACE:
             return IconFolder;
+        case ResourceViewItemType.DATA_APP:
+            return IconAppWindow;
+        case ResourceViewItemType.DOCUMENT:
+            return IconFileText;
         default:
             return assertUnreachable(item, `Unknown favorite item type`);
     }
 };
 
 const BrowseMenu: FC<Props> = ({ projectUuid }) => {
+    const menuProps = useNavBarMenuProps();
+    const projectRoute = useOptionalProjectRoute();
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ?? projectUuid;
     // Track if menu has ever been opened to defer loading spaces
     const [hasBeenOpened, setHasBeenOpened] = useState(false);
     const [spacesExpanded, setSpacesExpanded] = useState(false);
@@ -80,19 +114,31 @@ const BrowseMenu: FC<Props> = ({ projectUuid }) => {
         projectUuid,
     });
     const { data: favorites } = useFavorites(projectUuid);
+    const { user } = useApp();
+    const dataAppsFlag = useServerFeatureFlag(FeatureFlags.EnableDataApps);
+    const documentsFlag = useServerFeatureFlag(FeatureFlags.Documents);
+    const chartTypesEnabled = useChartTypesEnabled();
+    const canViewDataApps = user.data?.ability?.can('view', 'DataApp') ?? false;
+    // The gallery list endpoint is gated on `manage Explore`, not on data app access.
+    const canViewChartTypes =
+        user.data?.ability?.can(
+            'manage',
+            subject('Explore', {
+                organizationUuid: user.data.organizationUuid,
+                projectUuid,
+            }),
+        ) ?? false;
 
     const hasFavorites = favorites && favorites.length > 0;
     const hasSpaces = isInitialLoading || (spaces && spaces.length > 0);
 
     return (
         <Menu
-            withArrow
-            shadow="lg"
             position="bottom-start"
             arrowOffset={16}
             offset={-2}
             zIndex={getDefaultZIndex('max')}
-            portalProps={{ target: '#navbar-header' }}
+            {...menuProps}
             onChange={(opened) => {
                 if (opened && !hasBeenOpened) {
                     setHasBeenOpened(true);
@@ -101,12 +147,17 @@ const BrowseMenu: FC<Props> = ({ projectUuid }) => {
         >
             <Menu.Target>
                 <Button
+                    aria-label="Browse"
                     variant="default"
                     size="xs"
                     fz="sm"
                     leftSection={
-                        <MantineIcon color="ldGray.6" icon={IconCategory} />
+                        <MantineIcon color="dimmed" icon={IconCategory} />
                     }
+                    // Navigation anchor for scope walkthroughs (data-tour-via);
+                    // the hint is the step's instruction when a path uses it.
+                    data-tour-nav="browse"
+                    data-tour-hint="Click Browse"
                 >
                     Browse
                 </Button>
@@ -115,39 +166,96 @@ const BrowseMenu: FC<Props> = ({ projectUuid }) => {
             <Menu.Dropdown>
                 <Menu.Item
                     component={Link}
-                    to={`/projects/${projectUuid}/spaces`}
+                    to={`/projects/${projectUrlIdentifier}/spaces`}
                     leftSection={<MantineIcon icon={IconFolders} />}
+                    data-tour-nav="all-spaces"
+                    data-tour-hint="Open All Spaces"
+                    // Also the action of the view:Space walkthrough: finding
+                    // content through spaces starts here, and the row picked
+                    // after it opens the space. See scripts/scope-tours.
+                    data-tour-scope="view:Space"
+                    data-tour-step="2"
+                    data-tour-route="/projects/:projectUuid/home"
+                    data-tour-label="Open All Spaces"
+                    data-tour-title="Find content through spaces"
+                    data-tour-interactive="true"
+                    data-tour-via='[data-tour-nav="browse"]'
+                    data-tour-then='[data-tour-anchor="space-row"][data-tour-value="Training"]'
+                    data-tour-docs="explore/search.mdx#browsing-instead-of-searching:p3:1"
                 >
                     All Spaces
                 </Menu.Item>
 
                 <Menu.Item
                     component={Link}
-                    to={`/projects/${projectUuid}/dashboards`}
+                    to={`/projects/${projectUrlIdentifier}/dashboards`}
                     leftSection={<MantineIcon icon={IconLayoutDashboard} />}
+                    data-tour-nav="all-dashboards"
+                    data-tour-hint="Open All dashboards"
                 >
                     All dashboards
                 </Menu.Item>
 
                 <Menu.Item
                     component={Link}
-                    to={`/projects/${projectUuid}/saved`}
+                    to={`/projects/${projectUrlIdentifier}/saved`}
                     leftSection={<MantineIcon icon={IconChartAreaLine} />}
+                    data-tour-nav="all-charts"
+                    data-tour-hint="Open All saved charts"
                 >
                     All saved charts
                 </Menu.Item>
 
+                {documentsFlag.data?.enabled && !documentsFlag.isError && (
+                    <Menu.Item
+                        component={Link}
+                        to={`/projects/${projectUrlIdentifier}/documents`}
+                        leftSection={<MantineIcon icon={IconFileText} />}
+                        data-tour-nav="all-documents"
+                        data-tour-hint="Open All documents"
+                    >
+                        All documents
+                    </Menu.Item>
+                )}
+
+                {dataAppsFlag.data?.enabled && canViewDataApps && (
+                    <Menu.Item
+                        component={Link}
+                        to={`/projects/${projectUuid}/apps`}
+                        leftSection={<MantineIcon icon={IconAppWindow} />}
+                        // Anchor for scope walkthroughs (data-tour-via)
+                        data-tour-nav="all-apps"
+                        data-tour-hint="Open All data apps"
+                    >
+                        All data apps
+                    </Menu.Item>
+                )}
+
+                {chartTypesEnabled.enabled && canViewChartTypes && (
+                    <Menu.Item
+                        component={Link}
+                        to={`/projects/${projectUrlIdentifier}/chart-studio`}
+                        leftSection={<MantineIcon icon={IconPuzzle} />}
+                    >
+                        Chart Studio
+                    </Menu.Item>
+                )}
+
                 {!hasMetrics && (
                     <MetricsLink projectUuid={projectUuid} asMenu />
                 )}
+
+                <ReviewRequestsMenuItem projectUuid={projectUuid} />
 
                 {hasFavorites ? (
                     <>
                         <Menu.Divider />
                         <Menu.Label>Favorites</Menu.Label>
                         <ScrollArea
-                            variant="primary"
-                            className="only-vertical"
+                            scrollbars="y"
+                            classNames={{
+                                content: scrollAreaClasses.verticalContent,
+                            }}
                             scrollbarSize={6}
                             type="hover"
                         >
@@ -158,6 +266,7 @@ const BrowseMenu: FC<Props> = ({ projectUuid }) => {
                                         component={Link}
                                         to={getFavoriteItemUrl(
                                             projectUuid,
+                                            projectUrlIdentifier,
                                             item,
                                         )}
                                         leftSection={
@@ -167,7 +276,7 @@ const BrowseMenu: FC<Props> = ({ projectUuid }) => {
                                         }
                                     >
                                         <TruncatedText maxWidth={200}>
-                                            {item.data.name}
+                                            {getResourceViewItemName(item)}
                                         </TruncatedText>
                                     </Menu.Item>
                                 ))}
@@ -186,15 +295,13 @@ const BrowseMenu: FC<Props> = ({ projectUuid }) => {
                             py={6}
                             gap="xs"
                             justify="space-between"
-                            onClick={() =>
-                                setSpacesExpanded((prev) => !prev)
-                            }
+                            onClick={() => setSpacesExpanded((prev) => !prev)}
                         >
                             <Text fz="xs" fw={500} c="dimmed">
                                 Spaces
                             </Text>
                             <MantineIcon
-                                color="ldGray.6"
+                                color="dimmed"
                                 size={14}
                                 icon={
                                     spacesExpanded
@@ -204,15 +311,18 @@ const BrowseMenu: FC<Props> = ({ projectUuid }) => {
                             />
                         </PolymorphicGroupButton>
 
-                        <Collapse in={spacesExpanded}>
+                        <Collapse expanded={spacesExpanded}>
                             {isInitialLoading ? (
                                 <Center my="sm">
                                     <Loader size="sm" color="gray" />
                                 </Center>
                             ) : (
                                 <ScrollArea
-                                    variant="primary"
-                                    className="only-vertical"
+                                    scrollbars="y"
+                                    classNames={{
+                                        content:
+                                            scrollAreaClasses.verticalContent,
+                                    }}
                                     scrollbarSize={6}
                                     type="hover"
                                 >
@@ -225,14 +335,16 @@ const BrowseMenu: FC<Props> = ({ projectUuid }) => {
                                                 <Menu.Item
                                                     key={space.uuid}
                                                     component={Link}
-                                                    to={`/projects/${projectUuid}/spaces/${space.uuid}`}
+                                                    to={`/projects/${projectUrlIdentifier}/spaces/${space.uuid}`}
                                                     leftSection={
                                                         <MantineIcon
                                                             icon={IconFolder}
                                                         />
                                                     }
                                                 >
-                                                    <TruncatedText maxWidth={200}>
+                                                    <TruncatedText
+                                                        maxWidth={200}
+                                                    >
                                                         {space.name}
                                                     </TruncatedText>
                                                 </Menu.Item>

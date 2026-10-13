@@ -1,17 +1,17 @@
 import {
-    ActionIcon,
+    TextInput,
     Button,
     Flex,
-    Input,
     Stack,
-    TextInput,
+    ActionIcon,
+    InputWrapper,
 } from '@mantine/core';
 import { IconHelpCircle, IconPlus, IconTrash } from '@tabler/icons-react';
 import get from 'lodash/get';
 import { useState, type ReactNode } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import DocumentationHelpButton from '../../DocumentationHelpButton';
 import MantineIcon from '../../common/MantineIcon';
+import DocumentationHelpButton from '../../DocumentationHelpButton';
 import { useFormContext } from '../formContext';
 
 type Props = {
@@ -32,6 +32,7 @@ export const MultiKeyValuePairsInput = ({
 
     const values: { id: string; key: string; value: string }[] =
         get(form.values, name) ?? [];
+    const error = form.errors[name];
 
     const addValue = () => {
         form.insertListItem(name, {
@@ -47,7 +48,7 @@ export const MultiKeyValuePairsInput = ({
     const [isLabelInfoOpen, setIsLabelInfoOpen] = useState<boolean>(false);
 
     return (
-        <Input.Wrapper
+        <InputWrapper
             styles={{
                 label: {
                     display: 'flex',
@@ -79,6 +80,7 @@ export const MultiKeyValuePairsInput = ({
                 </>
             }
             description={isLabelInfoOpen && labelHelp}
+            error={error}
         >
             <Stack>
                 {values.map((value, index) => (
@@ -107,12 +109,12 @@ export const MultiKeyValuePairsInput = ({
                 <Button
                     size="sm"
                     onClick={addValue}
-                    leftIcon={<MantineIcon icon={IconPlus} />}
+                    leftSection={<MantineIcon icon={IconPlus} />}
                     disabled={disabled}
                 >
                     Add variable
                 </Button>
             </Stack>
-        </Input.Wrapper>
+        </InputWrapper>
     );
 };

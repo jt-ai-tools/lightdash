@@ -1,12 +1,21 @@
 import {
-    FilterOperator,
     assertUnreachable,
+    DimensionType,
+    FilterOperator,
+    getFilterTypeFromItemType,
     getItemId,
+    isDashboardDataAppTileType,
     isDashboardFieldTarget,
+    matchFieldByType,
+    matchFieldByTypeAndName,
+    matchFieldExact,
     type DashboardFieldTarget,
+    type DashboardFilterableField,
     type DashboardFilterRule,
     type DashboardTile,
-    type FilterableDimension,
+    type FilterRule,
+    type FilterType,
+    type ResultColumn,
 } from '@lightdash/common';
 import { produce } from 'immer';
 import isEqual from 'lodash/isEqual';
@@ -19,6 +28,51 @@ import isEqual from 'lodash/isEqual';
  * - 'mapped': Tile is explicitly mapped with a specific field configuration
  */
 export type FilterTileRelation = 'auto' | 'disabled' | 'mapped';
+
+export const getValidSqlColumnReferences = (
+    columns: ReadonlyArray<{ reference?: unknown }>,
+): string[] =>
+    columns.flatMap(({ reference }) =>
+        typeof reference === 'string' ? [reference] : [],
+    );
+
+export const getDefaultField = (
+    fields: DashboardFilterableField[],
+    selectedField: DashboardFilterableField,
+) => {
+    return (
+        fields.find(matchFieldExact(selectedField)) ??
+        fields.find(matchFieldByTypeAndName(selectedField)) ??
+        fields.find(matchFieldByType(selectedField))
+    );
+};
+
+// One entry per column name across the SQL chart tiles
+export const getUniqueSqlColumns = (
+    sqlChartTilesMetadata: Record<string, { columns: ResultColumn[] }>,
+): ResultColumn[] => {
+    const allColumns = Object.values(sqlChartTilesMetadata).flatMap(
+        (tileMetadata) => tileMetadata.columns,
+    );
+    const uniqueColumnsMap = new Map(
+        allColumns.map((column) => [column.reference, column]),
+    );
+    return Array.from(uniqueColumnsMap.values());
+};
+
+// The filter type of a SQL column filter: the column's, else the target's
+export const getSqlColumnFilterType = (
+    columns: ResultColumn[],
+    fieldId: string,
+    fallbackType: DimensionType | undefined,
+): FilterType => {
+    const selectedColumn = columns.find(
+        (column) => column.reference === fieldId,
+    );
+    return getFilterTypeFromItemType(
+        selectedColumn?.type ?? fallbackType ?? DimensionType.STRING,
+    );
+};
 
 /**
  * Gets the relationship between a filter and a tile based on tileTargets configuration.
@@ -59,7 +113,7 @@ const tileHasFilterField = (
     filterRule: DashboardFilterRule,
     tile: DashboardTile,
     filterableFieldsByTileUuid:
-        | Record<string, FilterableDimension[]>
+        | Record<string, DashboardFilterableField[]>
         | undefined,
 ): boolean => {
     if (!filterableFieldsByTileUuid) return false;
@@ -85,13 +139,15 @@ export const doesFilterApplyToTile = (
     filterRule: DashboardFilterRule,
     tile: DashboardTile,
     filterableFieldsByTileUuid:
-        | Record<string, FilterableDimension[]>
+        | Record<string, DashboardFilterableField[]>
         | undefined,
 ): boolean => {
     const { relation } = getFilterTileRelation(filterRule, tile.uuid);
 
     switch (relation) {
         case 'auto':
+            if (isDashboardDataAppTileType(tile)) return true;
+
             // Filter automatically applies to tiles that have the field
             return tileHasFilterField(
                 filterRule,
@@ -122,7 +178,7 @@ export const doesFilterApplyToAnyTile = (
     filterRule: DashboardFilterRule,
     dashboardTiles: DashboardTile[] | undefined,
     filterableFieldsByTileUuid:
-        | Record<string, FilterableDimension[]>
+        | Record<string, DashboardFilterableField[]>
         | undefined,
 ): boolean => {
     return (
@@ -150,7 +206,7 @@ export const getTabsForFilterRule = (
     dashboardTiles: DashboardTile[] | undefined,
     sortedTabUuids: string[],
     filterableFieldsByTileUuid:
-        | Record<string, FilterableDimension[]>
+        | Record<string, DashboardFilterableField[]>
         | undefined,
 ): string[] => {
     // Find which tabs have tiles targeted by this filter
@@ -174,8 +230,13 @@ export const hasFilterValueSet = (filterRule: DashboardFilterRule) => {
     switch (filterRule.operator) {
         case FilterOperator.NULL:
         case FilterOperator.NOT_NULL:
+        case FilterOperator.IN_PERIOD_TO_DATE:
             return true;
         case FilterOperator.EQUALS:
+            return (
+                filterRule.includeNull === true ||
+                (filterRule.values && filterRule.values.length > 0)
+            );
         case FilterOperator.NOT_EQUALS:
         case FilterOperator.LESS_THAN:
         case FilterOperator.GREATER_THAN:
@@ -210,6 +271,38 @@ export const hasFilterValueSet = (filterRule: DashboardFilterRule) => {
     }
 };
 
+// What every edit of a rule in the configuration goes through before it is kept
+export const getFilterRuleWithDisabledState = (
+    newFilterRule: DashboardFilterRule,
+    isEditMode: boolean,
+): DashboardFilterRule => {
+    // When a disabled filter has a value set, it should be enabled by setting it to false
+    const isNewFilterDisabled =
+        newFilterRule.disabled && !hasFilterValueSet(newFilterRule);
+
+    // In view mode: if values cleared and not required, set to "any value"
+    const shouldDisableInViewMode =
+        !isEditMode &&
+        !newFilterRule.required &&
+        !hasFilterValueSet(newFilterRule);
+
+    // In edit mode a required filter without a value is valueless
+    // by definition (dashboard save normalizes it to disabled),
+    // so it must not block Apply by demanding a default value
+    const isRequiredWithoutValue =
+        isEditMode &&
+        (!!newFilterRule.required || !!newFilterRule.requiredGroupId) &&
+        !hasFilterValueSet(newFilterRule);
+
+    return {
+        ...newFilterRule,
+        disabled:
+            isNewFilterDisabled ||
+            shouldDisableInViewMode ||
+            isRequiredWithoutValue,
+    };
+};
+
 export const isFilterEnabled = (
     filterRule?: DashboardFilterRule,
     isEditMode?: boolean,
@@ -228,23 +321,39 @@ export const isFilterEnabled = (
     return hasFilterValueSet(filterRule);
 };
 
+// Dashboard rules and chart rules share the fields a saved-value comparison
+// reads, so scheduler overrides on either resource reuse these helpers.
+type RevertableFilterRule = FilterRule & { label?: string };
+
 export const getFilterRuleRevertableObject = (
-    filterRule: DashboardFilterRule,
+    filterRule: RevertableFilterRule,
 ) => {
     return {
         disabled: filterRule.disabled,
         values: filterRule.values,
+        includeNull: filterRule.includeNull,
         operator: filterRule.operator,
         settings: filterRule.settings,
         label: filterRule.label,
     };
 };
 
+// includeNull is tri-state in stored rules (absent/false/true) but binary in
+// behavior, so a comparison must not read undefined vs false as a change.
+const getComparableFilterRuleObject = (filterRule: RevertableFilterRule) => ({
+    ...getFilterRuleRevertableObject(filterRule),
+    includeNull: filterRule.includeNull === true,
+});
+
 export const hasSavedFilterValueChanged = (
-    originalFilterRule: DashboardFilterRule,
-    filterRule: DashboardFilterRule,
+    originalFilterRule: RevertableFilterRule,
+    filterRule: RevertableFilterRule,
 ) => {
-    if (originalFilterRule.disabled && filterRule.values === undefined) {
+    if (
+        originalFilterRule.disabled &&
+        filterRule.values === undefined &&
+        filterRule.includeNull !== true
+    ) {
         return false;
     }
 
@@ -259,7 +368,7 @@ export const hasSavedFilterValueChanged = (
     });
 
     return !isEqual(
-        getFilterRuleRevertableObject(originalFilterRule),
-        getFilterRuleRevertableObject(serializedInternalFilterRule),
+        getComparableFilterRuleObject(originalFilterRule),
+        getComparableFilterRuleObject(serializedInternalFilterRule),
     );
 };

@@ -13,6 +13,7 @@ import {
     selectSqlRunnerResultsRunner,
     setActiveEditorTab,
     setSelectedChartType,
+    setSqlLimit,
 } from './sqlRunnerSlice';
 import { prepareAndFetchChartData, runSqlQuery } from './thunks';
 
@@ -25,7 +26,7 @@ export const addSqlRunnerQueryListener = (
     startListening: typeof startAppListening,
 ) => {
     startListening({
-        matcher: isAnyOf(runSqlQuery.fulfilled),
+        actionCreator: runSqlQuery.fulfilled,
         effect: async (_, listenerApi) => {
             const state = listenerApi.getState();
             const resultsRunner = selectSqlRunnerResultsRunner(state);
@@ -188,3 +189,38 @@ export const addTabSwitchListener = (
         },
     });
 };
+
+/**
+ * Add a listener for when the SQL limit is changed.
+ * This listener will re-fetch the pivot chart data with the new limit
+ * when on the visualization tab.
+ * @param startListening - The startAppListening function from listenerMiddleware.ts
+ */
+export const addLimitChangeListener = (
+    startListening: typeof startAppListening,
+) => {
+    startListening({
+        actionCreator: setSqlLimit,
+        effect: async (_, listenerApi) => {
+            const state = listenerApi.getState();
+            if (state.sqlRunner.activeEditorTab === EditorTabs.VISUALIZATION) {
+                await listenerApi.dispatch(
+                    prepareAndFetchChartData({ forceRefresh: true }),
+                );
+            }
+        },
+    });
+};
+
+export const addAutomaticPivotFailureListener = (
+    startListening: typeof startAppListening,
+    projectUuid: string,
+    onFailure: () => void,
+) =>
+    startListening({
+        actionCreator: prepareAndFetchChartData.rejected,
+        effect: (_, listenerApi) => {
+            if (listenerApi.getState().sqlRunner.projectUuid === projectUuid)
+                onFailure();
+        },
+    });

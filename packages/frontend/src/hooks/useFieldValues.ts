@@ -1,20 +1,114 @@
 import {
+    FeatureFlags,
     getFilterRulesFromGroup,
     getItemId,
+    isDimension,
     isField,
+    QueryHistoryStatus,
+    WarehouseQueryError,
     type AndFilterGroup,
     type ApiError,
+    type ApiExecuteAsyncFieldValueSearchResults,
+    type ApiGetAsyncQueryResults,
+    type DashboardFilterRule,
     type FieldValueSearchResult,
+    type FilterAutocompleteValue,
     type FilterableItem,
     type ParametersValuesMap,
 } from '@lightdash/common';
-import { useQuery, type UseQueryOptions } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+    hashQueryKey,
+    useQuery,
+    type UseQueryOptions,
+} from '@tanstack/react-query';
+import {
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useState,
+} from 'react';
 import { useDebounce } from 'react-use';
 import { lightdashApi } from '../api';
 import useEmbed from '../ee/providers/Embed/useEmbed';
+import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
+import { useSessionTimezone } from './useSessionTimezone';
 
 export const MAX_AUTOCOMPLETE_RESULTS = 50;
+
+type InitialFieldValue = string | FilterAutocompleteValue;
+
+const normalizeFieldValue = (
+    value: InitialFieldValue,
+): FilterAutocompleteValue => (typeof value === 'string' ? { value } : value);
+
+const normalizeSearchResult = (
+    value: unknown,
+): FilterAutocompleteValue | undefined => {
+    if (typeof value === 'string') return { value };
+    if (
+        typeof value === 'object' &&
+        value !== null &&
+        'value' in value &&
+        typeof value.value === 'string'
+    ) {
+        return {
+            value: value.value,
+            label:
+                'label' in value && typeof value.label === 'string'
+                    ? value.label
+                    : undefined,
+        };
+    }
+    return undefined;
+};
+
+const createAutocompleteValueMap = (
+    values: FilterAutocompleteValue[],
+): Map<string, FilterAutocompleteValue> => {
+    const map = new Map<string, FilterAutocompleteValue>();
+    values.forEach((option) => {
+        if (!map.has(option.value)) {
+            map.set(option.value, option);
+        }
+    });
+    return map;
+};
+
+const filterStaticValues = (
+    values: FilterAutocompleteValue[],
+    search: string,
+) => {
+    const normalizedSearch = search.toLowerCase();
+    if (normalizedSearch.length === 0) return values;
+
+    return values.filter(
+        ({ value, label }) =>
+            value.toLowerCase().includes(normalizedSearch) ||
+            (label?.toLowerCase().includes(normalizedSearch) ?? false),
+    );
+};
+
+/**
+ * Strip tileTargets from filter rules before sending to the API.
+ * tileTargets are only used client-side to determine filter-tile relationships
+ * and can be very large (100+ entries per filter), bloating the request payload.
+ */
+const stripTileTargetsFromFilters = (
+    filters: AndFilterGroup | undefined,
+): AndFilterGroup | undefined => {
+    if (!filters) return undefined;
+    return {
+        ...filters,
+        and: filters.and.map((rule) => {
+            if ('tileTargets' in rule) {
+                const { tileTargets, ...rest } = rule as DashboardFilterRule;
+                return rest;
+            }
+            return rule;
+        }),
+    };
+};
 
 const getEmbedFilterValues = async (options: {
     embedToken: string;
@@ -23,6 +117,10 @@ const getEmbedFilterValues = async (options: {
     search: string;
     forceRefresh: boolean;
     filters: AndFilterGroup | undefined;
+    tableName: string | undefined;
+    fieldId: string | undefined;
+    timezone: string | null;
+    parameters: ParametersValuesMap | undefined;
 }) => {
     return lightdashApi<FieldValueSearchResult>({
         url: `/embed/${options.projectId}/filter/${options.filterId}/search`,
@@ -30,8 +128,12 @@ const getEmbedFilterValues = async (options: {
         body: JSON.stringify({
             search: options.search,
             limit: MAX_AUTOCOMPLETE_RESULTS,
-            filters: options.filters,
+            filters: stripTileTargetsFromFilters(options.filters),
             forceRefresh: options.forceRefresh,
+            tableName: options.tableName,
+            fieldId: options.fieldId,
+            timezone: options.timezone ?? undefined,
+            parameters: options.parameters,
         }),
     });
 };
@@ -57,16 +159,152 @@ const getFieldValues = async (
             search,
             limit,
             table,
-            filters,
+            filters: stripTileTargetsFromFilters(filters),
             forceRefresh,
             parameters: parameterValues,
         }),
     });
 };
 
+// ~3 minutes with backoff (250ms → 2s): cold warehouse scans can far exceed
+// 30s, and giving up while the query is still running reproduces the
+// empty-dropdown failure the async path exists to avoid.
+export const MAX_POLL_ATTEMPTS = 95;
+
+export const pollForFieldValueResults = async (
+    projectUuid: string,
+    queryUuid: string,
+    backoffMs: number = 250,
+    attempt: number = 0,
+): Promise<ApiGetAsyncQueryResults> => {
+    if (attempt >= MAX_POLL_ATTEMPTS) {
+        throw new WarehouseQueryError('Field value search timed out.');
+    }
+
+    const results = await lightdashApi<ApiGetAsyncQueryResults>({
+        url: `/projects/${projectUuid}/query/${queryUuid}`,
+        version: 'v2',
+        method: 'GET',
+        body: undefined,
+    });
+
+    if (
+        results.status === QueryHistoryStatus.PENDING ||
+        results.status === QueryHistoryStatus.QUEUED ||
+        results.status === QueryHistoryStatus.EXECUTING
+    ) {
+        const nextBackoff = Math.min(backoffMs * 2, 2000);
+        await new Promise((resolve) => {
+            setTimeout(resolve, backoffMs);
+        });
+        return pollForFieldValueResults(
+            projectUuid,
+            queryUuid,
+            nextBackoff,
+            attempt + 1,
+        );
+    }
+
+    return results;
+};
+
+export const getFieldValuesAsync = async (
+    projectId: string,
+    table: string | undefined,
+    fieldId: string,
+    search: string,
+    forceRefresh: boolean,
+    filters: AndFilterGroup | undefined,
+    limit: number = MAX_AUTOCOMPLETE_RESULTS,
+    parameterValues?: ParametersValuesMap,
+): Promise<FieldValueSearchResult> => {
+    if (!table) {
+        throw new Error('Table is required to search for field values');
+    }
+
+    const executeResult =
+        await lightdashApi<ApiExecuteAsyncFieldValueSearchResults>({
+            url: `/projects/${projectId}/query/field-values`,
+            version: 'v2',
+            method: 'POST',
+            body: JSON.stringify({
+                table,
+                fieldId,
+                search,
+                limit,
+                filters: stripTileTargetsFromFilters(filters),
+                forceRefresh,
+                parameters: parameterValues,
+            }),
+        });
+
+    const queryResult = await pollForFieldValueResults(
+        projectId,
+        executeResult.queryUuid,
+    );
+
+    if (
+        queryResult.status === QueryHistoryStatus.ERROR ||
+        queryResult.status === QueryHistoryStatus.EXPIRED
+    ) {
+        throw new WarehouseQueryError(
+            queryResult.error || 'Error fetching field values',
+        );
+    }
+
+    if (queryResult.status !== QueryHistoryStatus.READY) {
+        throw new Error('Unexpected query status');
+    }
+
+    // The backend may rewrite the fieldId (e.g. aliased joins), so read the
+    // value/label column keys from the execute response instead
+    const valueColumn =
+        executeResult.valueFieldId ??
+        Object.keys(queryResult.columns)[0] ??
+        fieldId;
+    const labelColumn = executeResult.labelFieldId;
+
+    const readCell = (
+        row: (typeof queryResult.rows)[number],
+        column: string,
+    ): string | undefined => {
+        const cell = row[column];
+        if (!cell?.value) return undefined;
+        const { raw } = cell.value;
+        if (raw === null || raw === undefined) return undefined;
+        return String(raw);
+    };
+
+    const results: string[] = [];
+    const resultsWithLabels: FilterAutocompleteValue[] = [];
+    const seenValues = new Set<string>();
+    queryResult.rows.forEach((row) => {
+        const value = readCell(row, valueColumn);
+        if (value === undefined || seenValues.has(value)) return;
+        seenValues.add(value);
+        results.push(value);
+        if (labelColumn) {
+            resultsWithLabels.push({
+                value,
+                label: readCell(row, labelColumn) ?? value,
+            });
+        }
+    });
+
+    return {
+        search,
+        results,
+        ...(labelColumn ? { resultsWithLabels } : {}),
+        cached: executeResult.cacheMetadata.cacheHit,
+        refreshedAt: executeResult.cacheMetadata.cacheUpdatedTime
+            ? new Date(executeResult.cacheMetadata.cacheUpdatedTime)
+            : new Date(),
+    };
+};
+
 export const useFieldValues = (
     search: string,
-    initialData: string[],
+    initialData: InitialFieldValue[],
     projectId: string | undefined,
     field: FilterableItem,
     filterId: string | undefined,
@@ -76,15 +314,47 @@ export const useFieldValues = (
     useQueryOptions?: UseQueryOptions<FieldValueSearchResult, ApiError>,
     parameterValues?: ParametersValuesMap,
 ) => {
-    const { embedToken } = useEmbed();
+    const { embedToken, content: embedContent } = useEmbed();
+    const sessionTimezone = useSessionTimezone();
+    const { data: resultsCacheFlag } = useServerFeatureFlag(
+        FeatureFlags.ResultsCacheEnabled,
+    );
+    const useAsyncPath = resultsCacheFlag?.enabled === true;
+    const filterAutocomplete = isDimension(field)
+        ? field.filterAutocomplete
+        : undefined;
+    const initialOptions = useMemo(
+        () => [
+            ...(filterAutocomplete?.values ?? []),
+            ...initialData.map(normalizeFieldValue),
+        ],
+        [filterAutocomplete?.values, initialData],
+    );
     const [fieldName, setFieldName] = useState<string>(field.name);
     const [debouncedSearch, setDebouncedSearch] = useState<string>(search);
     const [searches, setSearches] = useState(new Set<string>());
-    const [results, setResults] = useState(new Set(initialData));
+    const [resultValueMap, setResultValueMap] = useState(
+        createAutocompleteValueMap(initialOptions),
+    );
     const [resultCounts, setResultCounts] = useState<Map<string, number>>(
         new Map(),
     );
     const [refreshedAt, setRefreshedAt] = useState<Date>(new Date());
+
+    const filtersKey = useMemo(
+        () => hashQueryKey([stripTileTargetsFromFilters(filters)?.and ?? []]),
+        [filters],
+    );
+    const [previousFiltersKey, setPreviousFiltersKey] = useState(filtersKey);
+
+    useLayoutEffect(() => {
+        if (previousFiltersKey !== filtersKey) {
+            setPreviousFiltersKey(filtersKey);
+            setSearches(new Set<string>());
+            setResultValueMap(createAutocompleteValueMap(initialOptions));
+            setResultCounts(new Map());
+        }
+    }, [filtersKey, previousFiltersKey, initialOptions]);
 
     const tableName = useMemo(
         () => (isField(field) ? field.table : undefined),
@@ -94,31 +364,42 @@ export const useFieldValues = (
     const fieldId = useMemo(() => getItemId(field), [field]);
 
     const handleUpdateResults = useCallback(
-        (data: FieldValueSearchResult<string>) => {
+        (data: FieldValueSearchResult<FilterAutocompleteValue>) => {
             if (getFilterRulesFromGroup(filters).length > 0) {
                 setSearches(new Set<string>());
-                setResults(new Set(initialData));
+                setResultValueMap(createAutocompleteValueMap(initialOptions));
                 setResultCounts(new Map());
             }
             setRefreshedAt(new Date(data.refreshedAt));
-            setSearches((s) => {
-                return s.add(data.search);
+            setSearches((previousSearches) => {
+                const nextSearches = new Set(previousSearches);
+                nextSearches.add(data.search);
+                return nextSearches;
             });
 
-            setResultCounts((map) => {
-                return map.set(data.search, data.results.length);
+            setResultCounts((previousResultCounts) => {
+                const nextResultCounts = new Map(previousResultCounts);
+                nextResultCounts.set(data.search, data.results.length);
+                return nextResultCounts;
             });
 
-            setResults((oldSet) => {
-                return new Set(
-                    [...oldSet, ...data.results].sort((a, b) =>
-                        a.localeCompare(b),
-                    ),
-                );
+            setResultValueMap((oldMap) => {
+                const nextMap = new Map(oldMap);
+                data.results.forEach((option) => {
+                    if (!nextMap.has(option.value)) {
+                        nextMap.set(option.value, option);
+                    }
+                });
+                return nextMap;
             });
         },
-        [filters, initialData],
+        [filters, initialOptions],
     );
+    const hasStaticAutocompleteValues = initialOptions.length > 0;
+    const shouldUseStaticValues =
+        !!filterAutocomplete &&
+        (!filterAutocomplete.fetchFromWarehouse ||
+            (hasStaticAutocompleteValues && debouncedSearch.length === 0));
     const cachekey = [
         'project',
         projectId,
@@ -127,10 +408,29 @@ export const useFieldValues = (
         'search',
         debouncedSearch,
         parameterValues,
+        useAsyncPath ? 'v2' : 'v1',
+        sessionTimezone,
+        filtersKey,
     ];
+
     const query = useQuery<FieldValueSearchResult, ApiError>(
         cachekey,
         () => {
+            // Dashboard embeds use async execute+poll: the sync embed search
+            // runs the warehouse query inside one HTTP request and dies at
+            // the gateway when a cold warehouse scan is slow.
+            if (embedToken && embedContent?.type === 'dashboard' && projectId) {
+                return getFieldValuesAsync(
+                    projectId,
+                    tableName,
+                    fieldId,
+                    debouncedSearch,
+                    forceRefresh,
+                    filters,
+                    undefined,
+                    parameterValues,
+                );
+            }
             if (embedToken && filterId && projectId) {
                 return getEmbedFilterValues({
                     embedToken,
@@ -139,9 +439,14 @@ export const useFieldValues = (
                     search: debouncedSearch,
                     forceRefresh,
                     filters,
+                    tableName,
+                    fieldId,
+                    timezone: sessionTimezone,
+                    parameters: parameterValues,
                 });
-            } else {
-                return getFieldValues(
+            }
+            if (useAsyncPath) {
+                return getFieldValuesAsync(
                     projectId!,
                     tableName,
                     fieldId,
@@ -152,6 +457,16 @@ export const useFieldValues = (
                     parameterValues,
                 );
             }
+            return getFieldValues(
+                projectId!,
+                tableName,
+                fieldId,
+                debouncedSearch,
+                forceRefresh,
+                filters,
+                undefined,
+                parameterValues,
+            );
         },
         {
             // make sure we don't cache for too long
@@ -160,14 +475,17 @@ export const useFieldValues = (
             enabled:
                 !!tableName &&
                 !!projectId &&
+                !shouldUseStaticValues &&
                 useQueryOptions?.enabled !== false,
             staleTime: 0,
             onSuccess: (data) => {
-                const { results: newResults, search: newSearch } = data;
+                const { search: newSearch } = data;
+                const newResults = data.resultsWithLabels ?? data.results;
 
-                const normalizedNewResults = newResults.filter(
-                    (result): result is string => typeof result === 'string',
-                );
+                const normalizedNewResults = newResults.flatMap((result) => {
+                    const normalizedResult = normalizeSearchResult(result);
+                    return normalizedResult ? [normalizedResult] : [];
+                });
 
                 const normalizedData = {
                     search: newSearch,
@@ -194,10 +512,37 @@ export const useFieldValues = (
         if (!!fieldName && field.name !== fieldName) {
             setFieldName(field.name);
             setSearches(new Set<string>());
-            setResults(new Set(initialData));
+            setResultValueMap(createAutocompleteValueMap(initialOptions));
             setResultCounts(new Map());
         }
-    }, [initialData, fieldName, field.name, forceRefresh]);
+    }, [initialOptions, fieldName, field.name, forceRefresh]);
+
+    const reset = useCallback(() => {
+        setSearches(new Set<string>());
+        setResultValueMap(createAutocompleteValueMap(initialOptions));
+        setResultCounts(new Map());
+    }, [initialOptions]);
+
+    const staticFilteredOptions = useMemo(
+        () => filterStaticValues(initialOptions, search),
+        [initialOptions, search],
+    );
+
+    const staticResultValueMap = useMemo(
+        () => createAutocompleteValueMap(staticFilteredOptions),
+        [staticFilteredOptions],
+    );
+
+    const activeResultValueMap = shouldUseStaticValues
+        ? staticResultValueMap
+        : resultValueMap;
+    const results = useMemo(
+        () =>
+            [...activeResultValueMap.values()].sort((a, b) =>
+                a.value.localeCompare(b.value),
+            ),
+        [activeResultValueMap],
+    );
 
     return {
         ...query,
@@ -206,6 +551,7 @@ export const useFieldValues = (
         results,
         resultCounts,
         refreshedAt,
+        reset,
     };
 };
 
@@ -274,6 +620,7 @@ export const useFieldValuesSafely = (
             results: undefined,
             resultCounts: undefined,
             refreshedAt: undefined,
+            reset: undefined,
         };
     }
 

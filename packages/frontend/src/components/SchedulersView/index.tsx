@@ -1,19 +1,21 @@
 import {
     ActionIcon,
+    Button,
     Card,
     Group,
     Stack,
     Tabs,
     Title,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconClock, IconRefresh, IconSend } from '@tabler/icons-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { type FC, useCallback, useMemo, useState } from 'react';
+import { useState, type FC } from 'react';
 import { useSearchParams } from 'react-router';
-import { useGetSlack, useSlackChannels } from '../../hooks/slack/useSlack';
+import { useGetSlackChannelName } from '../../hooks/slack/useGetSlackChannelName';
 import useToaster from '../../hooks/toaster/useToaster';
 import MantineIcon from '../common/MantineIcon';
+import { SettingsPage } from '../common/Settings/SettingsPage';
 import LogsTable from './LogsTable';
 import SchedulersTable from './SchedulersTable';
 import classes from './SchedulersView.module.css';
@@ -32,45 +34,13 @@ const SchedulersView: FC<{ projectUuid?: string; isUserScope?: boolean }> = ({
             ? SchedulersViewTab.RUN_HISTORY
             : SchedulersViewTab.ALL_SCHEDULERS;
 
-    const {
-        data: slackInstallation,
-        isInitialLoading: isLoadingSlackInstallation,
-    } = useGetSlack();
-    const organizationHasSlack = !!slackInstallation?.organizationUuid;
-
     // Track slack channel IDs from scheduler data to ensure they're included in the query
     const [schedulerSlackChannelIds, setSchedulerSlackChannelIds] = useState<
         string[]
     >([]);
-
-    const slackChannelsQuery = useSlackChannels(
-        '',
-        {
-            excludeArchived: false,
-            includeChannelIds:
-                schedulerSlackChannelIds.length > 0
-                    ? schedulerSlackChannelIds
-                    : undefined,
-        },
-        { enabled: organizationHasSlack && !isLoadingSlackInstallation },
-    );
-
-    // Create a map of Slack channel ID -> name
-    const slackChannelMap = useMemo(() => {
-        const map = new Map<string, string>();
-        slackChannelsQuery?.data?.forEach((channel) => {
-            map.set(channel.id, channel.name);
-        });
-        return map;
-    }, [slackChannelsQuery?.data]);
-
-    // Callback to get Slack channel name from ID
-    const getSlackChannelName = useCallback(
-        (channelId: string): string | null => {
-            return slackChannelMap.get(channelId) || null;
-        },
-        [slackChannelMap],
-    );
+    const { getSlackChannelName } = useGetSlackChannelName({
+        includeChannelIds: schedulerSlackChannelIds,
+    });
 
     const handleTabChange = (value: string | null) => {
         const newParams = new URLSearchParams(searchParams);
@@ -95,6 +65,31 @@ const SchedulersView: FC<{ projectUuid?: string; isUserScope?: boolean }> = ({
         });
     };
 
+    if (isUserScope) {
+        return (
+            <SettingsPage
+                title="My scheduled deliveries"
+                description="Review and manage deliveries scheduled across your projects."
+                actions={
+                    <Button
+                        size="xs"
+                        variant="white"
+                        leftSection={<MantineIcon icon={IconRefresh} />}
+                        onClick={handleRefresh}
+                    >
+                        Refresh
+                    </Button>
+                }
+            >
+                <SchedulersTable
+                    getSlackChannelName={getSlackChannelName}
+                    onSlackChannelIdsChange={setSchedulerSlackChannelIds}
+                    isUserScope
+                />
+            </SettingsPage>
+        );
+    }
+
     return (
         <Card>
             <Stack gap="sm">
@@ -103,12 +98,6 @@ const SchedulersView: FC<{ projectUuid?: string; isUserScope?: boolean }> = ({
                     value={activeTab}
                     onChange={handleTabChange}
                     variant="pills"
-                    classNames={{
-                        list: classes.tabsList,
-                        tab: classes.tab,
-                        tabSection: classes.tabSection,
-                        panel: classes.panel,
-                    }}
                 >
                     <Group
                         gap="xs"
@@ -118,14 +107,10 @@ const SchedulersView: FC<{ projectUuid?: string; isUserScope?: boolean }> = ({
                     >
                         <Title order={5}>Scheduled Deliveries</Title>
                         <Tooltip label="Click to refresh the status of the scheduled deliveries">
-                            <ActionIcon
-                                onClick={handleRefresh}
-                                variant="subtle"
-                                size="xs"
-                            >
+                            <ActionIcon onClick={handleRefresh} size="xs">
                                 <MantineIcon
                                     icon={IconRefresh}
-                                    color="ldGray.6"
+                                    color="dimmed"
                                     stroke={2}
                                 />
                             </ActionIcon>
@@ -138,36 +123,31 @@ const SchedulersView: FC<{ projectUuid?: string; isUserScope?: boolean }> = ({
                         >
                             All schedulers
                         </Tabs.Tab>
-                        {!isUserScope && (
-                            <Tabs.Tab
-                                value={SchedulersViewTab.RUN_HISTORY}
-                                leftSection={<MantineIcon icon={IconClock} />}
-                            >
-                                Run history
-                            </Tabs.Tab>
-                        )}
+                        <Tabs.Tab
+                            value={SchedulersViewTab.RUN_HISTORY}
+                            leftSection={<MantineIcon icon={IconClock} />}
+                        >
+                            Run history
+                        </Tabs.Tab>
                     </Tabs.List>
 
                     <Tabs.Panel value={SchedulersViewTab.ALL_SCHEDULERS}>
-                        {(isUserScope || projectUuid) && (
+                        {projectUuid ? (
                             <SchedulersTable
                                 projectUuid={projectUuid}
                                 getSlackChannelName={getSlackChannelName}
                                 onSlackChannelIdsChange={
                                     setSchedulerSlackChannelIds
                                 }
-                                isUserScope={isUserScope}
                             />
-                        )}
+                        ) : null}
                     </Tabs.Panel>
-                    {!isUserScope && (
-                        <Tabs.Panel value={SchedulersViewTab.RUN_HISTORY}>
-                            <LogsTable
-                                projectUuid={projectUuid}
-                                getSlackChannelName={getSlackChannelName}
-                            />
-                        </Tabs.Panel>
-                    )}
+                    <Tabs.Panel value={SchedulersViewTab.RUN_HISTORY}>
+                        <LogsTable
+                            projectUuid={projectUuid}
+                            getSlackChannelName={getSlackChannelName}
+                        />
+                    </Tabs.Panel>
                 </Tabs>
             </Stack>
         </Card>

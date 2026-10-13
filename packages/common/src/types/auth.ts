@@ -3,6 +3,7 @@ import {
     type DashboardFilterInteractivityOptions,
     type ParameterInteractivityOptions,
 } from '../ee';
+import { type AgentConnectionGrant } from './agentConnectionGrants';
 import { ForbiddenError } from './errors';
 import { type Organization } from './organization';
 import {
@@ -11,6 +12,7 @@ import {
     type IntrinsicUserAttributes,
     type LightdashSessionUser,
     type LightdashUser,
+    type SessionUser,
 } from './user';
 import { type UserAttributeValueMap } from './userAttributes';
 
@@ -46,7 +48,21 @@ export type JwtAuth = {
 export type ServiceAccountAuth = {
     type: 'service-account';
     source: string; // The service account token
+    serviceAccountUuid: string;
+    serviceAccountDescription: string;
 };
+
+export type OAuthAgentConnectionGrant = Pick<
+    AgentConnectionGrant,
+    | 'grantUuid'
+    | 'approvedProjectUuids'
+    | 'approvedCapabilities'
+    | 'expiresAt'
+    | 'clientId'
+    | 'resource'
+    | 'resourceConstraints'
+    | 'grantContractVersion'
+> & { revision: number };
 
 export type OauthAuth = {
     type: 'oauth';
@@ -54,6 +70,7 @@ export type OauthAuth = {
     token: string;
     clientId: string;
     scopes: string[];
+    agentConnectionGrant: OAuthAgentConnectionGrant | null;
     expiresAt?: number;
     resource?: URL;
 };
@@ -66,6 +83,8 @@ export type OssEmbed = {
     allowAllDashboards: boolean;
     chartUuids: string[];
     allowAllCharts: boolean;
+    allowAllApps: boolean;
+    appUuids: string[];
     createdAt: string;
     user: Pick<LightdashUser, 'userUuid' | 'firstName' | 'lastName'> | null;
 };
@@ -92,8 +111,18 @@ export type EmbedContent = {
     chartUuids: string[];
     /** Explores available to the embedded dashboard */
     explores: string[];
+    /** The data app UUID the JWT may have access to (standalone app embed) */
+    appUuid?: string;
+    /** The AI agent UUID the JWT may have access to */
+    agentUuid?: string;
     /** The type of content */
-    type: 'dashboard' | 'chart';
+    type:
+        | 'dashboard'
+        | 'chart'
+        | 'dataApp'
+        | 'aiAgent'
+        | 'metricsCatalog'
+        | 'apiAccess';
 };
 
 export type EmbedAccess = {
@@ -130,12 +159,23 @@ export type AccountOrganization = Partial<
 >;
 
 /**
+ * Per-request metadata captured by the auth middleware. Used by the audit log
+ * to record the IP, user agent and request id alongside permission checks.
+ */
+export type AccountRequestContext = {
+    ip?: string;
+    userAgent?: string;
+    requestId?: string;
+};
+
+/**
  * Base account interface that all account types extend
  */
 export type BaseAccount = {
     organization: AccountOrganization;
     authentication: Authentication;
     user: AccountUser;
+    requestContext?: AccountRequestContext;
 };
 
 type BaseAccountWithHelpers = BaseAccount & AccountHelpers;
@@ -154,6 +194,14 @@ export type SessionAccount = BaseAccountWithHelpers & {
 export type AnonymousAccount = BaseAccountWithHelpers & {
     authentication: JwtAuth;
     user: ExternalUser;
+    embedWriteUser?: SessionUser;
+    embedWriteContext?: {
+        canUpdateDashboard: boolean;
+        canUpdateSavedChart: boolean;
+        canCreateSavedChart: boolean;
+        canUseAiAgent: boolean;
+        aiAgentErrorMessage?: string;
+    };
     /** The access permissions the account has */
     access: EmbedAccess;
     /** The embed configuration associated with the JWT */
@@ -182,6 +230,8 @@ export type Account =
     | ServiceAcctAccount
     | OauthAccount;
 
+export type RegisteredAccount = Exclude<Account, AnonymousAccount>;
+
 export type AccountWithoutHelpers<T extends Account> = Omit<
     T,
     keyof AccountHelpers
@@ -205,6 +255,23 @@ export function assertSessionAuth(
             `${account?.authentication.type} Account is not session auth`,
         );
     }
+}
+
+export function assertRegisteredAccount(
+    account: Account | undefined,
+): asserts account is RegisteredAccount {
+    if (!account) {
+        throw new ForbiddenError('Account is required');
+    }
+    if (account.user.type !== 'registered') {
+        throw new ForbiddenError('Account is not a registered user');
+    }
+}
+
+export function isAccount(
+    accountOrUser: Account | SessionUser,
+): accountOrUser is Account {
+    return 'authentication' in accountOrUser;
 }
 
 export function isJwtUser(account?: Account): account is AnonymousAccount {

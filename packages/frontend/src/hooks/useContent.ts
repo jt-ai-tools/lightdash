@@ -1,12 +1,12 @@
 import {
     assertUnreachable,
+    ContentType,
     type ApiContentActionBody,
     type ApiContentBulkActionBody,
     type ApiContentResponse,
     type ApiError,
     type ApiSuccessEmpty,
     type ContentSortByColumns,
-    type ContentType,
 } from '@lightdash/common';
 import { IconArrowRight } from '@tabler/icons-react';
 import {
@@ -25,13 +25,28 @@ import useToaster from './toaster/useToaster';
 export type ContentArgs = {
     projectUuids: string[];
     spaceUuids?: string[];
+    uuids?: string[];
     contentTypes?: ContentType[];
     pageSize?: number;
     page?: number;
     search?: string;
     sortBy?: ContentSortByColumns;
     sortDirection?: 'asc' | 'desc';
+    // Opt in to surfacing the caller's personal (space-less) data apps.
+    includePersonalDataApps?: boolean;
+    // Opt in to surfacing the caller's personal (space-less) Documents.
+    includePersonalDocuments?: boolean;
+    // 'exclude' hides data app vizs (reusable custom chart types); 'only'
+    // returns just them.
+    dataAppVizsFilter?: 'exclude' | 'only';
+    // Restrict to dashboards owned by these users (other content types are excluded)
+    ownerUserUuids?: string[];
+    // Only resources directly granted to the caller or their groups.
+    sharedWithMe?: boolean;
 };
+
+const contentTypeLabel = (contentType: ContentType): string =>
+    contentType === ContentType.DATA_APP ? 'data app' : contentType;
 
 function createQueryString(params: Record<string, any>): string {
     const query = new URLSearchParams();
@@ -118,6 +133,9 @@ export const invalidateContent = async (
 ) => {
     await Promise.all([
         queryClient.invalidateQueries(['content']),
+        queryClient.invalidateQueries(['documents', projectUuid]),
+        queryClient.invalidateQueries(['document', projectUuid]),
+        queryClient.invalidateQueries(['document-chart-query', projectUuid]),
         queryClient.invalidateQueries(['dashboards']),
         queryClient.invalidateQueries(['most-popular-and-recently-updated']),
         queryClient.invalidateQueries(['pinned_items']),
@@ -169,7 +187,9 @@ export const useContentAction = (
             switch (action.type) {
                 case 'move':
                     return showToastSuccess({
-                        title: `Successfully moved ${variables.item.contentType} to a space`,
+                        title: `Successfully moved ${contentTypeLabel(
+                            variables.item.contentType,
+                        )} to a space`,
                         action: {
                             children: 'Go to space',
                             icon: IconArrowRight,
@@ -185,7 +205,9 @@ export const useContentAction = (
                 case 'delete':
                     await queryClient.invalidateQueries(['deletedContent']);
                     return showToastSuccess({
-                        title: `Successfully deleted ${item.contentType}.`,
+                        title: `Successfully deleted ${contentTypeLabel(
+                            item.contentType,
+                        )}.`,
                         action: isSoftDeleteEnabled
                             ? {
                                   children: 'Go to recently deleted',
@@ -207,7 +229,7 @@ export const useContentAction = (
         },
         onError: (error, variables, context) => {
             showToastApiError({
-                title: `Failed to move content`,
+                title: `Failed to ${variables.action.type} content`,
                 apiError: error.error,
             });
 

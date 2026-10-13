@@ -1,18 +1,25 @@
 import {
-    DashboardTileTypes,
     assertUnreachable,
+    DashboardTileTypes,
     type Dashboard,
+    type DashboardDataAppTileProperties,
     type DashboardHeadingTileProperties,
     type DashboardLoomTileProperties,
     type DashboardMarkdownTile,
     type DashboardMarkdownTileProperties,
 } from '@lightdash/common';
-import { Button, Stack, type ModalProps } from '@mantine-8/core';
+import { Button, Stack, type ModalProps } from '@mantine/core';
 import { useForm, type UseFormReturnType } from '@mantine/form';
-import { IconHeading, IconMarkdown, IconVideo } from '@tabler/icons-react';
+import {
+    IconAppWindow,
+    IconHeading,
+    IconMarkdown,
+    IconVideo,
+} from '@tabler/icons-react';
 import { produce } from 'immer';
 import { useMemo } from 'react';
 import MantineModal from '../../common/MantineModal';
+import DataAppTileEditForm from './DataAppTileEditForm';
 import HeadingTileForm from './HeadingTileForm';
 import LoomTileForm from './LoomTileForm';
 import MarkdownTileForm from './MarkdownTileForm';
@@ -21,8 +28,10 @@ import { getLoomId, markdownTileContentTransform } from './utils';
 type Tile = Dashboard['tiles'][number];
 type TileProperties = Tile['properties'];
 
-interface TileUpdateModalProps<T>
-    extends Pick<ModalProps, 'opened' | 'onClose' | 'className'> {
+interface TileUpdateModalProps<T> extends Pick<
+    ModalProps,
+    'opened' | 'onClose' | 'className'
+> {
     tile: T;
     onConfirm?: (tile: T) => void;
 }
@@ -52,6 +61,7 @@ const TileUpdateModal = <T extends Tile>({
         if (tile.type === DashboardTileTypes.LOOM)
             return { ...urlValidator, ...titleValidator };
         if (tile.type === DashboardTileTypes.HEADING) return textValidator;
+        if (tile.type === DashboardTileTypes.DATA_APP) return titleValidator;
     };
 
     const form = useForm<TileProperties>({
@@ -86,6 +96,8 @@ const TileUpdateModal = <T extends Tile>({
                 return IconVideo;
             case DashboardTileTypes.HEADING:
                 return IconHeading;
+            case DashboardTileTypes.DATA_APP:
+                return IconAppWindow;
             case DashboardTileTypes.SAVED_CHART:
                 return undefined;
             case DashboardTileTypes.SQL_CHART:
@@ -104,6 +116,8 @@ const TileUpdateModal = <T extends Tile>({
                 return 'Edit loom tile';
             case DashboardTileTypes.HEADING:
                 return 'Edit heading tile';
+            case DashboardTileTypes.DATA_APP:
+                return 'Edit data app tile';
             case DashboardTileTypes.SAVED_CHART:
                 return 'Edit saved_chart tile';
             case DashboardTileTypes.SQL_CHART:
@@ -158,6 +172,14 @@ const TileUpdateModal = <T extends Tile>({
                             form={
                                 form as UseFormReturnType<
                                     DashboardHeadingTileProperties['properties']
+                                >
+                            }
+                        />
+                    ) : tile.type === DashboardTileTypes.DATA_APP ? (
+                        <DataAppTileEditForm
+                            form={
+                                form as UseFormReturnType<
+                                    DashboardDataAppTileProperties['properties']
                                 >
                             }
                         />

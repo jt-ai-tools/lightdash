@@ -1,6 +1,12 @@
 import {
+    escapeParameterValue,
+    getParameterReferences,
+    isReservedParameterName,
     parameterRegex,
+    renderLiquidSql,
     UnexpectedServerError,
+    type EscapedParameterValue,
+    type FieldsContext,
     type ParameterDefinitions,
     type ParametersValuesMap,
     type WarehouseSqlBuilder,
@@ -59,21 +65,14 @@ const validateAndSanitizeDate = (value: unknown): string => {
 const escapeParameterValues = (
     parameters: ParametersValuesMap,
     escapeString: (value: string) => string,
-): ParametersValuesMap => {
-    const escapedParameters: ParametersValuesMap = {};
+): Record<string, EscapedParameterValue> => {
+    const escapedParameters: Record<string, EscapedParameterValue> = {};
 
     Object.entries(parameters).forEach(([key, value]) => {
-        if (Array.isArray(value)) {
-            // Handle array of strings or numbers
-            const escapedArray = value.map((item) =>
-                typeof item === 'number' ? item : escapeString(item),
-            );
-            escapedParameters[key] = escapedArray as string[] | number[];
-        } else {
-            // Handle single string or number
-            escapedParameters[key] =
-                typeof value === 'number' ? value : escapeString(value);
-        }
+        escapedParameters[key] = escapeParameterValue(value, {
+            escapeString,
+            allowMixedArrayValues: true,
+        });
     });
 
     return escapedParameters;
@@ -86,6 +85,7 @@ export const safeReplaceParameters = ({
     quoteChar,
     wrapChar,
     cast,
+    allowEmptyKeys,
 }: {
     sql: string;
     parameterValuesMap: ParametersValuesMap;
@@ -93,6 +93,7 @@ export const safeReplaceParameters = ({
     quoteChar: string;
     wrapChar?: string;
     cast?: 'DATE';
+    allowEmptyKeys?: Set<string>;
 }) => {
     // Don't allow empty quote char
     if (quoteChar === '') {
@@ -111,6 +112,7 @@ export const safeReplaceParameters = ({
             replacementName: 'parameter',
             throwOnMissing: false,
             cast,
+            allowEmptyKeys,
         },
     );
 };
@@ -161,21 +163,52 @@ export const safeReplaceParametersWithTypes = ({
     parameterDefinitions,
     sqlBuilder,
     wrapChar,
+    fieldsContext,
 }: {
     sql: string;
     parameterValuesMap: ParametersValuesMap;
     parameterDefinitions?: ParameterDefinitions;
     sqlBuilder: WarehouseSqlBuilder;
     wrapChar?: string;
+    fieldsContext?: FieldsContext;
 }) => {
+    // Render Liquid template blocks ({% if %}/{% elsif %}/{% else %}/{% endif %})
+    // before parameter substitution. This evaluates conditional SQL based on parameter values
+    // and query context (field introspection via ld.query.fields/filters).
+    const liquidRenderedSql = renderLiquidSql(
+        sql,
+        parameterValuesMap,
+        fieldsContext,
+        sqlBuilder.escapeString.bind(sqlBuilder),
+    );
+
+    // An empty reserved value (e.g. no date zoom applied) is a valid value, not missing:
+    // allow-list these keys so an empty string substitutes as a quoted empty value rather
+    // than being treated as missing. Non-reserved empty params stay missing.
+    const allowEmptyKeys = new Set(
+        Object.keys(parameterValuesMap).filter(
+            (key) =>
+                isReservedParameterName(key) && parameterValuesMap[key] === '',
+        ),
+    );
+
     // First, get all parameter references from the original SQL using the standard function
     // This ensures we capture ALL parameter references, not just the ones we have values for
     const allParametersResult = safeReplaceParameters({
-        sql,
+        sql: liquidRenderedSql,
         parameterValuesMap,
         escapeString: sqlBuilder.escapeString.bind(sqlBuilder),
         quoteChar: sqlBuilder.getStringQuoteChar(),
         wrapChar,
+        allowEmptyKeys,
+    });
+
+    // Liquid blocks (e.g. `{% if ld.parameters.x == "y" %}...{% endif %}`) reference parameters
+    // but are evaluated and consumed by `renderLiquidSql` before the `${...}` regex scan above,
+    // so their parameter references would otherwise be lost. Scan the pre-render SQL for
+    // liquid-style references and merge them into the references set.
+    getParameterReferences(sql).forEach((ref) => {
+        allParametersResult.references.add(ref);
     });
 
     // If no parameter definitions are provided, use the standard replacement
@@ -214,7 +247,7 @@ export const safeReplaceParametersWithTypes = ({
     });
 
     // First replace string parameters (with quotes and escaping)
-    let processedSql = sql;
+    let processedSql = liquidRenderedSql;
     if (Object.keys(stringParameters).length > 0) {
         const stringResult = safeReplaceParameters({
             sql: processedSql,
@@ -222,6 +255,7 @@ export const safeReplaceParametersWithTypes = ({
             escapeString: sqlBuilder.escapeString.bind(sqlBuilder),
             quoteChar: sqlBuilder.getStringQuoteChar(),
             wrapChar,
+            allowEmptyKeys,
         });
         processedSql = stringResult.replacedSql;
     }

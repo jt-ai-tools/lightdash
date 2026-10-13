@@ -1,18 +1,23 @@
 import { subject } from '@casl/ability';
 import {
     assertUnreachable,
+    buildDataAppExploreIndexFromExplores,
+    checkDataAppDataReferences,
     CompiledField,
     convertFieldRefToFieldId,
     CreateChartValidation,
     CreateDashboardValidation,
+    CreateDataAppValidation,
     CreateTableValidation,
     CreateValidation,
     DashboardTileTarget,
     Explore,
     ExploreError,
+    ExploreSplitError,
     ExploreType,
     FeatureFlags,
     ForbiddenError,
+    getExploreSplitCandidates,
     getFilterRules,
     getItemId,
     getUnusedDimensions,
@@ -21,10 +26,12 @@ import {
     isChartValidationError,
     isDashboardFieldTarget,
     isDashboardValidationError,
+    isDataAppValidationError,
     isExploreError,
     isSqlTableCalculation,
     isTableValidationError,
     isTemplateTableCalculation,
+    isUserManagedExplore,
     isValidationTargetValid,
     KnexPaginateArgs,
     KnexPaginatedData,
@@ -35,7 +42,10 @@ import {
     TableCalculation,
     TableSelectionType,
     UnexpectedServerError,
+    ValidationAffectedContent,
+    ValidationErrorGroup,
     ValidationErrorType,
+    ValidationGroupedSummary,
     ValidationResponse,
     ValidationSourceType,
     ValidationTarget,
@@ -43,8 +53,7 @@ import {
 import * as Sentry from '@sentry/node';
 import { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
 import { LightdashConfig } from '../../config/parseConfig';
-import { CaslAuditWrapper } from '../../logging/caslAuditWrapper';
-import { logAuditEvent } from '../../logging/winston';
+import { AppModel } from '../../models/AppModel';
 import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
 import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
@@ -53,13 +62,19 @@ import { SpaceModel } from '../../models/SpaceModel';
 import { ValidationModel } from '../../models/ValidationModel/ValidationModel';
 import { SchedulerClient } from '../../scheduler/SchedulerClient';
 import { BaseService } from '../BaseService';
-import type { SpacePermissionService } from '../SpaceService/SpacePermissionService';
+import {
+    spaceContextsByUuid,
+    type SpacePermissionService,
+} from '../SpaceService/SpacePermissionService';
+
+const VALIDATION_SUMMARY_AFFECTED_CONTENT_LIMIT = 20;
 
 type ValidationServiceArguments = {
     lightdashConfig: LightdashConfig;
     analytics: LightdashAnalytics;
     validationModel: ValidationModel;
     projectModel: ProjectModel;
+    appModel: AppModel;
     savedChartModel: SavedChartModel;
     dashboardModel: DashboardModel;
     spaceModel: SpaceModel;
@@ -69,6 +84,117 @@ type ValidationServiceArguments = {
 };
 
 export class ValidationService extends BaseService {
+    private static buildExploreFields(
+        compiledExplores: (Explore | ExploreError)[],
+    ): Record<string, { dimensionIds: string[]; metricIds: string[] }> {
+        const exploreFields: Record<
+            string,
+            { dimensionIds: string[]; metricIds: string[] }
+        > = {};
+
+        compiledExplores.forEach((explore: Explore | ExploreError) => {
+            if (!isExploreError(explore)) {
+                // For validation, index by both baseTable and explore name.
+                // The base table key should always resolve to the canonical
+                // explore, not a derived explore (for example pre-aggregates)
+                // that only contains a subset of fields.
+                const dimensions = Object.values(explore.tables).flatMap(
+                    (table) => Object.values(table.dimensions || {}),
+                );
+                const metrics = Object.values(explore.tables).flatMap((table) =>
+                    Object.values(table.metrics || {}),
+                );
+                const fieldData = {
+                    dimensionIds: dimensions.map(getItemId),
+                    metricIds: metrics.map(getItemId),
+                };
+                const isCanonicalExploreForBaseTable =
+                    explore.name === explore.baseTable;
+
+                // Index by baseTable, but only for the canonical explore for
+                // that base table. Additional explores and pre-aggregates can
+                // share the same baseTable, but charts saved against the
+                // baseTable should validate against the canonical base explore.
+                if (
+                    isCanonicalExploreForBaseTable ||
+                    exploreFields[explore.baseTable] === undefined
+                ) {
+                    exploreFields[explore.baseTable] = fieldData;
+                }
+                // Also index by explore name if different
+                if (explore.name !== explore.baseTable) {
+                    exploreFields[explore.name] = fieldData;
+                }
+            }
+        });
+
+        return exploreFields;
+    }
+
+    private static buildExistingFields(
+        compiledExplores: (Explore | ExploreError)[],
+    ): CompiledField[] {
+        const existingFields: CompiledField[] = [];
+
+        compiledExplores.forEach((explore: Explore | ExploreError) => {
+            if (!isExploreError(explore)) {
+                Object.values(explore.tables).forEach((table) => {
+                    existingFields.push(
+                        ...(Object.values(
+                            table.dimensions || {},
+                        ) as CompiledField[]),
+                    );
+                    existingFields.push(
+                        ...(Object.values(
+                            table.metrics || {},
+                        ) as CompiledField[]),
+                    );
+                });
+            }
+        });
+
+        return existingFields;
+    }
+
+    // Explores that exist but failed to compile — indexed by name and
+    // baseTable (charts reference either), so a broken-but-present model is
+    // reported as a compile failure, not falsely as deleted.
+    private static buildExploreErrorNames(
+        compiledExplores: (Explore | ExploreError)[],
+    ): Set<string> {
+        return new Set(
+            compiledExplores.flatMap((explore) =>
+                isExploreError(explore)
+                    ? [
+                          explore.name,
+                          ...(explore.baseTable ? [explore.baseTable] : []),
+                      ]
+                    : [],
+            ),
+        );
+    }
+
+    private static buildExistingTableNames(
+        compiledExplores: (Explore | ExploreError)[],
+    ): Set<string> {
+        // Includes baseTable for every explore (even those that failed to
+        // compile, so a broken-but-present model is not falsely reported
+        // as deleted) plus every joined table from non-error explores —
+        // dashboard filter targets can reference joined tables too.
+        const tableNames = new Set<string>();
+        compiledExplores.forEach((explore) => {
+            if (explore.baseTable) {
+                tableNames.add(explore.baseTable);
+            }
+            if (!isExploreError(explore) && explore.tables) {
+                Object.keys(explore.tables).forEach((name) =>
+                    tableNames.add(name),
+                );
+            }
+        });
+        return tableNames;
+    }
+
     lightdashConfig: LightdashConfig;
 
     analytics: LightdashAnalytics;
@@ -76,6 +202,8 @@ export class ValidationService extends BaseService {
     validationModel: ValidationModel;
 
     projectModel: ProjectModel;
+
+    appModel: AppModel;
 
     savedChartModel: SavedChartModel;
 
@@ -94,6 +222,7 @@ export class ValidationService extends BaseService {
         analytics,
         validationModel,
         projectModel,
+        appModel,
         savedChartModel,
         dashboardModel,
         spaceModel,
@@ -105,6 +234,7 @@ export class ValidationService extends BaseService {
         this.lightdashConfig = lightdashConfig;
         this.analytics = analytics;
         this.projectModel = projectModel;
+        this.appModel = appModel;
         this.savedChartModel = savedChartModel;
         this.validationModel = validationModel;
         this.dashboardModel = dashboardModel;
@@ -140,7 +270,7 @@ export class ValidationService extends BaseService {
                         : [];
                 const orderByPart =
                     'orderBy' in tc.template
-                        ? tc.template.orderBy.map((o) => o.fieldId)
+                        ? (tc.template.orderBy ?? []).map((o) => o.fieldId)
                         : [];
                 const partitionByPart =
                     'partitionBy' in tc.template && tc.template.partitionBy
@@ -186,13 +316,13 @@ export class ValidationService extends BaseService {
                                         tag,
                                     ),
                                 )) ||
-                            explore.type === ExploreType.VIRTUAL, // Custom explores/Virtual views are included by default
+                            isUserManagedExplore(explore), // User-managed explores (virtual views, external source tables) are included by default
                     );
                     const exploreIsSelectedWithTags = explore.tags?.some(
                         (tag) =>
                             tablesConfiguration.tableSelection.value?.includes(
                                 tag,
-                            ) || explore.type === ExploreType.VIRTUAL, // Custom explores/Virtual views are included by default
+                            ) || isUserManagedExplore(explore), // User-managed explores (virtual views, external source tables) are included by default
                     );
                     return (
                         hasSelectedJoinedExploredWithTags ||
@@ -208,12 +338,12 @@ export class ValidationService extends BaseService {
                                 tablesConfiguration.tableSelection.value?.includes(
                                     e.name,
                                 )) ||
-                            explore.type === ExploreType.VIRTUAL, // Custom explores/Virtual views are included by default
+                            isUserManagedExplore(explore), // User-managed explores (virtual views, external source tables) are included by default
                     );
                     const exploreIsSelected =
                         tablesConfiguration.tableSelection.value?.includes(
                             explore.name,
-                        ) || explore.type === ExploreType.VIRTUAL; // Custom explores/Virtual views are included by default
+                        ) || isUserManagedExplore(explore); // User-managed explores (virtual views, external source tables) are included by default
 
                     return hasSelectedJoinedExplored || exploreIsSelected;
                 default:
@@ -249,7 +379,22 @@ export class ValidationService extends BaseService {
                         }));
                     return [...acc, ...exploreErrors];
                 }
-                return acc;
+
+                const warehouseColumnErrors = (explore.warnings ?? [])
+                    .filter(
+                        (warning) =>
+                            warning.type ===
+                            InlineErrorType.WAREHOUSE_COLUMN_ERROR,
+                    )
+                    .map((warning) => ({
+                        name: explore.name,
+                        error: warning.message,
+                        errorType: ValidationErrorType.Model,
+                        modelName: explore.name,
+                        projectUuid,
+                        source: ValidationSourceType.Table,
+                    }));
+                return [...acc, ...warehouseColumnErrors];
             },
             [],
         );
@@ -262,10 +407,15 @@ export class ValidationService extends BaseService {
             string,
             { dimensionIds: string[]; metricIds: string[] }
         >,
+        exploreErrorNames: Set<string>,
         selectedExplores?: (Explore | ExploreError)[],
+        chartUuid?: string,
+        allExplores: (Explore | ExploreError)[] = selectedExplores ?? [],
     ): Promise<CreateChartValidation[]> {
-        const charts =
-            await this.savedChartModel.findChartsForValidation(projectUuid);
+        const charts = await this.savedChartModel.findChartsForValidation(
+            projectUuid,
+            chartUuid,
+        );
 
         // Only validate charts that are using selected explores
         const results = charts
@@ -299,6 +449,27 @@ export class ValidationService extends BaseService {
                     chartConfig,
                     pivotDimensions,
                 }) => {
+                    const splitCandidates = getExploreSplitCandidates(
+                        tableName,
+                        allExplores,
+                    );
+                    if (splitCandidates.length >= 2) {
+                        const splitError = new ExploreSplitError(
+                            tableName,
+                            splitCandidates,
+                        );
+                        return [
+                            {
+                                chartUuid: uuid,
+                                name,
+                                projectUuid,
+                                source: ValidationSourceType.Chart,
+                                chartName: name,
+                                errorType: ValidationErrorType.ExploreSplit,
+                                error: splitError.message,
+                            },
+                        ];
+                    }
                     const availableDimensionIds =
                         exploreFields[tableName]?.dimensionIds || [];
                     const availableCustomDimensionIds = [
@@ -322,7 +493,25 @@ export class ValidationService extends BaseService {
                         projectUuid,
                         source: ValidationSourceType.Chart,
                         chartName: name,
+                        tableName,
                     };
+
+                    // When the whole explore is gone (deleted or failed to
+                    // compile), every field check would fail — collapse the
+                    // noise into a single model-level error so cleanup can
+                    // group all affected charts by model.
+                    if (exploreFields[tableName] === undefined) {
+                        return [
+                            {
+                                ...commonValidation,
+                                errorType: ValidationErrorType.Model,
+                                error: exploreErrorNames.has(tableName)
+                                    ? `Model error: the model '${tableName}' failed to compile`
+                                    : `Model error: the model '${tableName}' no longer exists`,
+                            },
+                        ];
+                    }
+
                     const containsFieldId = ({
                         acc,
                         fieldIds,
@@ -495,12 +684,13 @@ export class ValidationService extends BaseService {
                             chartType,
                             chartConfig,
                             queryTableCalculations: tableCalculations,
+                            tableCalculationFilters: filters.tableCalculations,
                         });
 
                     const unusedTableCalculationErrors: CreateChartValidation[] =
                         unusedTableCalculations.map((tc) => ({
                             ...commonValidation,
-                            error: `table calculation is not used in the chart configuration (x-axis or y-axis). This can cause incorrect rendering. We recommend removing unused fields.`,
+                            error: `table calculation is not used in the chart configuration (x-axis, y-axis, or table calculation filters). This can cause incorrect rendering. We recommend removing unused fields.`,
                             errorType: ValidationErrorType.ChartConfiguration,
                             fieldName: tc,
                         }));
@@ -524,9 +714,11 @@ export class ValidationService extends BaseService {
     private async validateDashboards(
         projectUuid: string,
         existingFields: CompiledField[],
+        existingTableNames: Set<string>,
         brokenCharts: Pick<CreateChartValidation, 'chartUuid' | 'name'>[],
+        dashboardUuid?: string,
     ): Promise<CreateDashboardValidation[]> {
-        const existingFieldIds = existingFields.map(getItemId);
+        const existingFieldIds = new Set(existingFields.map(getItemId));
 
         // Pre-build Map for O(1) broken chart lookup instead of O(n) array.find()
         const brokenChartMap = new Map(
@@ -534,13 +726,16 @@ export class ValidationService extends BaseService {
         );
 
         const dashboardsToValidate =
-            await this.dashboardModel.findDashboardsForValidation(projectUuid);
+            await this.dashboardModel.findDashboardsForValidation(
+                projectUuid,
+                dashboardUuid,
+            );
         const results: CreateDashboardValidation[] =
             dashboardsToValidate.flatMap(
-                ({ name, dashboardUuid, filters, chartUuids }) => {
+                ({ name, dashboardUuid: uuid, filters, chartUuids }) => {
                     const commonValidation = {
                         name,
-                        dashboardUuid,
+                        dashboardUuid: uuid,
                         projectUuid,
                         source: ValidationSourceType.Dashboard,
                     };
@@ -552,15 +747,16 @@ export class ValidationService extends BaseService {
                         error,
                         errorType,
                         fieldName,
+                        tableName,
                     }: {
                         acc: CreateDashboardValidation[];
-                        fieldIds: string[];
+                        fieldIds: Set<string>;
                         fieldId: string;
                     } & Pick<
                         CreateDashboardValidation,
-                        'error' | 'errorType' | 'fieldName'
+                        'error' | 'errorType' | 'fieldName' | 'tableName'
                     >) => {
-                        if (!fieldIds?.includes(fieldId)) {
+                        if (!fieldIds?.has(fieldId)) {
                             return [
                                 ...acc,
                                 {
@@ -568,6 +764,7 @@ export class ValidationService extends BaseService {
                                     errorType,
                                     error,
                                     fieldName,
+                                    tableName,
                                 },
                             ];
                         }
@@ -584,6 +781,29 @@ export class ValidationService extends BaseService {
                                 errorType: ValidationErrorType.Filter,
                                 error: `Filter error: the field '${fieldId}' does not match table '${tableName}'`,
                                 fieldName: fieldId,
+                                tableName,
+                            };
+                        }
+                        return undefined;
+                    };
+
+                    // Without this check a deleted dbt model's dimensions
+                    // stay silently in the filter dropdown — the existing
+                    // fieldId check only catches renamed/removed fields
+                    // within an existing table. The parser in
+                    // ValidationModel.parseDashboardFilterError keys off the
+                    // exact "Table 'X' no longer exists" wording.
+                    const checkTableExists = (
+                        fieldId: string,
+                        tableName: string | undefined,
+                    ): CreateDashboardValidation | undefined => {
+                        if (tableName && !existingTableNames.has(tableName)) {
+                            return {
+                                ...commonValidation,
+                                errorType: ValidationErrorType.Filter,
+                                error: `Table '${tableName}' no longer exists`,
+                                fieldName: fieldId,
+                                tableName,
                             };
                         }
                         return undefined;
@@ -619,13 +839,24 @@ export class ValidationService extends BaseService {
                                 return [...acc, consistencyError];
                             }
 
+                            const tableMissingError = checkTableExists(
+                                fieldId,
+                                tableName,
+                            );
+                            if (tableMissingError) {
+                                return [...acc, tableMissingError];
+                            }
+
                             return containsFieldId({
                                 acc,
                                 fieldIds: existingFieldIds,
                                 fieldId: filter.target.fieldId,
-                                error: `Filter error: the field '${filter.target.fieldId}' no longer exists`,
+                                error: tableName
+                                    ? `Filter error: the field '${filter.target.fieldId}' on table '${tableName}' no longer exists`
+                                    : `Filter error: the field '${filter.target.fieldId}' no longer exists`,
                                 errorType: ValidationErrorType.Filter,
                                 fieldName: filter.target.fieldId,
+                                tableName,
                             });
                         } catch (e) {
                             console.error(
@@ -666,13 +897,24 @@ export class ValidationService extends BaseService {
                                     return [...acc, consistencyError];
                                 }
 
+                                const tableMissingError = checkTableExists(
+                                    fieldId,
+                                    tableName,
+                                );
+                                if (tableMissingError) {
+                                    return [...acc, tableMissingError];
+                                }
+
                                 return containsFieldId({
                                     acc,
                                     fieldIds: existingFieldIds,
                                     fieldId: tileTarget.fieldId,
-                                    error: `Filter error: the field '${tileTarget.fieldId}' no longer exists`,
+                                    error: tableName
+                                        ? `Filter error: the field '${tileTarget.fieldId}' on table '${tableName}' no longer exists`
+                                        : `Filter error: the field '${tileTarget.fieldId}' no longer exists`,
                                     errorType: ValidationErrorType.Filter,
                                     fieldName: tileTarget.fieldId,
+                                    tableName,
                                 });
                             }
                             return acc;
@@ -699,6 +941,79 @@ export class ValidationService extends BaseService {
                         return acc;
                     }, []);
 
+                    // Wide observability event for diagnosing validation
+                    // suppression (related to PROD-5931). Per-dashboard summary
+                    // of inputs vs outputs, with a capped sample of tile targets
+                    // that passed all checks without producing an error — these
+                    // are the suspicious ones to inspect when the bell icon is
+                    // silent but a stale filter exists.
+                    try {
+                        const SAMPLE_CAP = 5;
+                        const tileTargetSummaries = dashboardTileTargets.map(
+                            (tt) => {
+                                if (!tt) {
+                                    return { kind: 'falsy' as const };
+                                }
+                                if (!isDashboardFieldTarget(tt)) {
+                                    return { kind: 'notFieldTarget' as const };
+                                }
+                                if (tt.isSqlColumn) {
+                                    return { kind: 'sqlColumn' as const };
+                                }
+                                return {
+                                    kind: 'processed' as const,
+                                    fieldId: tt.fieldId,
+                                    tableName: tt.tableName,
+                                    fieldIdInExistingFields:
+                                        existingFieldIds.has(tt.fieldId),
+                                };
+                            },
+                        );
+                        const counts = tileTargetSummaries.reduce(
+                            (acc, t) => {
+                                acc[t.kind] = (acc[t.kind] ?? 0) + 1;
+                                return acc;
+                            },
+                            {} as Record<string, number>,
+                        );
+                        const processedWithoutError =
+                            tileTargetSummaries.filter(
+                                (t) =>
+                                    t.kind === 'processed' &&
+                                    t.fieldIdInExistingFields,
+                            );
+
+                        this.logger.info('validation.dashboardScanned', {
+                            projectUuid,
+                            dashboardUuid: uuid,
+                            existingFieldIdCount: existingFieldIds.size,
+                            filterRuleCount: dashboardFilterRules.length,
+                            tileTargetCount: dashboardTileTargets.length,
+                            filterErrorCount: filterErrors.length,
+                            tileTargetErrorCount: tileTargetErrors.length,
+                            chartErrorCount: chartErrors.length,
+                            tileTargetSkippedFalsyCount: counts.falsy ?? 0,
+                            tileTargetSkippedNotFieldTargetCount:
+                                counts.notFieldTarget ?? 0,
+                            tileTargetSkippedSqlColumnCount:
+                                counts.sqlColumn ?? 0,
+                            tileTargetProcessedCount: counts.processed ?? 0,
+                            tileTargetProcessedWithoutErrorCount:
+                                processedWithoutError.length,
+                            tileTargetProcessedWithoutErrorSamples:
+                                processedWithoutError.slice(0, SAMPLE_CAP),
+                        });
+                    } catch (e) {
+                        this.logger.warn(
+                            'validation.dashboardScanned log failed',
+                            {
+                                projectUuid,
+                                dashboardUuid: uuid,
+                                err: e instanceof Error ? e.message : String(e),
+                            },
+                        );
+                    }
+
                     return [
                         ...filterErrors,
                         ...tileTargetErrors,
@@ -708,6 +1023,47 @@ export class ValidationService extends BaseService {
             );
 
         return results;
+    }
+
+    private async validateDataApps(
+        projectUuid: string,
+        explores: (Explore | ExploreError)[],
+    ): Promise<CreateDataAppValidation[]> {
+        const apps = await this.appModel.findAppsForValidation(projectUuid);
+        const exploreIndex = buildDataAppExploreIndexFromExplores(
+            explores.filter(
+                (explore): explore is Explore => !isExploreError(explore),
+            ),
+        );
+        const unavailableExploreNames = new Set(
+            explores.flatMap((explore) =>
+                isExploreError(explore) && explore.name ? [explore.name] : [],
+            ),
+        );
+
+        return apps.flatMap((app) => {
+            if (app.data_references === null) return [];
+
+            return checkDataAppDataReferences(
+                app.data_references.references,
+                exploreIndex,
+            )
+                .filter(
+                    (error) =>
+                        !error.modelName ||
+                        !unavailableExploreNames.has(error.modelName),
+                )
+                .map((error) => ({
+                    appUuid: app.app_id,
+                    name: app.name,
+                    projectUuid,
+                    source: ValidationSourceType.DataApp,
+                    error: error.error,
+                    errorType: error.errorType,
+                    fieldName: error.fieldName ?? undefined,
+                    modelName: error.modelName ?? undefined,
+                }));
+        });
     }
 
     async generateValidation(
@@ -763,12 +1119,9 @@ export class ValidationService extends BaseService {
                 ),
             );
         }
-        const exploreFields =
-            explores?.reduce<
-                Record<string, { dimensionIds: string[]; metricIds: string[] }>
-            >((acc, explore) => {
-                if (isExploreError(explore) || explore?.tables === undefined)
-                    return acc;
+        // Check for undefined dimensions/metrics before processing
+        explores?.forEach((explore) => {
+            if (!isExploreError(explore) && explore?.tables !== undefined) {
                 const dimensions = Object.values(explore.tables).flatMap(
                     (table) => Object.values(table.dimensions),
                 );
@@ -790,38 +1143,16 @@ export class ValidationService extends BaseService {
                         ),
                     );
                 }
+            }
+        });
 
-                const fieldData = {
-                    dimensionIds: dimensions.map(getItemId),
-                    metricIds: metrics.map(getItemId),
-                };
-                return {
-                    ...acc,
-                    // Index by baseTable for base explores and charts using baseTable
-                    [explore.baseTable]: fieldData,
-                    // Also index by explore name for additional explores
-                    // https://docs.lightdash.com/guides/explores
-                    ...(explore.name !== explore.baseTable
-                        ? { [explore.name]: fieldData }
-                        : {}),
-                };
-            }, {}) || {};
+        const exploreFields = explores
+            ? ValidationService.buildExploreFields(explores)
+            : {};
 
-        const existingFields = explores?.reduce<CompiledField[]>(
-            (acc, explore) => {
-                if (!explore.tables) return acc;
-
-                const fields = Object.values(explore.tables).flatMap(
-                    (table) => [
-                        ...Object.values(table.dimensions),
-                        ...Object.values(table.metrics),
-                    ],
-                );
-
-                return [...acc, ...fields];
-            },
-            [],
-        );
+        const existingFields = explores
+            ? ValidationService.buildExistingFields(explores)
+            : [];
 
         if (!existingFields) {
             this.logger.warn(
@@ -843,7 +1174,10 @@ export class ValidationService extends BaseService {
                 ? await this.validateCharts(
                       projectUuid,
                       exploreFields,
+                      ValidationService.buildExploreErrorNames(explores ?? []),
                       onlyValidateExploresInArgs ? compiledExplores : undefined,
+                      undefined,
+                      explores,
                   )
                 : [];
 
@@ -854,17 +1188,34 @@ export class ValidationService extends BaseService {
                 error.errorType !== ValidationErrorType.ChartConfiguration,
         );
 
+        const existingTableNames = explores
+            ? ValidationService.buildExistingTableNames(explores)
+            : new Set<string>();
+
         const dashboardErrors =
             !hasValidationTargets ||
             validationTargets.has(ValidationTarget.DASHBOARDS)
                 ? await this.validateDashboards(
                       projectUuid,
                       existingFields,
+                      existingTableNames,
                       blockingChartErrors,
                   )
                 : [];
 
-        return [...tableErrors, ...chartErrors, ...dashboardErrors];
+        const dataAppErrors =
+            !onlyValidateExploresInArgs &&
+            (!hasValidationTargets ||
+                validationTargets.has(ValidationTarget.APPS))
+                ? await this.validateDataApps(projectUuid, explores)
+                : [];
+
+        return [
+            ...tableErrors,
+            ...chartErrors,
+            ...dashboardErrors,
+            ...dataAppErrors,
+        ];
     }
 
     async validate(
@@ -878,13 +1229,19 @@ export class ValidationService extends BaseService {
         const { organizationUuid } =
             await this.projectModel.getSummary(projectUuid);
 
+        const auditedAbility = this.createAuditedAbility(user);
+
         if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'manage',
                 subject('Validation', {
                     organizationUuid,
                     projectUuid,
-                    uuid: projectUuid,
+                    metadata: {
+                        context,
+                        validationTargets,
+                        onlyValidateExploresInArgs,
+                    },
                 }),
             )
         ) {
@@ -925,6 +1282,75 @@ export class ValidationService extends BaseService {
         }
     }
 
+    private async resolveAllowedContent(
+        user: SessionUser,
+        projectUuid: string,
+        organizationUuid: string,
+    ): Promise<{
+        allowedSpaceUuids: string[] | 'all';
+        allowedAppUuids: string[] | 'all';
+    }> {
+        if (user.role === OrganizationMemberRole.ADMIN) {
+            return { allowedSpaceUuids: 'all', allowedAppUuids: 'all' };
+        }
+
+        const spaces = await this.spaceModel.find({ projectUuid });
+        const allowedSpaceUuids =
+            await this.spacePermissionService.getAccessibleSpaceUuids(
+                'view',
+                user,
+                spaces.map((s) => s.uuid),
+            );
+
+        return {
+            allowedSpaceUuids,
+            allowedAppUuids: await this.resolveAllowedAppUuids(
+                user,
+                projectUuid,
+                organizationUuid,
+                allowedSpaceUuids,
+            ),
+        };
+    }
+
+    // Drops the validations the paginated list hides, so summary counts and the
+    // table agree. `hidePrivateContent` masks names instead, for callers that
+    // return every row.
+    static filterInaccessibleContent(
+        validations: ValidationResponse[],
+        {
+            allowedSpaceUuids,
+            allowedAppUuids,
+        }: {
+            allowedSpaceUuids: string[] | 'all';
+            allowedAppUuids: string[] | 'all';
+        },
+    ): ValidationResponse[] {
+        return validations.filter((validation) => {
+            if (isDataAppValidationError(validation)) {
+                return (
+                    allowedAppUuids === 'all' ||
+                    (validation.appUuid !== undefined &&
+                        allowedAppUuids.includes(validation.appUuid))
+                );
+            }
+
+            if (
+                isChartValidationError(validation) ||
+                isDashboardValidationError(validation)
+            ) {
+                return (
+                    allowedSpaceUuids === 'all' ||
+                    (validation.spaceUuid !== undefined &&
+                        allowedSpaceUuids.includes(validation.spaceUuid))
+                );
+            }
+
+            // Table validations are project-level, not space-specific.
+            return true;
+        });
+    }
+
     async hidePrivateContent(
         user: SessionUser,
         projectUuid: string,
@@ -932,29 +1358,42 @@ export class ValidationService extends BaseService {
     ): Promise<ValidationResponse[]> {
         if (user.role === OrganizationMemberRole.ADMIN) return validations;
 
-        const spaces = await this.spaceModel.find({ projectUuid });
-        const spaceUuids = spaces.map((s) => s.uuid);
-
-        const allowedSpaceUuids =
-            await this.spacePermissionService.getAccessibleSpaceUuids(
-                'view',
+        const { allowedSpaceUuids, allowedAppUuids } =
+            await this.resolveAllowedContent(
                 user,
-                spaceUuids,
+                projectUuid,
+                user.organizationUuid!,
             );
+        const allowedAppUuidSet = new Set(
+            allowedAppUuids === 'all' ? [] : allowedAppUuids,
+        );
 
         // Filter private content to developers
-        return Promise.all(
-            validations.map(async (validation) => {
-                // Table validations are project-level, not space-specific
-                // Anyone with project access can see them
-                if (
-                    !isDashboardValidationError(validation) &&
-                    !isChartValidationError(validation) &&
-                    isTableValidationError(validation)
-                ) {
+        return validations.map((validation) => {
+            if (isDataAppValidationError(validation)) {
+                if (!validation.appUuid) {
+                    return {
+                        ...validation,
+                        appUuid: undefined,
+                        name: 'Deleted content',
+                    };
+                }
+
+                if (allowedAppUuidSet.has(validation.appUuid)) {
                     return validation;
                 }
 
+                return {
+                    ...validation,
+                    appUuid: undefined,
+                    name: 'Private content',
+                };
+            }
+
+            if (
+                isChartValidationError(validation) ||
+                isDashboardValidationError(validation)
+            ) {
                 const isDeleted =
                     (isDashboardValidationError(validation) &&
                         !validation.dashboardUuid) ||
@@ -970,11 +1409,10 @@ export class ValidationService extends BaseService {
                     };
                 }
 
-                const space = spaces.find(
-                    (s) => s.uuid === validation.spaceUuid,
-                );
                 const hasAccess =
-                    space && allowedSpaceUuids.includes(space.uuid);
+                    allowedSpaceUuids === 'all' ||
+                    (validation.spaceUuid !== undefined &&
+                        allowedSpaceUuids.includes(validation.spaceUuid));
                 if (hasAccess) return validation;
 
                 return {
@@ -983,7 +1421,307 @@ export class ValidationService extends BaseService {
                     dashboardUuid: undefined,
                     name: 'Private content',
                 };
-            }),
+            }
+
+            // Table validations are project-level, not space-specific.
+            return validation;
+        });
+    }
+
+    private async resolveAllowedAppUuids(
+        user: SessionUser,
+        projectUuid: string,
+        organizationUuid: string,
+        allowedSpaceUuids: string[] | 'all',
+    ): Promise<string[] | 'all'> {
+        if (user.role === OrganizationMemberRole.ADMIN) return 'all';
+
+        const apps = await this.appModel.listAppsByProject(projectUuid);
+        const allowedSpaceUuidSet = new Set(
+            allowedSpaceUuids === 'all' ? [] : allowedSpaceUuids,
+        );
+        const auditedAbility = this.createAuditedAbility(user);
+        const appSpaceUuids = [
+            ...new Set(
+                apps.flatMap((app) =>
+                    app.space_uuid !== null &&
+                    (allowedSpaceUuids === 'all' ||
+                        allowedSpaceUuidSet.has(app.space_uuid))
+                        ? [app.space_uuid]
+                        : [],
+                ),
+            ),
+        ];
+        const resolvedSpaceAccessContexts =
+            appSpaceUuids.length > 0
+                ? await this.spacePermissionService.resolveAccessBatch(
+                      user.userUuid,
+                      appSpaceUuids.map((spaceUuid) => ({
+                          type: 'space' as const,
+                          spaceUuid,
+                      })),
+                  )
+                : [];
+        const spaceAccessContexts = spaceContextsByUuid(
+            resolvedSpaceAccessContexts,
+        );
+
+        return apps
+            .filter((app) => {
+                if (app.space_uuid !== null) {
+                    if (
+                        allowedSpaceUuids !== 'all' &&
+                        !allowedSpaceUuidSet.has(app.space_uuid)
+                    ) {
+                        return false;
+                    }
+
+                    const spaceAccessContext =
+                        spaceAccessContexts[app.space_uuid];
+                    return (
+                        spaceAccessContext !== undefined &&
+                        auditedAbility.can(
+                            'view',
+                            subject('DataApp', {
+                                ...spaceAccessContext,
+                                createdByUserUuid: app.created_by_user_uuid,
+                            }),
+                        )
+                    );
+                }
+
+                return auditedAbility.can(
+                    'view',
+                    subject('DataApp', {
+                        organizationUuid,
+                        projectUuid,
+                        createdByUserUuid: app.created_by_user_uuid,
+                    }),
+                );
+            })
+            .map((app) => app.app_id);
+    }
+
+    // Filter out orphaned validations (content was deleted)
+    private static filterOrphanedValidations(
+        validations: ValidationResponse[],
+    ): ValidationResponse[] {
+        return validations.filter((validation) => {
+            // Table validations are project-level. Data app rows have already
+            // been joined against a non-deleted app by the model.
+            if (
+                !isDashboardValidationError(validation) &&
+                !isChartValidationError(validation)
+            ) {
+                return true;
+            }
+
+            const hasChartUuid =
+                isChartValidationError(validation) && validation.chartUuid;
+            const hasDashboardUuid =
+                isDashboardValidationError(validation) &&
+                validation.dashboardUuid;
+
+            return hasChartUuid || hasDashboardUuid;
+        });
+    }
+
+    static groupValidationsByRootCause(
+        validations: ValidationResponse[],
+    ): ValidationGroupedSummary {
+        type MutableGroup = Omit<
+            ValidationErrorGroup,
+            'affectedContent' | 'hasMoreAffectedContent'
+        > & {
+            contentByKey: Map<string, ValidationAffectedContent>;
+        };
+
+        const getContent = (
+            validation: ValidationResponse,
+        ): Omit<ValidationAffectedContent, 'errorCount'> => {
+            if (isChartValidationError(validation)) {
+                return {
+                    uuid: validation.chartUuid ?? null,
+                    name: validation.name,
+                    source: ValidationSourceType.Chart,
+                    views: validation.chartViews ?? 0,
+                };
+            }
+            if (isDashboardValidationError(validation)) {
+                return {
+                    uuid: validation.dashboardUuid ?? null,
+                    name: validation.name,
+                    source: ValidationSourceType.Dashboard,
+                    views: validation.dashboardViews ?? 0,
+                };
+            }
+            if (isDataAppValidationError(validation)) {
+                return {
+                    uuid: validation.appUuid ?? null,
+                    name: validation.name,
+                    source: ValidationSourceType.DataApp,
+                    views: 0,
+                };
+            }
+            return {
+                uuid: null,
+                name: validation.name ?? 'Unknown table',
+                source: ValidationSourceType.Table,
+                views: 0,
+            };
+        };
+
+        const groups = new Map<string, MutableGroup>();
+        const allContentKeys = new Set<string>();
+        let totalErrors = 0;
+
+        validations.forEach((validation) => {
+            // Advisory chart configuration warnings are not broken content
+            if (
+                validation.errorType === ValidationErrorType.ChartConfiguration
+            ) {
+                return;
+            }
+            totalErrors += 1;
+
+            let tableName: string | null = null;
+            let fieldName: string | null = null;
+            if (isChartValidationError(validation)) {
+                tableName = validation.tableName ?? null;
+                fieldName = validation.fieldName ?? null;
+            } else if (isDashboardValidationError(validation)) {
+                tableName = validation.tableName ?? null;
+                fieldName = validation.fieldName ?? null;
+            } else if (isDataAppValidationError(validation)) {
+                tableName = validation.modelName ?? null;
+                fieldName = validation.fieldName ?? null;
+            } else {
+                // Table validations: `name` is the model name
+                tableName = validation.name ?? null;
+            }
+            const groupKey = `${validation.errorType}:${tableName ?? ''}:${
+                fieldName ?? ''
+            }`;
+
+            const content = getContent(validation);
+            const contentKey = `${content.source}:${
+                content.uuid ?? content.name
+            }`;
+            allContentKeys.add(contentKey);
+
+            const group = groups.get(groupKey) ?? {
+                groupKey,
+                errorType: validation.errorType,
+                tableName,
+                fieldName,
+                errorCount: 0,
+                affectedCharts: 0,
+                affectedDashboards: 0,
+                affectedTables: 0,
+                affectedDataApps: 0,
+                sampleError: validation.error,
+                contentByKey: new Map<string, ValidationAffectedContent>(),
+            };
+            group.errorCount += 1;
+
+            const existingContent = group.contentByKey.get(contentKey);
+            if (existingContent) {
+                existingContent.errorCount += 1;
+            } else {
+                group.contentByKey.set(contentKey, {
+                    ...content,
+                    errorCount: 1,
+                });
+                switch (content.source) {
+                    case ValidationSourceType.Chart:
+                        group.affectedCharts += 1;
+                        break;
+                    case ValidationSourceType.Dashboard:
+                        group.affectedDashboards += 1;
+                        break;
+                    case ValidationSourceType.Table:
+                        group.affectedTables += 1;
+                        break;
+                    case ValidationSourceType.DataApp:
+                        group.affectedDataApps += 1;
+                        break;
+                    default:
+                        assertUnreachable(
+                            content.source,
+                            'Unknown validation source',
+                        );
+                }
+            }
+            groups.set(groupKey, group);
+        });
+
+        const sortedGroups = [...groups.values()]
+            .sort((a, b) => {
+                // Deleted/broken models first — they are bulk-actionable
+                const aIsModel = a.errorType === ValidationErrorType.Model;
+                const bIsModel = b.errorType === ValidationErrorType.Model;
+                if (aIsModel !== bIsModel) return aIsModel ? -1 : 1;
+                if (a.errorCount !== b.errorCount)
+                    return b.errorCount - a.errorCount;
+                return a.groupKey.localeCompare(b.groupKey);
+            })
+            .map(({ contentByKey, ...group }) => {
+                const affectedContent = [...contentByKey.values()].sort(
+                    (a, b) => b.views - a.views,
+                );
+                return {
+                    ...group,
+                    affectedContent: affectedContent.slice(
+                        0,
+                        VALIDATION_SUMMARY_AFFECTED_CONTENT_LIMIT,
+                    ),
+                    hasMoreAffectedContent:
+                        affectedContent.length >
+                        VALIDATION_SUMMARY_AFFECTED_CONTENT_LIMIT,
+                };
+            });
+
+        return {
+            totalErrors,
+            totalAffectedItems: allContentKeys.size,
+            groups: sortedGroups,
+        };
+    }
+
+    async getValidationSummary(
+        user: SessionUser,
+        projectUuid: string,
+    ): Promise<ValidationGroupedSummary> {
+        const { organizationUuid } = user;
+        const auditedAbility = this.createAuditedAbility(user);
+
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('Validation', {
+                    organizationUuid: organizationUuid!,
+                    projectUuid,
+                    metadata: { summary: true },
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        const allValidations = await this.validationModel.get(projectUuid);
+        const validations =
+            ValidationService.filterOrphanedValidations(allValidations);
+        const allowedContent = await this.resolveAllowedContent(
+            user,
+            projectUuid,
+            organizationUuid!,
+        );
+
+        return ValidationService.groupValidationsByRootCause(
+            ValidationService.filterInaccessibleContent(
+                validations,
+                allowedContent,
+            ),
         );
     }
 
@@ -995,13 +1733,15 @@ export class ValidationService extends BaseService {
     ): Promise<ValidationResponse[]> {
         const { organizationUuid } = user;
 
+        const auditedAbility = this.createAuditedAbility(user);
+
         if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'manage',
                 subject('Validation', {
-                    organizationUuid,
+                    organizationUuid: organizationUuid!,
                     projectUuid,
-                    uuid: projectUuid,
+                    metadata: { jobId, fromSettings },
                 }),
             )
         ) {
@@ -1012,25 +1752,8 @@ export class ValidationService extends BaseService {
             jobId,
         );
 
-        // Filter out orphaned validations (content was deleted)
-        const validations = allValidations.filter((validation) => {
-            // Keep table validations (they don't reference charts/dashboards)
-            if (
-                !isDashboardValidationError(validation) &&
-                !isChartValidationError(validation)
-            ) {
-                return true;
-            }
-
-            // Filter out chart/dashboard validations where content no longer exists
-            const hasChartUuid =
-                isChartValidationError(validation) && validation.chartUuid;
-            const hasDashboardUuid =
-                isDashboardValidationError(validation) &&
-                validation.dashboardUuid;
-
-            return hasChartUuid || hasDashboardUuid;
-        });
+        const validations =
+            ValidationService.filterOrphanedValidations(allValidations);
 
         if (fromSettings) {
             const contentIds = validations.map(
@@ -1039,6 +1762,7 @@ export class ValidationService extends BaseService {
                     ('chartUuid' in validation && validation.chartUuid) ||
                     ('dashboardUuid' in validation &&
                         validation.dashboardUuid) ||
+                    ('appUuid' in validation && validation.appUuid) ||
                     validation.name,
             );
 
@@ -1057,52 +1781,55 @@ export class ValidationService extends BaseService {
         return this.hidePrivateContent(user, projectUuid, validations);
     }
 
-    async getById(
+    private async resolveAllowedSpaceUuids(
         user: SessionUser,
         projectUuid: string,
-        validationId: number,
-    ): Promise<ValidationResponse> {
-        const projectSummary = await this.projectModel.getSummary(projectUuid);
-
-        const auditedAbility = new CaslAuditWrapper(user.ability, user, {
-            auditLogger: logAuditEvent,
-        });
-
+        organizationUuid: string,
+    ): Promise<string[] | 'all'> {
+        const auditedAbility = this.createAuditedAbility(user);
         if (
             auditedAbility.cannot(
                 'manage',
-                subject('Validation', {
-                    organizationUuid: projectSummary.organizationUuid,
-                    projectUuid,
-                    uuid: projectUuid,
-                }),
+                subject('Validation', { organizationUuid, projectUuid }),
             )
         ) {
             throw new ForbiddenError();
         }
 
-        let allowedSpaceUuids: string[] | 'all' = 'all';
-
-        if (user.role !== OrganizationMemberRole.ADMIN) {
-            const spaces = await this.spaceModel.find({ projectUuid });
-            const spaceUuids = spaces.map((s) => s.uuid);
-
-            allowedSpaceUuids =
-                await this.spacePermissionService.getAccessibleSpaceUuids(
-                    'view',
-                    user,
-                    spaceUuids,
-                );
+        if (user.role === OrganizationMemberRole.ADMIN) {
+            return 'all';
         }
+        const spaces = await this.spaceModel.find({ projectUuid });
+        const spaceUuids = spaces.map((s) => s.uuid);
+        return this.spacePermissionService.getAccessibleSpaceUuids(
+            'view',
+            user,
+            spaceUuids,
+        );
+    }
 
-        const validation = await this.validationModel.getFullById(
-            validationId,
+    async getValidation(
+        user: SessionUser,
+        projectUuid: string,
+        validationIdOrUuid: number | string,
+    ): Promise<ValidationResponse> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        const allowedSpaceUuids = await this.resolveAllowedSpaceUuids(
+            user,
+            projectUuid,
+            organizationUuid,
+        );
+
+        const validation = await this.validationModel.getFullByIdOrUuid(
+            validationIdOrUuid,
+            projectUuid,
             { allowedSpaceUuids },
         );
 
         if (!validation) {
             throw new NotFoundError(
-                `Validation with id ${validationId} not found`,
+                `Validation ${validationIdOrUuid} not found`,
             );
         }
 
@@ -1119,6 +1846,8 @@ export class ValidationService extends BaseService {
             sortDirection?: 'asc' | 'desc';
             sourceTypes?: ValidationSourceType[];
             errorTypes?: ValidationErrorType[];
+            tableName?: string;
+            fieldName?: string;
             includeChartConfigWarnings?: boolean;
             fromSettings?: boolean;
             jobId?: string;
@@ -1126,9 +1855,7 @@ export class ValidationService extends BaseService {
     ): Promise<KnexPaginatedData<ValidationResponse[]>> {
         const projectSummary = await this.projectModel.getSummary(projectUuid);
 
-        const auditedAbility = new CaslAuditWrapper(user.ability, user, {
-            auditLogger: logAuditEvent,
-        });
+        const auditedAbility = this.createAuditedAbility(user);
 
         if (
             auditedAbility.cannot(
@@ -1136,26 +1863,23 @@ export class ValidationService extends BaseService {
                 subject('Validation', {
                     organizationUuid: projectSummary.organizationUuid,
                     projectUuid,
-                    uuid: projectUuid,
+                    metadata: {
+                        jobId: options?.jobId,
+                        fromSettings: options?.fromSettings,
+                        searchQuery: options?.searchQuery,
+                    },
                 }),
             )
         ) {
             throw new ForbiddenError();
         }
 
-        let allowedSpaceUuids: string[] | 'all' = 'all';
-
-        if (user.role !== OrganizationMemberRole.ADMIN) {
-            const spaces = await this.spaceModel.find({ projectUuid });
-            const spaceUuids = spaces.map((s) => s.uuid);
-
-            allowedSpaceUuids =
-                await this.spacePermissionService.getAccessibleSpaceUuids(
-                    'view',
-                    user,
-                    spaceUuids,
-                );
-        }
+        const { allowedSpaceUuids, allowedAppUuids } =
+            await this.resolveAllowedContent(
+                user,
+                projectUuid,
+                projectSummary.organizationUuid,
+            );
 
         const result = await this.validationModel.getPaginated(
             projectUuid,
@@ -1166,8 +1890,11 @@ export class ValidationService extends BaseService {
                 sortDirection: options?.sortDirection,
                 sourceTypes: options?.sourceTypes,
                 errorTypes: options?.errorTypes,
+                tableName: options?.tableName,
+                fieldName: options?.fieldName,
                 includeChartConfigWarnings: options?.includeChartConfigWarnings,
                 allowedSpaceUuids,
+                allowedAppUuids,
                 jobId: options?.jobId,
             },
         );
@@ -1178,6 +1905,7 @@ export class ValidationService extends BaseService {
                     ('chartUuid' in validation && validation.chartUuid) ||
                     ('dashboardUuid' in validation &&
                         validation.dashboardUuid) ||
+                    ('appUuid' in validation && validation.appUuid) ||
                     validation.name,
             );
 
@@ -1205,19 +1933,18 @@ export class ValidationService extends BaseService {
         return this.hidePrivateContent(user, projectUuid, validations);
     }
 
-    async delete(user: SessionUser, validationId: number): Promise<void> {
-        const validation =
-            await this.validationModel.getByValidationId(validationId);
-        const projectSummary = await this.projectModel.getSummary(
-            validation.projectUuid,
-        );
+    private async authorizeAndTrackDismiss(
+        user: SessionUser,
+        projectUuid: string,
+    ): Promise<void> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+
+        const auditedAbility = this.createAuditedAbility(user);
         if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'manage',
-                subject('Validation', {
-                    organizationUuid: projectSummary.organizationUuid,
-                    projectUuid: validation.projectUuid,
-                }),
+                subject('Validation', { organizationUuid, projectUuid }),
             )
         ) {
             throw new ForbiddenError();
@@ -1228,10 +1955,235 @@ export class ValidationService extends BaseService {
             userId: user.userUuid,
             properties: {
                 organizationId: user.organizationUuid,
-                projectId: validation.projectUuid,
+                projectId: projectUuid,
             },
         });
+    }
 
-        await this.validationModel.deleteValidation(validationId);
+    async deleteValidation(
+        user: SessionUser,
+        projectUuid: string,
+        validationIdOrUuid: number | string,
+    ): Promise<void> {
+        // Authorize against the URL's projectUuid first, then look up the
+        // validation scoped to that project. If the validation belongs to a
+        // different project the lookup throws NotFoundError, so the caller
+        // can never act on a row outside the project they're authorized for.
+        await this.authorizeAndTrackDismiss(user, projectUuid);
+        await this.validationModel.getByValidationIdOrUuid(
+            validationIdOrUuid,
+            projectUuid,
+        );
+        await this.validationModel.deleteValidationByIdOrUuid(
+            validationIdOrUuid,
+            projectUuid,
+        );
+    }
+
+    async validateAndUpdateChart(
+        user: SessionUser,
+        projectUuid: string,
+        chartUuid: string,
+    ): Promise<CreateChartValidation[]> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+
+        const auditedAbility = this.createAuditedAbility(user);
+
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('Validation', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: { chartUuid },
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        // Get the chart to find which explore it uses
+        const chart = await this.savedChartModel.get(chartUuid, undefined, {
+            projectUuid,
+        });
+
+        // Check user permissions
+        const { inheritsFromOrgOrProject, access } =
+            await this.spacePermissionService.resolveAccess(user.userUuid, {
+                type: 'space',
+                spaceUuid: chart.spaceUuid,
+            });
+
+        if (
+            auditedAbility.cannot(
+                'view',
+                subject('SavedChart', {
+                    organizationUuid: chart.organizationUuid,
+                    projectUuid: chart.projectUuid,
+                    inheritsFromOrgOrProject,
+                    access,
+                    metadata: {
+                        savedChartUuid: chartUuid,
+                        savedChartName: chart.name,
+                    },
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                "You don't have access to validate this chart",
+            );
+        }
+
+        // Only fetch the specific explore this chart uses
+        const compiledExplore = await this.projectModel.getExploreFromCache(
+            projectUuid,
+            chart.tableName,
+        );
+        const compiledExplores = compiledExplore ? [compiledExplore] : [];
+
+        // Build field lookup for validation
+        const exploreFields =
+            ValidationService.buildExploreFields(compiledExplores);
+
+        // Validate the single chart
+        const validationErrors = await this.validateCharts(
+            projectUuid,
+            exploreFields,
+            ValidationService.buildExploreErrorNames(compiledExplores),
+            compiledExplores,
+            chartUuid,
+        );
+
+        // Delete existing validations for this chart
+        await this.validationModel.deleteChartValidations(
+            chartUuid,
+            projectUuid,
+        );
+
+        // Store new validation errors if any
+        if (validationErrors.length > 0) {
+            await this.validationModel.create({
+                projectUuid,
+                validations: validationErrors,
+            });
+        }
+
+        return validationErrors;
+    }
+
+    async validateAndUpdateDashboard(
+        user: SessionUser,
+        projectUuid: string,
+        dashboardUuid: string,
+    ): Promise<CreateDashboardValidation[]> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+
+        const auditedAbility = this.createAuditedAbility(user);
+
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('Validation', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: { dashboardUuid },
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        // Get the dashboard to check permissions
+        const dashboard = await this.dashboardModel.getByIdOrSlug(
+            dashboardUuid,
+            {
+                projectUuid,
+            },
+        );
+
+        // Check user permissions
+        const { inheritsFromOrgOrProject, access } =
+            await this.spacePermissionService.resolveAccess(user.userUuid, {
+                type: 'dashboard',
+                dashboardUuid: dashboard.uuid,
+                spaceUuid: dashboard.spaceUuid,
+            });
+
+        if (
+            auditedAbility.cannot(
+                'view',
+                subject('Dashboard', {
+                    organizationUuid: dashboard.organizationUuid,
+                    projectUuid: dashboard.projectUuid,
+                    inheritsFromOrgOrProject,
+                    access,
+                    metadata: {
+                        dashboardUuid,
+                        dashboardName: dashboard.name,
+                    },
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                "You don't have access to validate this dashboard",
+            );
+        }
+
+        // Get all explores for dashboard validation
+        const compiledExploresMap =
+            await this.projectModel.getAllExploresFromCache(projectUuid);
+        const compiledExplores = Object.values(compiledExploresMap);
+
+        // Get existing fields for validation
+        const existingFields =
+            ValidationService.buildExistingFields(compiledExplores);
+        const existingTableNames =
+            ValidationService.buildExistingTableNames(compiledExplores);
+
+        // Get existing chart validation errors from database
+        const validations = await this.validationModel.get(projectUuid);
+        const blockingChartErrors = validations.reduce<
+            Array<{ chartUuid: string; name: string }>
+        >((acc, v) => {
+            if (
+                v.source === ValidationSourceType.Chart &&
+                'chartUuid' in v &&
+                v.chartUuid &&
+                v.errorType !== ValidationErrorType.ChartConfiguration
+            ) {
+                acc.push({
+                    chartUuid: v.chartUuid,
+                    name: v.name || '',
+                });
+            }
+            return acc;
+        }, []);
+
+        // Validate the single dashboard
+        const validationErrors = await this.validateDashboards(
+            projectUuid,
+            existingFields,
+            existingTableNames,
+            blockingChartErrors,
+            dashboardUuid,
+        );
+
+        // Delete existing validations for this dashboard
+        await this.validationModel.deleteDashboardValidations(
+            dashboardUuid,
+            projectUuid,
+        );
+
+        // Store new validation errors if any
+        if (validationErrors.length > 0) {
+            await this.validationModel.create({
+                projectUuid,
+                validations: validationErrors,
+            });
+        }
+
+        return validationErrors;
     }
 }

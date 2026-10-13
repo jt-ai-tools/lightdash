@@ -1,10 +1,11 @@
 import {
-    ValidationTarget,
     createTemporaryVirtualView,
     friendlyName,
     isApiError,
     isChartValidationError,
+    ValidationTarget,
     type Explore,
+    type ParametersValuesMap,
     type ValidationErrorChartResponse,
     type ValidationResponse,
     type VizColumn,
@@ -23,7 +24,7 @@ import {
     Text,
     TextInput,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import {
     IconAlertCircle,
     IconAlertHexagon,
@@ -50,6 +51,7 @@ export type VirtualViewState = {
     name: string;
     label: string;
     sql: string;
+    savedParameterValues?: ParametersValuesMap;
     onCloseEditVirtualView: () => void;
 };
 
@@ -98,20 +100,16 @@ const ChartErrorListItem: FC<{
         <Group gap="xs" wrap="nowrap">
             <MantineIcon icon={IconAlertHexagon} color="orange" size={16} />
             <Tooltip
-                variant="xs"
-                withinPortal
                 label={
                     <Stack gap={2}>
                         {errorMessages.map((message, index) => (
-                            <Text fz={11} key={index}>
+                            <Text fz="xs" key={index}>
                                 {message}
                             </Text>
                         ))}
                     </Stack>
                 }
-                withArrow
                 position="right"
-                multiline
                 maw={300}
             >
                 <Anchor
@@ -179,7 +177,7 @@ const ChangesReviewModal: FC<
                     <Text fz="sm" fw={500} c="ldGray.7">
                         Column changes
                     </Text>
-                    <Paper p="sm" radius="md" withBorder bg="ldGray.0">
+                    <Paper p="sm" radius="md" bg="ldGray.0">
                         <Stack gap="xs">
                             {newColumnsAddedNr > 0 && (
                                 <Group gap="xs">
@@ -197,7 +195,7 @@ const ChangesReviewModal: FC<
                             {visibleDiffs.map((diff, index) => (
                                 <DiffListItem key={index} diff={diff} />
                             ))}
-                            <Collapse in={showAllDiffs}>
+                            <Collapse expanded={showAllDiffs}>
                                 {affectedColumns.slice(3).map((diff, index) => (
                                     <DiffListItem key={index + 3} diff={diff} />
                                 ))}
@@ -206,7 +204,6 @@ const ChangesReviewModal: FC<
                                 <Button
                                     size="compact-xs"
                                     variant="subtle"
-                                    color="ldGray.6"
                                     onClick={() =>
                                         setShowAllDiffs(!showAllDiffs)
                                     }
@@ -228,7 +225,7 @@ const ChangesReviewModal: FC<
                         <Text fz="sm" fw={500} c="ldGray.7">
                             Affected charts ({chartErrorEntries.length})
                         </Text>
-                        <Paper p="sm" radius="md" withBorder bg="ldGray.0">
+                        <Paper p="sm" radius="md" bg="ldGray.0">
                             <Stack gap="xs">
                                 {visibleChartErrors.map(
                                     ([chartUuid, errors]) => (
@@ -239,7 +236,7 @@ const ChangesReviewModal: FC<
                                         />
                                     ),
                                 )}
-                                <Collapse in={showAllChartErrors}>
+                                <Collapse expanded={showAllChartErrors}>
                                     {chartErrorEntries
                                         .slice(3)
                                         .map(([chartUuid, errors]) => (
@@ -274,7 +271,7 @@ const ChangesReviewModal: FC<
                 )}
 
                 {/* Warning Footer */}
-                <Text fz="sm" c="ldGray.6">
+                <Text fz="sm" c="dimmed">
                     These changes could break existing content using this
                     virtual view.
                 </Text>
@@ -301,6 +298,9 @@ export const HeaderVirtualView: FC<{
     const navigate = useNavigate();
     const sql = useAppSelector((state) => state.sqlRunner.sql);
     const projectUuid = useAppSelector((state) => state.sqlRunner.projectUuid);
+    const parameterValues = useAppSelector(
+        (state) => state.sqlRunner.parameterValues,
+    );
     const warehouseConnectionType = useAppSelector(
         (state) => state.sqlRunner.warehouseConnectionType,
     );
@@ -334,6 +334,9 @@ export const HeaderVirtualView: FC<{
         virtualViewState.label || friendlyName(virtualViewState.name),
     );
 
+    const savedParameterValues =
+        Object.keys(parameterValues).length > 0 ? parameterValues : undefined;
+
     const handleUpdateVirtualView = async ({
         handleDiff,
     }: {
@@ -348,7 +351,11 @@ export const HeaderVirtualView: FC<{
         let columnsFromQuery: VizColumn[];
         // Get columns from query regardless of whether the query has run or not
         try {
-            const results = await runQuery({ sql, limit: 1 });
+            const results = await runQuery({
+                sql,
+                limit: 1,
+                parameterValues: savedParameterValues,
+            });
 
             if (results) {
                 columnsFromQuery = results.columns;
@@ -390,6 +397,7 @@ export const HeaderVirtualView: FC<{
                 name,
                 sql,
                 columns: columnsFromQuery,
+                parameterValues: savedParameterValues,
             });
             return navigate(0);
         }
@@ -437,6 +445,10 @@ export const HeaderVirtualView: FC<{
                         name,
                         sql,
                         columns: columnsFromQuery,
+                        parameterValues:
+                            Object.keys(parameterValues).length > 0
+                                ? parameterValues
+                                : undefined,
                     });
                     void navigate(0);
                 } else {
@@ -468,6 +480,10 @@ export const HeaderVirtualView: FC<{
                                 name,
                                 sql,
                                 columns: columnsFromQuery,
+                                parameterValues:
+                                    Object.keys(parameterValues).length > 0
+                                        ? parameterValues
+                                        : undefined,
                             });
                             void navigate(0);
                         } else {
@@ -519,11 +535,15 @@ export const HeaderVirtualView: FC<{
 
             <Group gap="xs">
                 <Group gap="xs">
-                    <Paper p="xxs" withBorder radius="sm">
+                    <Paper p="xxs" radius="sm">
                         <MantineIcon icon={IconTableAlias} />
                     </Paper>
                     Editing
                     <TextInput
+                        data-tour-anchor="virtual-view-edit-name"
+                        data-tour-hint="Rename the virtual view"
+                        data-tour-input="true"
+                        data-tour-suggest="Orders grouped by status"
                         fz="sm"
                         fw={500}
                         value={name}
@@ -533,11 +553,7 @@ export const HeaderVirtualView: FC<{
             </Group>
 
             <Group gap="sm">
-                <Tooltip
-                    variant="xs"
-                    label="No changes to save"
-                    disabled={hasChanges}
-                >
+                <Tooltip label="No changes to save" disabled={hasChanges}>
                     <Box>
                         <Button
                             size="xs"
@@ -550,6 +566,14 @@ export const HeaderVirtualView: FC<{
                                 handleUpdateVirtualView({ handleDiff: true })
                             }
                             color="green"
+                            data-tour-scope="manage:VirtualView"
+                            data-tour-step="2"
+                            data-tour-route="/projects/:projectUuid/tables/:tableName"
+                            data-tour-title="Edit a virtual view"
+                            data-tour-label="Save the virtual view"
+                            data-tour-docs="semantic-layer/virtual-views.mdx#edit-or-delete-a-virtual-view:1"
+                            data-tour-interactive="true"
+                            data-tour-via='[data-tour-nav="new"] >> [data-tour-nav="new-sql-runner"] >> [data-tour-anchor="sql-runner-editor"] >> [data-tour-anchor="sql-runner-run"] >> [data-tour-anchor="sql-cta-menu"] >> [data-tour-anchor="sql-cta-virtual-view"] >> [data-tour-anchor="sql-create-virtual-view"] >> [data-tour-anchor="virtual-view-name"] >> [data-tour-anchor="virtual-view-create-submit"] >> [data-tour-nav="new"] >> [data-tour-nav="new-chart"] >> [data-tour-anchor="explore-search"] >> [data-tour-anchor="explore-section"][data-tour-value="Virtual Views"] >> [data-tour-anchor="explore-table"][data-tour-value="Orders by status"] >> [data-tour-anchor="virtual-view-actions"] >> [data-tour-anchor="virtual-view-edit"] >> [data-tour-anchor="virtual-view-discard"]? >> [data-tour-anchor="virtual-view-edit-name"]'
                         >
                             Save
                         </Button>

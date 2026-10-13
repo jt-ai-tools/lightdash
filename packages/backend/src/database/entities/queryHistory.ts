@@ -1,10 +1,16 @@
 import type {
-    ExecuteAsyncQueryRequestParams,
+    AgentIdentityClaim,
+    AuthType,
+    DuckdbExecutionSpec,
     ItemsMap,
     MetricQuery,
+    ParametersValuesMap,
     PivotConfiguration,
     PivotValuesColumn,
+    PreAggregateExecutionEngine,
+    PreAggregateFallbackReason,
     QueryExecutionContext,
+    QueryHistory,
     QueryHistoryStatus,
     ResultColumns,
     WarehouseQueryMetadata,
@@ -12,10 +18,13 @@ import type {
 import { Knex } from 'knex';
 
 export type DbQueryHistory = {
+    agent_identity: AgentIdentityClaim | null;
+    warehouse_connection_uuid?: string | null;
     query_uuid: string;
     created_at: Date;
     created_by_user_uuid: string | null;
     created_by_account: string | null;
+    created_by_actor_type: AuthType | null;
     project_uuid: string | null;
     organization_uuid: string;
     context: QueryExecutionContext;
@@ -25,10 +34,12 @@ export type DbQueryHistory = {
     warehouse_query_metadata: WarehouseQueryMetadata | null;
     metric_query: MetricQuery;
     fields: ItemsMap;
-    request_parameters: ExecuteAsyncQueryRequestParams;
+    request_parameters: QueryHistory['requestParameters'];
+    used_parameters: ParametersValuesMap | null;
     total_row_count: number | null;
     warehouse_execution_time_ms: number | null;
     error: string | null;
+    errored_at: Date | null;
     status: QueryHistoryStatus;
     cache_key: string;
     pivot_configuration: PivotConfiguration | null;
@@ -40,18 +51,30 @@ export type DbQueryHistory = {
     results_expires_at: Date | null;
     columns: ResultColumns | null; // result columns with or without pivoting
     original_columns: ResultColumns | null; // columns from original SQL, before pivoting
+    pre_aggregate_compiled_sql: string | null; // DuckDB SQL for pre-aggregate execution path
+    pre_aggregate_execution: PreAggregateExecutionEngine | null; // engine for pre_aggregate_compiled_sql
+    pre_aggregate_fallback_reason: PreAggregateFallbackReason | null; // non-null ⇒ matched but served from source warehouse
+    processing_started_at: Date | null; // when the NATS worker picked up the job
+    duckdb_execution: DuckdbExecutionSpec | null; // how a DuckDB source query runs, for the worker to rebuild it
 };
 
 export type DbQueryHistoryIn = Omit<
     DbQueryHistory,
-    'query_uuid' | 'created_at'
->;
+    'query_uuid' | 'created_at' | 'created_by_actor_type' | 'agent_identity'
+> & {
+    created_by_actor_type: AuthType;
+    agent_identity?: AgentIdentityClaim;
+    warehouse_connection_uuid?: string | null;
+};
 
 export type DbQueryHistoryUpdate = Partial<
     Pick<
         DbQueryHistory,
         | 'status'
         | 'error'
+        | 'errored_at'
+        | 'compiled_sql'
+        | 'fields'
         | 'warehouse_execution_time_ms'
         | 'total_row_count'
         | 'warehouse_query_id'
@@ -66,6 +89,12 @@ export type DbQueryHistoryUpdate = Partial<
         | 'results_expires_at'
         | 'columns'
         | 'original_columns'
+        | 'pre_aggregate_compiled_sql'
+        | 'pre_aggregate_execution'
+        | 'cache_key'
+        | 'pre_aggregate_fallback_reason'
+        | 'processing_started_at'
+        | 'duckdb_execution'
     >
 >;
 

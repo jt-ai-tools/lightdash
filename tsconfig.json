@@ -15,10 +15,19 @@
             "path": "./packages/common"
         },
         {
+            "path": "./packages/visualization"
+        },
+        {
             "path": "./packages/cli"
         },
         {
             "path": "./packages/warehouses"
+        },
+        {
+            "path": "./packages/formula"
+        },
+        {
+            "path": "./packages/formula-tests"
         },
     ],
     "exclude": [

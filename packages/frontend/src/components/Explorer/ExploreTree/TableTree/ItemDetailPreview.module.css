@@ -1,0 +1,39 @@
+/* Override @uiw/react-markdown-preview defaults so tables fit their
+ * container and long cell content wraps. Compound element+class
+ * selectors beat the library's `.wmde-markdown table` (0,1,1) and
+ * `.wmde-markdown table td` (0,1,2) specificity. */
+table.markdownTable {
+    display: table;
+    width: 100%;
+    table-layout: fixed;
+}
+
+table.markdownTable th.markdownCell,
+table.markdownTable td.markdownCell {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.previewDropdown {
+    overflow: auto;
+    border-color: var(--mantine-color-ldGray-2);
+    border-radius: var(--mantine-radius-md);
+    box-shadow: var(--mantine-shadow-md);
+}
+
+.markdown {
+    line-height: 1.55;
+}
+
+.markdown > :first-child {
+    margin-top: 0;
+}
+
+.markdown > :last-child {
+    margin-bottom: 0;
+}
+.metricTypeBadge {
+    border: 1px solid var(--mantine-color-indigo-1);
+    box-shadow: var(--mantine-shadow-subtle);
+}

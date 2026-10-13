@@ -1,14 +1,16 @@
 import { IconPhoto } from '@tabler/icons-react';
-import { type FC, type RefObject, useCallback } from 'react';
-import { type EChartsReact } from '../EChartsReactWrapper';
+import { useCallback, type FC, type RefObject } from 'react';
 import ChartDownloadOptions from '../common/ChartDownload/ChartDownloadOptions';
+import { type DownloadType } from '../common/ChartDownload/chartDownloadUtils';
 import MantineModal from '../common/MantineModal';
+import { type EChartsReact } from '../EChartsReactWrapper';
 
 interface ExportImageModalProps {
     echartRef: RefObject<EChartsReact | null> | undefined;
     chartName?: string;
     isOpen: boolean;
     onClose: () => void;
+    unavailableOptions?: DownloadType[];
 }
 
 const ExportImageModal: FC<ExportImageModalProps> = ({
@@ -16,6 +18,7 @@ const ExportImageModal: FC<ExportImageModalProps> = ({
     chartName,
     isOpen,
     onClose,
+    unavailableOptions,
 }) => {
     const getChartInstance = useCallback(
         () => echartRef?.current?.getEchartsInstance(),
@@ -35,6 +38,7 @@ const ExportImageModal: FC<ExportImageModalProps> = ({
             <ChartDownloadOptions
                 getChartInstance={getChartInstance}
                 chartName={chartName}
+                unavailableOptions={unavailableOptions}
             />
         </MantineModal>
     );

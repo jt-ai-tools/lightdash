@@ -1,24 +1,44 @@
 import {
+    ApiCompleteUserOnboardingTourRequest,
     ApiEmailStatusResponse,
     ApiErrorPayload,
     ApiGetAccountResponse,
     ApiGetAuthenticatedUserResponse,
     ApiGetLoginOptionsResponse,
+    ApiGetUserOnboardingResponse,
+    ApiLearnProgressResponse,
+    ApiLoginEmailOtpRequest,
+    ApiLoginEmailOtpResponse,
     ApiRegisterUserResponse,
     ApiSuccessEmpty,
     ApiUserAllowedOrganizationsResponse,
-    AuthorizationError,
+    ApiVerifyLoginEmailOtpRequest,
+    ApiVerifyLoginEmailOtpResponse,
+    assertRegisteredAccount,
     CreatePersonalAccessToken,
+    getEmailSchema,
     getRequestMethod,
+    hasInviteCode,
+    isEmailOnlyUser,
+    isMobileLoginIntent,
+    isMobilePlatform,
     LightdashRequestMethodHeader,
+    MergeLearnProgressRequest,
     NotFoundError,
     ParameterError,
     PersonalAccessToken,
     PersonalAccessTokenWithToken,
+    RedshiftAwsSsoCompleteRequest,
+    RedshiftAwsSsoCompleteResponse,
+    RedshiftAwsSsoStartRequest,
+    RedshiftAwsSsoStartResponse,
     RegisterOrActivateUser,
     UpsertUserWarehouseCredentials,
     UserWarehouseCredentials,
     validatePassword,
+    WarehouseTypes,
+    type MobileLoginOptions,
+    type UserWarehouseCredentialsWithAgentStatus,
 } from '@lightdash/common';
 import {
     Body,
@@ -38,6 +58,9 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { serializeAccount, toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
+import Logger from '../logging/logger';
 import { UserModel } from '../models/UserModel';
 import {
     allowApiKeyAuthentication,
@@ -56,20 +79,36 @@ export class UserController extends BaseController {
      * @summary Get authenticated user
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.getAuthenticatedUser'),
+    ])
     @Get('/')
     @OperationId('GetAuthenticatedUser')
     async getAuthenticatedUser(
         @Request() req: express.Request,
     ): Promise<ApiGetAuthenticatedUserResponse> {
-        if (!req.user) {
-            throw new AuthorizationError('User session not found');
-        }
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
+
+        const impersonationSession = req.session?.impersonation;
+        const impersonation = impersonationSession
+            ? {
+                  adminUserUuid: impersonationSession.adminUserUuid,
+                  adminName: impersonationSession.adminName,
+                  impersonatedUserUuid: impersonationSession.targetUserUuid,
+              }
+            : null;
 
         return {
             status: 'ok',
-            results: UserModel.lightdashUserFromSession(req.user),
+            results: {
+                ...UserModel.lightdashUserFromSession(
+                    toSessionUser(req.account),
+                ),
+                impersonation,
+            },
         };
     }
 
@@ -87,10 +126,23 @@ export class UserController extends BaseController {
         @Body()
         body: RegisterOrActivateUser,
     ): Promise<ApiRegisterUserResponse> {
-        if (!validatePassword(req.body.password)) {
-            throw new ParameterError(
-                'Password must contain at least 8 characters, 1 letter and 1 number or 1 special character',
-            );
+        if ('inviteCode' in body && !hasInviteCode(body)) {
+            throw new ParameterError('Invalid invite code');
+        }
+        if (!isEmailOnlyUser(body)) {
+            if (!validatePassword(body.password)) {
+                throw new ParameterError(
+                    'Password must contain at least 8 characters, 1 letter and 1 number or 1 special character',
+                );
+            }
+            if (
+                typeof body.firstName !== 'string' ||
+                typeof body.lastName !== 'string'
+            ) {
+                throw new ParameterError(
+                    'First name and last name are required',
+                );
+            }
         }
         const sessionUser = await this.services
             .getUserService()
@@ -121,9 +173,14 @@ export class UserController extends BaseController {
     async createEmailOneTimePasscode(
         @Request() req: express.Request,
     ): Promise<ApiEmailStatusResponse> {
+        assertRegisteredAccount(req.account);
+        const user = toSessionUser(req.account);
         const status = await this.services
             .getUserService()
-            .sendOneTimePasscodeToPrimaryEmail(req.user!);
+            .sendOneTimePasscodeToPrimaryEmail(
+                user,
+                user.isSetupComplete ? 'email_change' : 'signup_verification',
+            );
         this.setStatus(200);
         return {
             status: 'ok',
@@ -137,21 +194,193 @@ export class UserController extends BaseController {
      * @param req express request
      * @param passcode the one-time passcode sent to the user's primary email
      */
-    @Middlewares([isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserService.verifyEmail'),
+    ])
     @Get('/me/email/status')
     @OperationId('GetEmailVerificationStatus')
     async getEmailVerificationStatus(
         @Request() req: express.Request,
         @Query() passcode?: string,
     ): Promise<ApiEmailStatusResponse> {
+        assertRegisteredAccount(req.account);
         // Throws 404 error if not found
         const status = await this.services
             .getUserService()
-            .getPrimaryEmailStatus(req.user!, passcode);
+            .getPrimaryEmailStatus(toSessionUser(req.account), passcode);
         this.setStatus(200);
         return {
             status: 'ok',
             results: status,
+        };
+    }
+
+    /**
+     * Get the authenticated user's onboarding state, i.e. which feature tours they have completed
+     * @summary Get onboarding
+     * @param req express request
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.getUserOnboarding'),
+    ])
+    @Get('/onboarding')
+    @OperationId('GetUserOnboarding')
+    async getUserOnboarding(
+        @Request() req: express.Request,
+    ): Promise<ApiGetUserOnboardingResponse> {
+        assertRegisteredAccount(req.account);
+        const results = await this.services
+            .getUserService()
+            .getOnboarding(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * Mark a feature tour as completed for the authenticated user
+     * @summary Complete onboarding tour
+     * @param req express request
+     * @param body the tour to mark as completed
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.completeUserOnboardingTour'),
+    ])
+    @Post('/onboarding')
+    @OperationId('CompleteUserOnboardingTour')
+    async completeUserOnboardingTour(
+        @Request() req: express.Request,
+        @Body() body: ApiCompleteUserOnboardingTourRequest,
+    ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
+        await this.services
+            .getUserService()
+            .completeOnboardingTour(req.account, body.tour);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: undefined,
+        };
+    }
+
+    /**
+     * Learn walkthrough progress for the authenticated user: what the
+     * library shows as complete, started, and up next, from any browser.
+     * @summary Get Learn progress
+     * @param req express request
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.getUserLearnProgress'),
+    ])
+    @Get('/learn-progress')
+    @OperationId('GetUserLearnProgress')
+    async getUserLearnProgress(
+        @Request() req: express.Request,
+    ): Promise<ApiLearnProgressResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getUserService()
+                .getLearnProgress(req.account),
+        };
+    }
+
+    /**
+     * Record that the authenticated user started a Learn walkthrough.
+     * The scope must be one the instance's scope registry knows.
+     * @summary Mark Learn walkthrough started
+     * @param req express request
+     * @param scope the walkthrough's scope, e.g. `view:Dashboard`
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.markUserLearnScopeStarted'),
+    ])
+    @Post('/learn-progress/{scope}/started')
+    @OperationId('MarkUserLearnScopeStarted')
+    async markUserLearnScopeStarted(
+        @Request() req: express.Request,
+        @Path() scope: string,
+    ): Promise<ApiLearnProgressResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getUserService()
+                .markLearnScopeStarted(req.account, scope),
+        };
+    }
+
+    /**
+     * Record that the authenticated user completed a Learn walkthrough.
+     * Idempotent: the first completion time is kept.
+     * @summary Mark Learn walkthrough completed
+     * @param req express request
+     * @param scope the walkthrough's scope, e.g. `view:Dashboard`
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'UserController.markUserLearnScopeCompleted',
+        ),
+    ])
+    @Post('/learn-progress/{scope}/completed')
+    @OperationId('MarkUserLearnScopeCompleted')
+    async markUserLearnScopeCompleted(
+        @Request() req: express.Request,
+        @Path() scope: string,
+    ): Promise<ApiLearnProgressResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getUserService()
+                .markLearnScopeCompleted(req.account, scope),
+        };
+    }
+
+    /**
+     * Take in progress a browser recorded before the instance kept it.
+     * Unioned with what the instance holds; server timestamps win, and
+     * unknown scopes are dropped.
+     * @summary Merge browser Learn progress
+     * @param req express request
+     * @param body the browser's completed, started and last-started scopes
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.mergeUserLearnProgress'),
+    ])
+    @Post('/learn-progress/merge')
+    @OperationId('MergeUserLearnProgress')
+    async mergeUserLearnProgress(
+        @Request() req: express.Request,
+        @Body() body: MergeLearnProgressRequest,
+    ): Promise<ApiLearnProgressResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getUserService()
+                .mergeLearnProgress(req.account, body),
         };
     }
 
@@ -161,15 +390,22 @@ export class UserController extends BaseController {
      * @summary List available organizations
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'UserController.getOrganizationsUserCanJoin',
+        ),
+    ])
     @Get('/me/allowedOrganizations')
     @OperationId('ListMyAvailableOrganizations')
     async getOrganizationsUserCanJoin(
         @Request() req: express.Request,
     ): Promise<ApiUserAllowedOrganizationsResponse> {
+        assertRegisteredAccount(req.account);
         const status = await this.services
             .getUserService()
-            .getAllowedOrganizations(req.user!);
+            .getAllowedOrganizations(toSessionUser(req.account));
         this.setStatus(200);
         return {
             status: 'ok',
@@ -188,6 +424,7 @@ export class UserController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('UserController.joinOrganization'),
     ])
     @Post('/me/joinOrganization/{organizationUuid}')
     @OperationId('JoinOrganization')
@@ -195,16 +432,59 @@ export class UserController extends BaseController {
         @Request() req: express.Request,
         @Path() organizationUuid: string,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         await this.services
             .getUserService()
-            .joinOrg(req.user!, organizationUuid);
+            .joinOrg(toSessionUser(req.account), organizationUuid);
         const sessionUser = await req.services
             .getUserService()
-            .getSessionByUserUuid(req.user!.userUuid);
+            .getSessionByUserUuid(req.account.user.userUuid);
         await new Promise<void>((resolve, reject) => {
             req.login(sessionUser, (err) => {
                 if (err) {
                     reject(err);
+                }
+                resolve();
+            });
+        });
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: undefined,
+        };
+    }
+
+    /**
+     * Remove the current user from their organization. Fails if the caller is
+     * the only admin remaining. The user record is preserved so they can join
+     * another organization later.
+     * @summary Leave organization
+     * @param req express request
+     */
+    @Middlewares([isAuthenticated, unauthorisedInDemo])
+    @Delete('/me/leaveOrganization')
+    @OperationId('LeaveOrganization')
+    async leaveOrganization(
+        @Request() req: express.Request,
+    ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
+        await this.services
+            .getUserService()
+            .leaveOrganization(toSessionUser(req.account), {
+                ip: req.ip,
+                userAgent: req.get('user-agent'),
+            });
+
+        // Membership has already been removed and DB sessions wiped above.
+        // Soft-fail this in-memory session destroy so a callback error doesn't
+        // mask the successful leave from the client.
+        await new Promise<void>((resolve) => {
+            req.session.destroy((err) => {
+                if (err) {
+                    Logger.error(
+                        'Failed to destroy session after leaving organization',
+                        { error: err },
+                    );
                 }
                 resolve();
             });
@@ -227,9 +507,10 @@ export class UserController extends BaseController {
     async deleteUser(
         @Request() req: express.Request,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         await this.services
             .getUserService()
-            .delete(req.user!, req.user!.userUuid);
+            .delete(toSessionUser(req.account), req.account.user.userUuid);
 
         await new Promise<void>((resolve, reject) => {
             req.session.destroy((err) => {
@@ -250,19 +531,24 @@ export class UserController extends BaseController {
      * Get user warehouse credentials
      * @summary List warehouse credentials
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.getWarehouseCredentials'),
+    ])
     @Get('/warehouseCredentials')
     @OperationId('getWarehouseCredentials')
     async getWarehouseCredentials(@Request() req: express.Request): Promise<{
         status: 'ok';
-        results: UserWarehouseCredentials[];
+        results: UserWarehouseCredentialsWithAgentStatus[];
     }> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getUserService()
-                .getWarehouseCredentials(req.user!),
+                .getWarehouseCredentials(toSessionUser(req.account)),
         };
     }
 
@@ -270,7 +556,11 @@ export class UserController extends BaseController {
      * Create user warehouse credentials
      * @summary Create warehouse credentials
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.createWarehouseCredentials'),
+    ])
     @Post('/warehouseCredentials')
     @OperationId('createWarehouseCredentials')
     async createWarehouseCredentials(
@@ -280,12 +570,150 @@ export class UserController extends BaseController {
         status: 'ok';
         results: UserWarehouseCredentials;
     }> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getUserService()
-                .createWarehouseCredentials(req.user!, body),
+                .createWarehouseCredentials(toSessionUser(req.account), body),
+        };
+    }
+
+    /**
+     * Start Redshift AWS SSO login
+     * @summary Start Redshift AWS SSO login
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'UserController.startRedshiftAwsSsoWarehouseCredentials',
+        ),
+    ])
+    @Post('/warehouseCredentials/redshift/aws-sso/start')
+    @OperationId('startRedshiftAwsSsoWarehouseCredentials')
+    async startRedshiftAwsSsoWarehouseCredentials(
+        @Request() req: express.Request,
+        @Body() body: RedshiftAwsSsoStartRequest,
+    ): Promise<RedshiftAwsSsoStartResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        let startRequest = body;
+        if (body.projectUuid) {
+            const project = await this.services
+                .getProjectService()
+                .getProject(body.projectUuid, req.account);
+            if (project.warehouseConnection?.type !== WarehouseTypes.REDSHIFT) {
+                throw new ParameterError(
+                    'Redshift AWS SSO credentials can only be created for Redshift projects.',
+                );
+            }
+            if (
+                !project.warehouseConnection.awsSsoStartUrl ||
+                !project.warehouseConnection.awsSsoRegion
+            ) {
+                throw new ParameterError(
+                    'Redshift AWS SSO credentials require AWS IAM Identity Center to be configured on the project.',
+                );
+            }
+            startRequest = {
+                ...body,
+                startUrl:
+                    body.startUrl ?? project.warehouseConnection.awsSsoStartUrl,
+                region: body.region ?? project.warehouseConnection.awsSsoRegion,
+            };
+        }
+        const { session, results } = await this.services
+            .getUserService()
+            .startRedshiftAwsSsoDeviceAuthorization(startRequest);
+        req.session.oauth = {
+            ...(req.session.oauth ?? {}),
+            redshiftAwsSso: session,
+        };
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * Complete Redshift AWS SSO login
+     * @summary Complete Redshift AWS SSO login
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'UserController.completeRedshiftAwsSsoWarehouseCredentials',
+        ),
+    ])
+    @Post('/warehouseCredentials/redshift/aws-sso/complete')
+    @OperationId('completeRedshiftAwsSsoWarehouseCredentials')
+    async completeRedshiftAwsSsoWarehouseCredentials(
+        @Request() req: express.Request,
+        @Body() body: RedshiftAwsSsoCompleteRequest,
+    ): Promise<RedshiftAwsSsoCompleteResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        let completeRequest = body;
+        if (body.projectUuid) {
+            const project = await this.services
+                .getProjectService()
+                .getProject(body.projectUuid, req.account);
+            if (project.warehouseConnection?.type !== WarehouseTypes.REDSHIFT) {
+                throw new ParameterError(
+                    'Redshift AWS SSO credentials can only be created for Redshift projects.',
+                );
+            }
+            if (
+                !project.warehouseConnection.awsSsoAccountId ||
+                !project.warehouseConnection.awsSsoRoleName
+            ) {
+                throw new ParameterError(
+                    'Redshift AWS SSO credentials require AWS IAM Identity Center to be configured on the project.',
+                );
+            }
+            completeRequest = {
+                ...body,
+                accountId:
+                    body.accountId ??
+                    project.warehouseConnection.awsSsoAccountId,
+                roleName:
+                    body.roleName ?? project.warehouseConnection.awsSsoRoleName,
+            };
+        }
+        const results = await this.services
+            .getUserService()
+            .completeRedshiftAwsSsoDeviceAuthorization(
+                toSessionUser(req.account),
+                req.session.oauth?.redshiftAwsSso,
+                completeRequest,
+            );
+
+        if (results.status === 'authenticated') {
+            if (body.projectUuid) {
+                try {
+                    await this.services
+                        .getProjectService()
+                        .upsertProjectCredentialsPreference(
+                            toSessionUser(req.account),
+                            body.projectUuid,
+                            results.credentials.uuid,
+                        );
+                } catch (e) {
+                    Logger.warn(
+                        `Failed to set Redshift AWS SSO credentials preference for project ${body.projectUuid}`,
+                        e,
+                    );
+                }
+            }
+            delete req.session.oauth?.redshiftAwsSso;
+        }
+
+        return {
+            status: 'ok',
+            results,
         };
     }
 
@@ -293,7 +721,11 @@ export class UserController extends BaseController {
      * Update user warehouse credentials
      * @summary Update warehouse credentials
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.updateWarehouseCredentials'),
+    ])
     @Patch('/warehouseCredentials/{uuid}')
     @OperationId('updateWarehouseCredentials')
     async updateWarehouseCredentials(
@@ -304,12 +736,17 @@ export class UserController extends BaseController {
         status: 'ok';
         results: UserWarehouseCredentials;
     }> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getUserService()
-                .updateWarehouseCredentials(req.user!, uuid, body),
+                .updateWarehouseCredentials(
+                    toSessionUser(req.account),
+                    uuid,
+                    body,
+                ),
         };
     }
 
@@ -317,16 +754,21 @@ export class UserController extends BaseController {
      * Delete user warehouse credentials
      * @summary Delete warehouse credentials
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.deleteWarehouseCredentials'),
+    ])
     @Delete('/warehouseCredentials/{uuid}')
     @OperationId('deleteWarehouseCredentials')
     async deleteWarehouseCredentials(
         @Request() req: express.Request,
         @Path() uuid: string,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         await this.services
             .getUserService()
-            .deleteWarehouseCredentials(req.user!, uuid);
+            .deleteWarehouseCredentials(toSessionUser(req.account), uuid);
         this.setStatus(200);
         return {
             status: 'ok',
@@ -343,15 +785,78 @@ export class UserController extends BaseController {
     async getLoginOptions(
         @Request() req: express.Request,
         @Query() email?: string,
+        @Query() mobile_login_intent?: string,
+        @Query() mobilePlatform?: string,
     ): Promise<ApiGetLoginOptionsResponse> {
-        const loginOptions = await this.services
-            .getUserService()
-            .getLoginOptions(email);
+        const userService = this.services.getUserService();
+        const mobileLoginIntent = isMobileLoginIntent(mobile_login_intent)
+            ? mobile_login_intent
+            : undefined;
+        const platform = isMobilePlatform(mobilePlatform)
+            ? mobilePlatform
+            : undefined;
+        const [loginOptions, mobileLoginPresentation, managedSignIn] =
+            await Promise.all([
+                userService.getLoginOptions(email, mobileLoginIntent),
+                userService.getMobileLoginPresentation(),
+                userService.getManagedSignIn(platform, email),
+            ]);
+        const results: MobileLoginOptions = {
+            ...loginOptions,
+            ...mobileLoginPresentation,
+            ...(managedSignIn ? { managedSignIn } : {}),
+        };
         this.setStatus(200);
         return {
             status: 'ok',
-            results: loginOptions,
+            results,
         };
+    }
+
+    @Post('/login-email-otp')
+    @OperationId('LoginEmailOtp')
+    async requestEmailOtpLogin(
+        @Body() body: ApiLoginEmailOtpRequest,
+    ): Promise<ApiLoginEmailOtpResponse> {
+        if (!getEmailSchema().safeParse(body.email).success) {
+            throw new ParameterError('Invalid email address');
+        }
+        await this.services.getUserService().requestEmailOtpLogin(body.email);
+        this.setStatus(200);
+        return { status: 'ok' };
+    }
+
+    @Post('/login-email-otp/verify')
+    @OperationId('VerifyLoginEmailOtp')
+    async verifyEmailOtpLogin(
+        @Request() req: express.Request,
+        @Body() body: ApiVerifyLoginEmailOtpRequest,
+    ): Promise<ApiVerifyLoginEmailOtpResponse> {
+        if (!getEmailSchema().safeParse(body.email).success) {
+            throw new ParameterError('Invalid email address');
+        }
+        if (!/^\d{6}$/.test(body.passcode)) {
+            throw new ParameterError('Invalid passcode format');
+        }
+        const sessionUser = await this.services
+            .getUserService()
+            .loginWithEmailOtp(body.email, body.passcode, {
+                ip: req.ip,
+                userAgent: req.get('user-agent'),
+            });
+        return new Promise((resolve, reject) => {
+            req.login(sessionUser, (error) => {
+                if (error) {
+                    reject(error);
+                    return;
+                }
+                this.setStatus(200);
+                resolve({
+                    status: 'ok',
+                    results: sessionUser,
+                });
+            });
+        });
     }
 
     /**
@@ -375,7 +880,7 @@ export class UserController extends BaseController {
             status: 'ok',
             results: await this.services
                 .getPersonalAccessTokenService()
-                .getAllPersonalAccessTokens(req.user!),
+                .getAllPersonalAccessTokens(req.account!),
         };
     }
 
@@ -385,7 +890,8 @@ export class UserController extends BaseController {
      */
     @Middlewares([
         // NOTE: We do NOT allow personal access tokens to be created with PAT authentication
-        allowOauthAuthentication, // Allow creating PAT from oauth app tokens
+        allowOauthAuthentication, // Allow creating PAT from OAuth tokens
+        isAuthenticated,
         unauthorisedInDemo,
     ])
     @SuccessResponse('200', 'Success')
@@ -404,7 +910,7 @@ export class UserController extends BaseController {
             results: await this.services
                 .getPersonalAccessTokenService()
                 .createPersonalAccessToken(
-                    req.user!,
+                    req.account!,
                     body,
                     getRequestMethod(req.header(LightdashRequestMethodHeader)),
                 ),
@@ -426,7 +932,7 @@ export class UserController extends BaseController {
         this.setStatus(200);
         await this.services
             .getPersonalAccessTokenService()
-            .deletePersonalAccessToken(req.user!, personalAccessTokenUuid);
+            .deletePersonalAccessToken(req.account!, personalAccessTokenUuid);
         return {
             status: 'ok',
             results: undefined,
@@ -462,7 +968,7 @@ export class UserController extends BaseController {
             results: await this.services
                 .getPersonalAccessTokenService()
                 .rotatePersonalAccessToken(
-                    req.user!,
+                    req.account!,
                     personalAccessTokenUuid,
                     body,
                 ),
@@ -473,7 +979,11 @@ export class UserController extends BaseController {
      * Get account information
      * @summary Get account
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('UserController.getAccount'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/account')
     @OperationId('GetAccount')
@@ -484,15 +994,10 @@ export class UserController extends BaseController {
             throw new NotFoundError('Account not found');
         }
 
-        const { ability, ...userWithoutAbility } = req.account.user;
-
         this.setStatus(200);
         return {
             status: 'ok',
-            results: {
-                ...req.account,
-                user: userWithoutAbility,
-            },
+            results: serializeAccount(req.account),
         };
     }
 }

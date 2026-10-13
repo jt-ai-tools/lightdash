@@ -104,18 +104,22 @@ Tabs help organize complex dashboards without overwhelming users:
 
 ```yaml
 tabs:
-  - uuid: "overview"
-    name: "Overview"      # Start with high-level view
+  - name: "Overview"      # Start with high-level view
+    hidden: false
     order: 0
-  - uuid: "trends"
-    name: "Trends"        # Time-based analysis
+    uuid: "1b1f4a7b-7e2d-4e91-8fd7-0d2bb54cb0c1"
+  - name: "Trends"        # Time-based analysis
+    hidden: false
     order: 1
-  - uuid: "breakdown"
-    name: "Breakdown"     # Dimensional analysis
+    uuid: "2c2f5b8c-8f3e-4fa2-90e8-1e3cc65dc1d2"
+  - name: "Breakdown"     # Dimensional analysis
+    hidden: false
     order: 2
-  - uuid: "details"
-    name: "Details"       # Detailed data tables
+    uuid: "3d3f6c9d-904f-40b3-a1f9-2f4dd76ed2e3"
+  - name: "Details"       # Detailed data tables
+    hidden: true          # Optional: editors can keep draft tabs out of view mode
     order: 3
+    uuid: "4e4f7dae-a150-41c4-b20a-3f5ee87fe3f4"
 ```
 
 **When to use tabs:**
@@ -123,6 +127,7 @@ tabs:
 - Content naturally groups into themes
 - Different audiences need different views
 - Analysis flows from summary to detail
+- Some tabs are draft/internal only: set `hidden: true` so editors keep them without exposing them in view mode
 
 **Tab naming tips:**
 - Keep names short (1-2 words)
@@ -135,23 +140,23 @@ Headings create visual sections within a tab:
 
 ```yaml
 tiles:
-  - type: heading
-    x: 0
-    y: 0
-    w: 36
-    h: 1
+  - h: 1
     properties:
       text: "Revenue Performance"
+    type: heading
+    w: 36
+    x: 0
+    y: 0
 
   # Revenue charts below...
 
-  - type: heading
-    x: 0
-    y: 8
-    w: 36
-    h: 1
+  - h: 1
     properties:
       text: "Customer Metrics"
+    type: heading
+    w: 36
+    x: 0
+    y: 8
 
   # Customer charts below...
 ```
@@ -173,13 +178,8 @@ Markdown tiles add context, explanations, and guidance:
 - Documenting data sources or caveats
 
 ```yaml
-- type: markdown
-  x: 24
-  y: 0
-  w: 12
-  h: 6
+- h: 6
   properties:
-    title: "About This Dashboard"
     content: |
       ## Purpose
 
@@ -198,6 +198,11 @@ Markdown tiles add context, explanations, and guidance:
       ---
 
       Questions? Contact [analytics@company.com](mailto:analytics@company.com)
+    title: "About This Dashboard"
+  type: markdown
+  w: 12
+  x: 24
+  y: 0
 ```
 
 **Markdown tips:**
@@ -228,23 +233,24 @@ Filters with default values are better when the filter **should be active** on l
 filters:
   dimensions:
     # Filter WITH default - active on load
-    - target:
+    - label: "Date Range"
+      operator: inThePast
+      settings:
+        completed: false
+        unitOfTime: days
+      target:
         fieldId: orders_created_at
         tableName: orders
-      operator: inThePast
       values: [90]              # Default: Last 90 days
-      settings:
-        unitOfTime: days
-        completed: false
-      label: "Date Range"
 
     # Filter WITHOUT default - suggested but not applied
-    - target:
+    - label: "Region"
+      operator: equals
+      target:
         fieldId: orders_region
         tableName: orders
-      operator: equals
       values: []                # No default = show all regions
-      label: "Region"
+      disabled: true            # Important: This keeps the filter available on the dashboard without applying it until a value is provided
 ```
 
 **When to use default values:**
@@ -266,13 +272,13 @@ Required filters ensure the dashboard only shows when context is provided:
 ```yaml
 filters:
   dimensions:
-    - target:
+    - label: "Select Account"
+      operator: equals
+      required: true           # User must select
+      target:
         fieldId: customers_account_id
         tableName: customers
-      operator: equals
       values: []
-      required: true           # User must select
-      label: "Select Account"
 ```
 
 **When to require filters:**

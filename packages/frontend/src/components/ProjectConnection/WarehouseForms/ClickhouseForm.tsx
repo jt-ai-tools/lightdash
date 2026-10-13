@@ -1,31 +1,28 @@
 import { WarehouseTypes } from '@lightdash/common';
-import {
-    Anchor,
-    NumberInput,
-    PasswordInput,
-    Stack,
-    TextInput,
-} from '@mantine/core';
-import React, { type FC } from 'react';
+import { TextInput, Stack, Anchor, PasswordInput } from '@mantine/core';
+import React, { type FC, type ReactNode } from 'react';
 import { useToggle } from 'react-use';
+import { NumberInput } from '../../common/NumberInput';
 import FormCollapseButton from '../FormCollapseButton';
 import { useFormContext } from '../formContext';
 import BooleanSwitch from '../Inputs/BooleanSwitch';
 import FormSection from '../Inputs/FormSection';
 import StartOfWeekSelect from '../Inputs/StartOfWeekSelect';
 import { useProjectFormContext } from '../useProjectFormContext';
+import DataTimezoneField from './DataTimezoneField';
 import { ClickhouseDefaultValues } from './defaultValues';
 
 export const ClickhouseSchemaInput: FC<{
     disabled: boolean;
-}> = ({ disabled }) => {
+    description?: ReactNode;
+}> = ({ disabled, description }) => {
     const form = useFormContext();
 
     return (
         <TextInput
             name="warehouse.schema"
             label="Schema"
-            description="This is the schema name."
+            description={description ?? 'This is the schema name.'}
             required
             {...form.getInputProps('warehouse.schema')}
             disabled={disabled}
@@ -48,7 +45,7 @@ const ClickhouseForm: FC<{
 
     return (
         <>
-            <Stack style={{ marginTop: '8px' }}>
+            <Stack mt="xs">
                 <TextInput
                     name="warehouse.host"
                     label="Host"
@@ -86,7 +83,7 @@ const ClickhouseForm: FC<{
                 />
 
                 <FormSection isOpen={isOpen} name="advanced">
-                    <Stack style={{ marginTop: '8px' }}>
+                    <Stack mt="xs">
                         <BooleanSwitch
                             name="warehouse.requireUserCredentials"
                             label="Require users to provide their own credentials"
@@ -119,6 +116,7 @@ const ClickhouseForm: FC<{
                                     connect to ClickHouse. You can see more
                                     details in{' '}
                                     <Anchor
+                                        inherit
                                         target="_blank"
                                         href="https://docs.getdbt.com/reference/warehouse-setups/clickhouse-setup"
                                         rel="noreferrer"
@@ -152,6 +150,7 @@ const ClickhouseForm: FC<{
                             disabled={disabled}
                         />
 
+                        <DataTimezoneField disabled={disabled} />
                         <StartOfWeekSelect disabled={disabled} />
                     </Stack>
                 </FormSection>

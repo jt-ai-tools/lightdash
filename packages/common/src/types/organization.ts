@@ -41,6 +41,24 @@ export type Organization = {
      */
     defaultProjectUuid?: string;
     createdAt?: Date;
+
+    /**
+     * Postgres wire protocol connection details for the semantic layer, only
+     * populated on the authenticated `GET /org` response (not the public health
+     * endpoint). `enabled` reflects whether the instance exposes a pgwire port
+     * and is returned to every org member; `host`/`port` are the infra endpoint
+     * clients connect to and are only populated for org admins (null otherwise).
+     */
+    pgWire?: {
+        enabled: boolean;
+        /** Whether the server requires TLS (clients must use sslmode=require
+         * or stricter). False only on instances that explicitly opted out.
+         * Optional for API backwards compatibility — the server always
+         * returns it; treat absence as true. */
+        tlsRequired?: boolean;
+        host: string | null;
+        port: number | null;
+    };
 };
 
 export type CreateOrganization = Pick<Organization, 'name'>;
@@ -63,12 +81,16 @@ export type OrganizationProject = {
      * @format uuid
      */
     projectUuid: string;
+    slug?: string;
     name: string;
     type: ProjectType;
     createdByUserUuid: string | null;
+    createdByUserName: string | null;
     createdAt: Date;
     upstreamProjectUuid: string | null;
     warehouseType?: WarehouseTypes;
+    expiresAt: Date | null;
+    provisioningSource?: string | null;
 };
 
 /**
@@ -82,6 +104,7 @@ export type ApiOrganizationProjects = {
 export type OnbordingRecord = {
     ranQueryAt: Date | null;
     shownSuccessAt: Date | null;
+    playgroundProjectDeletedAt?: Date | null;
 };
 
 export type OnboardingStatus = {
@@ -189,4 +212,32 @@ export type ApiColorPalettesResponse = {
 export type ApiCreatedColorPaletteResponse = {
     status: 'ok';
     results: OrganizationColorPalette;
+};
+
+/**
+ * Where a resolved colour palette came from. The `config` and `default` cases
+ * carry no entity reference; the rest expose the UUID and human-readable name
+ * of the entity (organization, project, space, dashboard or chart) that owns
+ * the winning palette in the resolution chain.
+ */
+export type ColorPaletteSource =
+    | { type: 'config' }
+    | { type: 'default' }
+    | { type: 'organization'; uuid: string; name: string }
+    | { type: 'project'; uuid: string; name: string }
+    | { type: 'space'; uuid: string; name: string }
+    | { type: 'dashboard'; uuid: string; name: string }
+    | { type: 'chart'; uuid: string; name: string };
+
+export type ResolvedProjectColorPalette = {
+    colors: string[];
+    darkColors: string[] | null;
+    paletteUuid: string | null;
+    paletteName: string | null;
+    source: ColorPaletteSource;
+};
+
+export type ApiProjectColorPaletteResponse = {
+    status: 'ok';
+    results: ResolvedProjectColorPalette;
 };

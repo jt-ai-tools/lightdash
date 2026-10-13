@@ -1,21 +1,24 @@
 import {
     ContentType,
+    ResourceViewItemType,
     type ResourceViewChartItem,
     type ResourceViewDashboardItem,
-    ResourceViewItemType,
+    type ResourceViewDataAppItem,
+    type ResourceViewDocumentItem,
 } from '@lightdash/common';
 import { type Knex } from 'knex';
+import { AppsTableName, AppVersionsTableName } from '../database/entities/apps';
 import { DashboardsTableName } from '../database/entities/dashboards';
 import { OrganizationTableName } from '../database/entities/organizations';
+import { PinnedAppTableName } from '../database/entities/pinnedList';
 import { ProjectTableName } from '../database/entities/projects';
 import { SavedChartsTableName } from '../database/entities/savedCharts';
 import { SpaceTableName } from '../database/entities/spaces';
 import {
-    type CreateDbUserFavorite,
     UserFavoritesTableName,
+    type CreateDbUserFavorite,
 } from '../database/entities/userFavorites';
 import { type ResourceViewSpaceItemBase } from './ResourceViewItemModel';
-import { getRootSpaceIsPrivateQuery } from './SpacePermissionModel';
 
 type UserFavoritesModelArguments = {
     database: Knex;
@@ -97,8 +100,12 @@ export class UserFavoritesModel {
         projectUuid: string,
         chartUuids: string[],
         allowedSpaceUuids: string[],
+        grantedChartUuids: string[] = [],
     ): Promise<ResourceViewChartItem[]> {
-        if (chartUuids.length === 0 || allowedSpaceUuids.length === 0) {
+        if (
+            chartUuids.length === 0 ||
+            (allowedSpaceUuids.length === 0 && grantedChartUuids.length === 0)
+        ) {
             return [];
         }
         const rows = (await this.database(SavedChartsTableName)
@@ -112,11 +119,19 @@ export class UserFavoritesModel {
                 `${SavedChartsTableName}.last_version_updated_by_user_uuid`,
                 'users.user_uuid',
             )
-            .whereIn(
-                `${SavedChartsTableName}.saved_query_uuid`,
-                chartUuids,
-            )
-            .whereIn(`${SpaceTableName}.space_uuid`, allowedSpaceUuids)
+            .whereIn(`${SavedChartsTableName}.saved_query_uuid`, chartUuids)
+            .where((accessFilter) => {
+                void accessFilter.whereIn(
+                    `${SpaceTableName}.space_uuid`,
+                    allowedSpaceUuids,
+                );
+                if (grantedChartUuids.length > 0) {
+                    void accessFilter.orWhereIn(
+                        `${SavedChartsTableName}.saved_query_uuid`,
+                        grantedChartUuids,
+                    );
+                }
+            })
             .whereNull(`${SavedChartsTableName}.deleted_at`)
             .whereNull(`${SpaceTableName}.deleted_at`)
             .select({
@@ -129,8 +144,7 @@ export class UserFavoritesModel {
                 first_viewed_at: `${SavedChartsTableName}.first_viewed_at`,
                 chart_kind: `${SavedChartsTableName}.last_version_chart_kind`,
                 slug: `${SavedChartsTableName}.slug`,
-                updated_by_user_uuid:
-                    'users.user_uuid',
+                updated_by_user_uuid: 'users.user_uuid',
                 updated_by_user_first_name: 'users.first_name',
                 updated_by_user_last_name: 'users.last_name',
             })) as Record<string, AnyType>[];
@@ -156,6 +170,7 @@ export class UserFavoritesModel {
                       }
                     : undefined,
                 slug: row.slug,
+                verification: null,
             },
         }));
     }
@@ -164,8 +179,13 @@ export class UserFavoritesModel {
         projectUuid: string,
         dashboardUuids: string[],
         allowedSpaceUuids: string[],
+        grantedDashboardUuids: string[] = [],
     ): Promise<ResourceViewDashboardItem[]> {
-        if (dashboardUuids.length === 0 || allowedSpaceUuids.length === 0) {
+        if (
+            dashboardUuids.length === 0 ||
+            (allowedSpaceUuids.length === 0 &&
+                grantedDashboardUuids.length === 0)
+        ) {
             return [];
         }
         const rows = (await this.database(DashboardsTableName)
@@ -189,16 +209,25 @@ export class UserFavoritesModel {
                 'dv.dashboard_id',
             )
             .leftJoin('users', 'dv.updated_by_user_uuid', 'users.user_uuid')
-            .whereIn(
-                `${DashboardsTableName}.dashboard_uuid`,
-                dashboardUuids,
-            )
-            .whereIn(`${SpaceTableName}.space_uuid`, allowedSpaceUuids)
+            .whereIn(`${DashboardsTableName}.dashboard_uuid`, dashboardUuids)
+            .where((accessFilter) => {
+                void accessFilter.whereIn(
+                    `${SpaceTableName}.space_uuid`,
+                    allowedSpaceUuids,
+                );
+                if (grantedDashboardUuids.length > 0) {
+                    void accessFilter.orWhereIn(
+                        `${DashboardsTableName}.dashboard_uuid`,
+                        grantedDashboardUuids,
+                    );
+                }
+            })
             .whereNull(`${DashboardsTableName}.deleted_at`)
             .whereNull(`${SpaceTableName}.deleted_at`)
             .select(
                 `${SpaceTableName}.space_uuid`,
                 `${DashboardsTableName}.dashboard_uuid`,
+                `${DashboardsTableName}.slug`,
                 'users.user_uuid as updated_by_user_uuid',
             )
             .max({
@@ -213,6 +242,7 @@ export class UserFavoritesModel {
             .groupBy(
                 `${SpaceTableName}.space_uuid`,
                 `${DashboardsTableName}.dashboard_uuid`,
+                `${DashboardsTableName}.slug`,
                 'users.user_uuid',
             )) as Record<string, AnyType>[];
 
@@ -220,6 +250,7 @@ export class UserFavoritesModel {
             type: ResourceViewItemType.DASHBOARD as const,
             data: {
                 uuid: row.dashboard_uuid,
+                slug: row.slug,
                 spaceUuid: row.space_uuid,
                 description: row.description,
                 name: row.name,
@@ -235,6 +266,216 @@ export class UserFavoritesModel {
                           lastName: row.updated_by_user_last_name,
                       }
                     : undefined,
+                verification: null,
+            },
+        }));
+    }
+
+    async getFavoriteApps(
+        projectUuid: string,
+        appUuids: string[],
+        allowedSpaceUuids: string[],
+        grantedAppUuids: string[] = [],
+    ): Promise<ResourceViewDataAppItem[]> {
+        if (
+            appUuids.length === 0 ||
+            (allowedSpaceUuids.length === 0 && grantedAppUuids.length === 0)
+        ) {
+            return [];
+        }
+        // Left join: granted personal apps have no space row.
+        const rows = (await this.database(AppsTableName)
+            .leftJoin(
+                SpaceTableName,
+                `${SpaceTableName}.space_uuid`,
+                `${AppsTableName}.space_uuid`,
+            )
+            .innerJoin(
+                `${AppVersionsTableName} as latest_version`,
+                'latest_version.app_id',
+                `${AppsTableName}.app_id`,
+            )
+            .leftJoin(
+                'users as last_updated_by_user',
+                'last_updated_by_user.user_uuid',
+                'latest_version.created_by_user_uuid',
+            )
+            .leftJoin(
+                PinnedAppTableName,
+                `${PinnedAppTableName}.app_uuid`,
+                `${AppsTableName}.app_id`,
+            )
+            .whereIn(`${AppsTableName}.app_id`, appUuids)
+            .andWhere(`${AppsTableName}.project_uuid`, projectUuid)
+            .where((accessFilter) => {
+                void accessFilter.whereIn(
+                    `${SpaceTableName}.space_uuid`,
+                    allowedSpaceUuids,
+                );
+                if (grantedAppUuids.length > 0) {
+                    void accessFilter.orWhereIn(
+                        `${AppsTableName}.app_id`,
+                        grantedAppUuids,
+                    );
+                }
+            })
+            .whereNull(`${AppsTableName}.deleted_at`)
+            .whereNull(`${SpaceTableName}.deleted_at`)
+            .where(
+                `latest_version.app_version_id`,
+                this.database.raw(
+                    `(select app_version_id
+                      from ${AppVersionsTableName}
+                      where app_id = ${AppsTableName}.app_id
+                      order by version desc
+                      limit 1)`,
+                ),
+            )
+            .select({
+                app_id: `${AppsTableName}.app_id`,
+                name: `${AppsTableName}.name`,
+                description: `${AppsTableName}.description`,
+                space_uuid: `${SpaceTableName}.space_uuid`,
+                created_at: `${AppsTableName}.created_at`,
+                created_by_user_uuid: `${AppsTableName}.created_by_user_uuid`,
+                views: `${AppsTableName}.views_count`,
+                latest_version_number: 'latest_version.version',
+                latest_version_status: 'latest_version.status',
+                latest_ready_version_number: this.database.raw(
+                    `(select ready_version.version
+                      from ${AppVersionsTableName} as ready_version
+                      where ready_version.app_id = ${AppsTableName}.app_id
+                        and ready_version.status = 'ready'
+                      order by ready_version.version desc
+                      limit 1)`,
+                ),
+                latest_version_created_at: 'latest_version.created_at',
+                updated_by_user_uuid: 'last_updated_by_user.user_uuid',
+                updated_by_user_first_name: 'last_updated_by_user.first_name',
+                updated_by_user_last_name: 'last_updated_by_user.last_name',
+                pinned_list_uuid: `${PinnedAppTableName}.pinned_list_uuid`,
+                pinned_list_order: `${PinnedAppTableName}.order`,
+            })) as Record<string, AnyType>[];
+
+        return rows.map<ResourceViewDataAppItem>((row) => ({
+            type: ResourceViewItemType.DATA_APP,
+            data: {
+                uuid: row.app_id,
+                name: row.name,
+                description: row.description ?? undefined,
+                spaceUuid: row.space_uuid,
+                createdByUserUuid: row.created_by_user_uuid ?? null,
+                updatedAt: row.latest_version_created_at ?? row.created_at,
+                updatedByUser: row.updated_by_user_uuid
+                    ? {
+                          userUuid: row.updated_by_user_uuid,
+                          firstName: row.updated_by_user_first_name ?? '',
+                          lastName: row.updated_by_user_last_name ?? '',
+                      }
+                    : null,
+                views: row.views,
+                firstViewedAt: row.created_at,
+                latestVersionNumber: row.latest_version_number ?? null,
+                latestVersionStatus: row.latest_version_status ?? null,
+                latestReadyVersionNumber:
+                    row.latest_ready_version_number ?? null,
+                pinnedListUuid: row.pinned_list_uuid ?? null,
+                pinnedListOrder: row.pinned_list_order ?? null,
+                verification: null,
+            },
+        }));
+    }
+
+    async getFavoriteDocuments(
+        projectUuid: string,
+        documentUuids: string[],
+    ): Promise<ResourceViewDocumentItem[]> {
+        if (documentUuids.length === 0) {
+            return [];
+        }
+        const rows = await this.database('documents')
+            .leftJoin(
+                'pinned_document',
+                'pinned_document.document_uuid',
+                'documents.document_uuid',
+            )
+            .innerJoin('spaces', 'spaces.space_id', 'documents.space_id')
+            .innerJoin(
+                'projects',
+                'projects.project_uuid',
+                'documents.project_uuid',
+            )
+            .innerJoin(
+                'organizations',
+                'organizations.organization_id',
+                'projects.organization_id',
+            )
+            .leftJoin('document_versions as latest', (join) => {
+                join.on(
+                    'latest.document_id',
+                    '=',
+                    'documents.document_id',
+                ).andOn(
+                    'latest.version_number',
+                    '=',
+                    this.database.raw(
+                        '(select max(version_number) from document_versions where document_id = documents.document_id)',
+                    ),
+                );
+            })
+            .leftJoin(
+                'users as updater',
+                'updater.user_uuid',
+                'latest.created_by_user_uuid',
+            )
+            .where('documents.project_uuid', projectUuid)
+            .whereIn('documents.document_uuid', documentUuids)
+            .whereNull('documents.deleted_at')
+            .whereNull('spaces.deleted_at')
+            .select(
+                'pinned_document.pinned_list_uuid',
+                'pinned_document.order',
+                'documents.document_uuid',
+                'documents.project_uuid',
+                'documents.name',
+                'documents.slug',
+                'documents.description',
+                'documents.created_by_user_uuid',
+                'documents.updated_at',
+                'documents.document_views_count',
+                'documents.document_first_viewed_at',
+                'organizations.organization_uuid',
+                'spaces.space_uuid',
+                'updater.user_uuid as updated_by_user_uuid',
+                'updater.first_name as updated_by_first_name',
+                'updater.last_name as updated_by_last_name',
+            );
+
+        return rows.map((row) => ({
+            type: ResourceViewItemType.DOCUMENT,
+            data: {
+                uuid: row.document_uuid,
+                projectUuid: row.project_uuid,
+                organizationUuid: row.organization_uuid,
+                spaceUuid: row.space_uuid,
+                name: row.name,
+                slug: row.slug,
+                description: row.description,
+                createdByUserUuid: row.created_by_user_uuid,
+                updatedAt: row.updated_at,
+                updatedByUser: row.updated_by_user_uuid
+                    ? {
+                          userUuid: row.updated_by_user_uuid,
+                          firstName: row.updated_by_first_name ?? '',
+                          lastName: row.updated_by_last_name ?? '',
+                      }
+                    : undefined,
+                directAccessRoles: [],
+                views: row.document_views_count,
+                firstViewedAt: row.document_first_viewed_at,
+                pinnedListUuid: row.pinned_list_uuid ?? null,
+                pinnedListOrder: row.order ?? null,
+                verification: null,
             },
         }));
     }
@@ -264,6 +505,12 @@ export class UserFavoritesModel {
                         ),
                         chart_count: this.database.countDistinct(
                             `${SavedChartsTableName}.saved_query_id`,
+                        ),
+                        child_space_count: this.database.raw(
+                            `(SELECT count(*) FROM ${SpaceTableName} cs WHERE cs.parent_space_uuid = ${SpaceTableName}.space_uuid AND cs.deleted_at IS NULL)`,
+                        ),
+                        app_count: this.database.raw(
+                            `(SELECT count(*) FROM ${AppsTableName} a WHERE a.space_uuid = ${SpaceTableName}.space_uuid AND a.deleted_at IS NULL)`,
                         ),
                     })
                     .from(SpaceTableName)
@@ -311,13 +558,17 @@ export class UserFavoritesModel {
                 project_uuid: `${ProjectTableName}.project_uuid`,
                 space_uuid: `${SpaceTableName}.space_uuid`,
                 name: `${SpaceTableName}.name`,
-                is_private: this.database.raw(getRootSpaceIsPrivateQuery()),
+                inherit_parent_permissions: `${SpaceTableName}.inherit_parent_permissions`,
                 parent_space_uuid: `${SpaceTableName}.parent_space_uuid`,
                 path: `${SpaceTableName}.path`,
                 dashboard_count: this.database.raw(
                     'COALESCE(sc.dashboard_count, 0)',
                 ),
                 chart_count: this.database.raw('COALESCE(sc.chart_count, 0)'),
+                child_space_count: this.database.raw(
+                    'COALESCE(sc.child_space_count, 0)',
+                ),
+                app_count: this.database.raw('COALESCE(sc.app_count, 0)'),
             })
             .whereIn(`${SpaceTableName}.space_uuid`, filteredUuids)
             .whereNull(`${SpaceTableName}.deleted_at`)
@@ -332,9 +583,11 @@ export class UserFavoritesModel {
                 pinnedListOrder: null,
                 uuid: row.space_uuid,
                 name: row.name,
-                isPrivate: row.is_private,
+                inheritParentPermissions: row.inherit_parent_permissions,
                 dashboardCount: Number(row.dashboard_count),
                 chartCount: Number(row.chart_count),
+                childSpaceCount: Number(row.child_space_count),
+                appCount: Number(row.app_count),
                 parentSpaceUuid: row.parent_space_uuid,
                 path: row.path,
             },

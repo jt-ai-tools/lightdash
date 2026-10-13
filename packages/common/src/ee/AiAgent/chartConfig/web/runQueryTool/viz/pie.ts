@@ -1,15 +1,15 @@
 import { type MetricQuery } from '../../../../../../types/metricQuery';
 import {
-    type PieChartConfig,
     ChartType,
+    type PieChartConfig,
 } from '../../../../../../types/savedCharts';
-import { type ToolRunQueryArgsTransformed } from '../../../../schemas';
+import { type ToolRunQueryArgsTransformedBuiltinChart } from '../../../../schemas';
 
 export const getPieChartConfig = ({
     queryTool,
     metricQuery,
 }: {
-    queryTool: ToolRunQueryArgsTransformed;
+    queryTool: ToolRunQueryArgsTransformedBuiltinChart;
     metricQuery: MetricQuery;
 }): PieChartConfig => {
     const { dimensions } = queryTool.queryConfig;

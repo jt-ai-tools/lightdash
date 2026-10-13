@@ -25,9 +25,9 @@ const BooleanSwitch: FC<BooleanSwitchProps> = ({
     const requiredLabel = required ? '*' : '';
 
     return (
-        <Stack className={`input-wrapper ${className}`} spacing="two">
-            <Group spacing="xs" position="apart">
-                <Text fw={450}>
+        <Stack className={`input-wrapper ${className}`} gap="two">
+            <Group gap="xs" justify="space-between">
+                <Text fw={500} fz="sm">
                     {label} <span style={{ flex: 1 }}>{requiredLabel}</span>
                 </Text>
 

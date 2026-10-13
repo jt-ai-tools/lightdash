@@ -1,12 +1,21 @@
 import {
     AllChartsSearchResult,
     ChartKind,
+    ContentType,
+    ContentVerificationInfo,
+    DashboardChartSummary,
     DashboardSearchResult,
     DashboardTabResult,
+    DataAppSearchResult,
+    DocumentSearchResult,
     Explore,
     ExploreError,
     ExploreType,
     FieldSearchResult,
+    hasIntersection,
+    isDimension,
+    isExploreError,
+    isUserManagedExplore,
     NotFoundError,
     SavedChartSearchResult,
     SearchFilters,
@@ -17,47 +26,72 @@ import {
     TableErrorSearchResult,
     TableSearchResult,
     TableSelectionType,
-    hasIntersection,
-    isDimension,
-    isExploreError,
 } from '@lightdash/common';
 import { Knex } from 'knex';
 import {
+    AppsTableName,
+    AppVersionsTableName,
+} from '../../database/entities/apps';
+import { ContentVerificationTableName } from '../../database/entities/contentVerification';
+import {
+    DashboardsTableName,
     DashboardTabsTableName,
     DashboardVersionsTableName,
-    DashboardsTableName,
 } from '../../database/entities/dashboards';
 import {
-    CachedExploresTableName,
+    CachedExploreTableName,
     ProjectTableName,
 } from '../../database/entities/projects';
-import { SavedChartsTableName } from '../../database/entities/savedCharts';
+import {
+    latestSavedChartVersionColumnSql,
+    SavedChartsTableName,
+    SavedChartVersionsTableName,
+} from '../../database/entities/savedCharts';
 import { SavedSqlTableName } from '../../database/entities/savedSql';
 import { SpaceTableName } from '../../database/entities/spaces';
 import { UserTableName } from '../../database/entities/users';
+import KnexPaginate from '../../database/pagination';
+import {
+    OmnibarSearchTiming,
+    timeOmnibarSearch,
+    timeOmnibarSearchSync,
+} from '../../logging/omnibarSearchTiming';
+import { AppModel } from '../AppModel';
+import { ContentVerificationModel } from '../ContentVerificationModel';
 import {
     filterByCreatedAt,
     filterByCreatedByUuid,
     shouldSearchForType,
 } from './utils/filters';
 import {
+    getExactOrPrefixLabelScore,
     getFullTextSearchFilterSql,
     getFullTextSearchRankCalcSql,
     getRegexFromUserQuery,
     getTableOrFieldMatchCount,
+    searchReservingVerified,
 } from './utils/search';
 
 type SearchModelArguments = {
     database: Knex;
+    contentVerificationModel: ContentVerificationModel;
 };
 
 const SEARCH_LIMIT_PER_ITEM_TYPE = 10;
 
+export type SearchContentOptions = {
+    fullTextSearchOperator?: 'OR' | 'AND';
+    verifiedOnly?: boolean;
+};
+
 export class SearchModel {
     private database: Knex;
 
+    private contentVerificationModel: ContentVerificationModel;
+
     constructor(args: SearchModelArguments) {
         this.database = args.database;
+        this.contentVerificationModel = args.contentVerificationModel;
     }
 
     private async searchSpaces(
@@ -75,6 +109,7 @@ export class SearchModel {
                 searchVectorColumn: `${SpaceTableName}.search_vector`,
                 searchQuery: query,
             },
+            nameColumn: `${SpaceTableName}.name`,
         });
 
         // Use GIN index filter to reduce rows before computing ts_rank_cd
@@ -119,11 +154,30 @@ export class SearchModel {
             .limit(10);
     }
 
+    // Applied inside the ranked subqueries so verified items compete for
+    // the result cap among themselves, not against unverified matches.
+    private verifiedContentExists(
+        projectUuid: string,
+        contentType: ContentType,
+        contentUuidColumn: string,
+    ) {
+        return this.database(ContentVerificationTableName)
+            .select(this.database.raw('1'))
+            .where(`${ContentVerificationTableName}.project_uuid`, projectUuid)
+            .where(`${ContentVerificationTableName}.content_type`, contentType)
+            .whereRaw(
+                `${ContentVerificationTableName}.content_uuid = ${contentUuidColumn}`,
+            );
+    }
+
     async searchDashboards(
         projectUuid: string,
         query: string,
         filters?: SearchFilters,
-        fullTextSearchOperator: 'OR' | 'AND' = 'AND',
+        {
+            fullTextSearchOperator = 'AND',
+            verifiedOnly = false,
+        }: SearchContentOptions = {},
     ): Promise<DashboardSearchResult[]> {
         if (!shouldSearchForType(SearchItemType.DASHBOARD, filters?.type)) {
             return [];
@@ -136,6 +190,7 @@ export class SearchModel {
                 searchQuery: query,
             },
             fullTextSearchOperator,
+            nameColumn: `${DashboardsTableName}.name`,
         });
 
         const directChartSearchRankRawSql = getFullTextSearchRankCalcSql({
@@ -145,6 +200,7 @@ export class SearchModel {
                 searchQuery: query,
             },
             fullTextSearchOperator,
+            nameColumn: 'direct_charts.name',
         });
 
         const tileChartSearchRankRawSql = getFullTextSearchRankCalcSql({
@@ -154,6 +210,7 @@ export class SearchModel {
                 searchQuery: query,
             },
             fullTextSearchOperator,
+            nameColumn: 'tile_charts.name',
         });
 
         // GIN index filters - these use indexes instead of computing rank for all rows
@@ -176,7 +233,165 @@ export class SearchModel {
             fullTextSearchOperator,
         });
 
-        let subquery = this.database(DashboardsTableName)
+        const firstVersionJoin = {
+            table: this.database.raw(
+                `${DashboardVersionsTableName} as first_version`,
+            ),
+            on: this.database.raw(
+                `first_version.dashboard_id = ${DashboardsTableName}.dashboard_id AND first_version.dashboard_version_id = (SELECT MIN(dashboard_version_id) FROM ${DashboardVersionsTableName} WHERE dashboard_id = ${DashboardsTableName}.dashboard_id)`,
+            ),
+        };
+        const lastVersionJoin = {
+            table: this.database.raw(
+                `${DashboardVersionsTableName} as last_version`,
+            ),
+            on: this.database.raw(
+                `last_version.dashboard_id = ${DashboardsTableName}.dashboard_id AND last_version.dashboard_version_id = (SELECT MAX(dashboard_version_id) FROM ${DashboardVersionsTableName} WHERE dashboard_id = ${DashboardsTableName}.dashboard_id)`,
+            ),
+        };
+
+        // Each branch is driven by its own search_vector GIN index and yields
+        // (dashboard_id, rank) for matches only, so the work scales with matches
+        // rather than with every dashboard × tile in the project. The direct
+        // chart branch deliberately avoids joining dashboards so the planner
+        // cannot start from the whole project; dashboard-level filters are
+        // applied once below.
+        const nameMatches = this.database(DashboardsTableName)
+            .select(
+                `${DashboardsTableName}.dashboard_id`,
+                this.database.raw('? as search_rank', [
+                    dashboardSearchRankRawSql,
+                ]),
+            )
+            .where(`${DashboardsTableName}.project_uuid`, projectUuid)
+            .whereNull(`${DashboardsTableName}.deleted_at`)
+            .where(dashboardSearchFilterSql);
+
+        const directChartMatches = this.database(
+            `${SavedChartsTableName} as direct_charts`,
+        )
+            .innerJoin(
+                DashboardsTableName,
+                `${DashboardsTableName}.dashboard_uuid`,
+                'direct_charts.dashboard_uuid',
+            )
+            .select(
+                `${DashboardsTableName}.dashboard_id`,
+                this.database.raw('? as search_rank', [
+                    directChartSearchRankRawSql,
+                ]),
+            )
+            .where('direct_charts.project_uuid', projectUuid)
+            .whereNull('direct_charts.deleted_at')
+            .where(directChartSearchFilterSql);
+
+        // The tile branch is bounded by the current version of each live
+        // dashboard, resolved before touching tiles. Starting from the matching
+        // charts instead would walk every historical version that ever held one
+        // of them, and a dashboard saved hundreds of times has orders of
+        // magnitude more historical tile rows than current ones.
+        const currentVersions = this.database(DashboardVersionsTableName)
+            .innerJoin(
+                DashboardsTableName,
+                `${DashboardsTableName}.dashboard_id`,
+                `${DashboardVersionsTableName}.dashboard_id`,
+            )
+            .select(`${DashboardVersionsTableName}.dashboard_id`)
+            .max(
+                `${DashboardVersionsTableName}.dashboard_version_id as dashboard_version_id`,
+            )
+            .where(`${DashboardsTableName}.project_uuid`, projectUuid)
+            .whereNull(`${DashboardsTableName}.deleted_at`)
+            .groupBy(`${DashboardVersionsTableName}.dashboard_id`);
+
+        const tileChartMatches = this.database(
+            `${SavedChartsTableName} as tile_charts`,
+        )
+            .innerJoin(
+                'dashboard_tile_charts',
+                'dashboard_tile_charts.saved_chart_id',
+                'tile_charts.saved_query_id',
+            )
+            .innerJoin(
+                currentVersions.as('current_version'),
+                'current_version.dashboard_version_id',
+                'dashboard_tile_charts.dashboard_version_id',
+            )
+            .select(
+                'current_version.dashboard_id',
+                this.database.raw('? as search_rank', [
+                    tileChartSearchRankRawSql,
+                ]),
+            )
+            .where('tile_charts.project_uuid', projectUuid)
+            .whereNull('tile_charts.deleted_at')
+            .where(tileChartSearchFilterSql);
+
+        let rankedCandidates = this.database
+            .from(
+                nameMatches
+                    .unionAll([directChartMatches, tileChartMatches], true)
+                    .as('matches'),
+            )
+            .innerJoin(
+                DashboardsTableName,
+                `${DashboardsTableName}.dashboard_id`,
+                'matches.dashboard_id',
+            )
+            .innerJoin(
+                SpaceTableName,
+                `${DashboardsTableName}.space_id`,
+                `${SpaceTableName}.space_id`,
+            )
+            .select(`${DashboardsTableName}.dashboard_id`)
+            .select(
+                this.database.raw(
+                    'GREATEST(?, MAX(matches.search_rank)) as search_rank',
+                    [dashboardSearchRankRawSql],
+                ),
+            )
+            .where(`${DashboardsTableName}.project_uuid`, projectUuid)
+            .whereNull(`${DashboardsTableName}.deleted_at`)
+            .whereNull(`${SpaceTableName}.deleted_at`)
+            .groupBy(`${DashboardsTableName}.dashboard_id`)
+            .orderBy('search_rank', 'desc')
+            .limit(SEARCH_LIMIT_PER_ITEM_TYPE);
+
+        rankedCandidates = filterByCreatedAt(
+            DashboardsTableName,
+            rankedCandidates,
+            filters,
+        );
+        if (filters?.createdByUuid) {
+            rankedCandidates = filterByCreatedByUuid(
+                rankedCandidates.leftJoin(
+                    firstVersionJoin.table,
+                    firstVersionJoin.on,
+                ),
+                {
+                    tableName: 'first_version',
+                    tableUserUuidColumnName: 'updated_by_user_uuid',
+                },
+                filters,
+            );
+        }
+        if (verifiedOnly) {
+            rankedCandidates = rankedCandidates.whereExists(
+                this.verifiedContentExists(
+                    projectUuid,
+                    ContentType.DASHBOARD,
+                    `${DashboardsTableName}.dashboard_uuid`,
+                ),
+            );
+        }
+
+        const dashboards = await this.database
+            .from(rankedCandidates.as('dashboards_with_rank'))
+            .innerJoin(
+                DashboardsTableName,
+                `${DashboardsTableName}.dashboard_id`,
+                'dashboards_with_rank.dashboard_id',
+            )
             .leftJoin(
                 SpaceTableName,
                 `${DashboardsTableName}.space_id`,
@@ -187,22 +402,8 @@ export class SearchModel {
                 `${ProjectTableName}.project_id`,
                 `${SpaceTableName}.project_id`,
             )
-            .leftJoin(
-                this.database.raw(
-                    `${DashboardVersionsTableName} as first_version`,
-                ),
-                this.database.raw(
-                    `first_version.dashboard_id = ${DashboardsTableName}.dashboard_id AND first_version.dashboard_version_id = (SELECT MIN(dashboard_version_id) FROM ${DashboardVersionsTableName} WHERE dashboard_id = ${DashboardsTableName}.dashboard_id)`,
-                ),
-            )
-            .leftJoin(
-                this.database.raw(
-                    `${DashboardVersionsTableName} as last_version`,
-                ),
-                this.database.raw(
-                    `last_version.dashboard_id = ${DashboardsTableName}.dashboard_id AND last_version.dashboard_version_id = (SELECT MAX(dashboard_version_id) FROM ${DashboardVersionsTableName} WHERE dashboard_id = ${DashboardsTableName}.dashboard_id)`,
-                ),
-            )
+            .leftJoin(firstVersionJoin.table, firstVersionJoin.on)
+            .leftJoin(lastVersionJoin.table, lastVersionJoin.on)
             .leftJoin(
                 `${UserTableName} as created_by_user`,
                 `created_by_user.user_uuid`,
@@ -213,62 +414,14 @@ export class SearchModel {
                 `updated_by_user.user_uuid`,
                 `last_version.updated_by_user_uuid`,
             )
-            // Join with charts that belong directly to dashboard
-            .leftJoin(
-                `${SavedChartsTableName} as direct_charts`,
-                function nonDeletedChartJoin() {
-                    this.on(
-                        `${DashboardsTableName}.dashboard_uuid`,
-                        '=',
-                        'direct_charts.dashboard_uuid',
-                    ).andOnNull('direct_charts.deleted_at');
-                },
-            )
-            // Join with charts that are in dashboard through tiles
-            .leftJoin('dashboard_tiles', function joinDashboardTiles() {
-                this.on(
-                    'dashboard_tiles.dashboard_version_id',
-                    '=',
-                    `last_version.dashboard_version_id`,
-                );
-            })
-            .leftJoin(
-                'dashboard_tile_charts',
-                function joinDashboardTileCharts() {
-                    this.on(
-                        'dashboard_tile_charts.dashboard_version_id',
-                        '=',
-                        'dashboard_tiles.dashboard_version_id',
-                    ).andOn(
-                        'dashboard_tile_charts.dashboard_tile_uuid',
-                        '=',
-                        'dashboard_tiles.dashboard_tile_uuid',
-                    );
-                },
-            )
-            .leftJoin(
-                `${SavedChartsTableName} as tile_charts`,
-                function nonDeletedChartJoin() {
-                    this.on(
-                        'tile_charts.saved_query_id',
-                        '=',
-                        'dashboard_tile_charts.saved_chart_id',
-                    ).andOnNull('tile_charts.deleted_at');
-                },
-            )
             .column(
                 { uuid: `${DashboardsTableName}.dashboard_uuid` },
+                `${DashboardsTableName}.slug`,
                 `${DashboardsTableName}.name`,
                 `${DashboardsTableName}.description`,
                 { projectUuid: `${ProjectTableName}.project_uuid` },
                 { spaceUuid: `${SpaceTableName}.space_uuid` },
-                this.database.raw(
-                    `GREATEST(
-                        ${dashboardSearchRankRawSql},
-                        COALESCE(MAX(${directChartSearchRankRawSql}), 0),
-                        COALESCE(MAX(${tileChartSearchRankRawSql}), 0)
-                    ) as search_rank`,
-                ),
+                'dashboards_with_rank.search_rank',
                 { viewsCount: `${DashboardsTableName}.views_count` },
                 { firstViewedAt: `${DashboardsTableName}.first_viewed_at` },
                 { lastModified: `last_version.created_at` },
@@ -279,71 +432,43 @@ export class SearchModel {
                 { lastUpdatedByLastName: 'updated_by_user.last_name' },
                 { lastUpdatedByUserUuid: 'updated_by_user.user_uuid' },
             )
-            .where(`${ProjectTableName}.project_uuid`, projectUuid)
-            .whereNull(`${DashboardsTableName}.deleted_at`)
-            .whereNull(`${SpaceTableName}.deleted_at`)
-            // Use GIN index filters to reduce rows before computing ts_rank_cd.
-            // COALESCE is needed for chart filters because they come from LEFT JOINed tables -
-            // if a dashboard has no charts, search_vector is NULL and `NULL @@ tsquery` returns NULL.
-            // The dashboard filter doesn't need COALESCE since it's on the main table (always has a value).
-            .whereRaw(
-                `(${dashboardSearchFilterSql} OR COALESCE(${directChartSearchFilterSql}, false) OR COALESCE(${tileChartSearchFilterSql}, false))`,
-            )
-            .groupBy(
-                `${DashboardsTableName}.dashboard_id`,
-                `${DashboardsTableName}.dashboard_uuid`,
-                `${DashboardsTableName}.name`,
-                `${DashboardsTableName}.description`,
-                `${ProjectTableName}.project_uuid`,
-                `${SpaceTableName}.space_uuid`,
-                `${DashboardsTableName}.views_count`,
-                `${DashboardsTableName}.first_viewed_at`,
-                `last_version.created_at`,
-                'created_by_user.first_name',
-                'created_by_user.last_name',
-                'created_by_user.user_uuid',
-                'updated_by_user.first_name',
-                'updated_by_user.last_name',
-                'updated_by_user.user_uuid',
-            )
-            .orderBy('search_rank', 'desc');
-
-        subquery = filterByCreatedAt(DashboardsTableName, subquery, filters);
-        subquery = filterByCreatedByUuid(
-            subquery,
-            {
-                tableName: 'first_version',
-                tableUserUuidColumnName: 'updated_by_user_uuid',
-            },
-            filters,
-        );
-
-        const dashboards = await this.database(DashboardsTableName)
-            .select()
-            .from(subquery.as('dashboards_with_rank'))
-            .limit(10);
+            .orderBy('dashboards_with_rank.search_rank', 'desc');
 
         const dashboardUuids = dashboards.map((dashboard) => dashboard.uuid);
+
+        const verificationMap =
+            await this.contentVerificationModel.getByContentUuids(
+                ContentType.DASHBOARD,
+                dashboardUuids,
+            );
 
         const validationErrors = await this.database('validations')
             .where('project_uuid', projectUuid)
             .whereNull('job_id')
             .whereIn('dashboard_uuid', dashboardUuids)
             .andWhereNot('dashboard_uuid', null)
-            .select('validation_id', 'dashboard_uuid')
+            .select('validation_uuid', 'validation_id', 'dashboard_uuid')
             .then((rows) =>
-                rows.reduce<Record<string, Array<{ validationId: number }>>>(
-                    (acc, row) => {
-                        if (row.dashboard_uuid) {
-                            acc[row.dashboard_uuid] = [
-                                ...(acc[row.dashboard_uuid] ?? []),
-                                { validationId: row.validation_id },
-                            ];
-                        }
-                        return acc;
-                    },
-                    {},
-                ),
+                rows.reduce<
+                    Record<
+                        string,
+                        Array<{
+                            validationUuid: string;
+                            validationId: number | null;
+                        }>
+                    >
+                >((acc, row) => {
+                    if (row.dashboard_uuid) {
+                        acc[row.dashboard_uuid] = [
+                            ...(acc[row.dashboard_uuid] ?? []),
+                            {
+                                validationUuid: row.validation_uuid,
+                                validationId: row.validation_id,
+                            },
+                        ];
+                    }
+                    return acc;
+                }, {}),
             );
 
         const directChartsQuery = this.database(SavedChartsTableName)
@@ -417,6 +542,12 @@ export class SearchModel {
             ...(tileCharts ?? []),
         ];
 
+        const innerChartVerificationMap =
+            await this.contentVerificationModel.getByContentUuids(
+                ContentType.CHART,
+                dashboardCharts.map((chart) => chart.uuid),
+            );
+
         const chartsByDashboard = dashboardCharts.reduce<
             Record<
                 string,
@@ -426,6 +557,7 @@ export class SearchModel {
                     description: string;
                     chartType: string;
                     viewsCount: number;
+                    verification: ContentVerificationInfo | null;
                 }>
             >
         >((acc, chart) => {
@@ -438,6 +570,7 @@ export class SearchModel {
                 description: chart.description,
                 chartType: chart.chartType,
                 viewsCount: chart.views_count,
+                verification: innerChartVerificationMap.get(chart.uuid) ?? null,
             });
             return acc;
         }, {});
@@ -463,7 +596,207 @@ export class SearchModel {
                   }
                 : null,
             charts: chartsByDashboard[dashboard.uuid] || [],
+            verification: verificationMap.get(dashboard.uuid) ?? null,
         }));
+    }
+
+    async getDashboardCharts(
+        projectUuid: string,
+        dashboardUuid: string,
+        page: number,
+        pageSize: number,
+    ): Promise<{
+        dashboardName: string;
+        charts: DashboardChartSummary[];
+        pagination: {
+            page: number;
+            pageSize: number;
+            totalResults: number;
+            totalPageCount: number;
+        };
+    }> {
+        const dashboard = await this.database(DashboardsTableName)
+            .join(
+                SpaceTableName,
+                `${SpaceTableName}.space_id`,
+                `${DashboardsTableName}.space_id`,
+            )
+            .join(
+                ProjectTableName,
+                `${ProjectTableName}.project_id`,
+                `${SpaceTableName}.project_id`,
+            )
+            .select(
+                `${DashboardsTableName}.dashboard_uuid`,
+                `${DashboardsTableName}.name`,
+            )
+            .where(`${DashboardsTableName}.dashboard_uuid`, dashboardUuid)
+            .where(`${ProjectTableName}.project_uuid`, projectUuid)
+            .whereNull(`${DashboardsTableName}.deleted_at`)
+            .first();
+
+        if (!dashboard) {
+            throw new NotFoundError(`Dashboard not found: ${dashboardUuid}`);
+        }
+
+        // Charts can belong to a dashboard directly (dashboard_uuid on saved_queries)
+        // or via dashboard tiles. UNION deduplicates across both sources.
+        // Column order must match between both queries (PostgreSQL UNION matches by position).
+        const directCharts = this.database(SavedChartsTableName)
+            .leftJoin(
+                SpaceTableName,
+                `${SpaceTableName}.space_id`,
+                `${SavedChartsTableName}.space_id`,
+            )
+            .leftJoin(
+                ProjectTableName,
+                `${ProjectTableName}.project_id`,
+                `${SpaceTableName}.project_id`,
+            )
+            .select(
+                { uuid: `${SavedChartsTableName}.saved_query_uuid` },
+                `${SavedChartsTableName}.name`,
+                `${SavedChartsTableName}.description`,
+                {
+                    chartType: `${SavedChartsTableName}.last_version_chart_kind`,
+                },
+                { viewsCount: `${SavedChartsTableName}.views_count` },
+                {
+                    exploreName: this.database.raw(
+                        latestSavedChartVersionColumnSql('explore_name'),
+                    ),
+                },
+            )
+            .where(`${SavedChartsTableName}.dashboard_uuid`, dashboardUuid)
+            .where((builder) => {
+                void builder
+                    .whereNull(`${SavedChartsTableName}.space_id`)
+                    .orWhere(`${ProjectTableName}.project_uuid`, projectUuid);
+            })
+            .whereNull(`${SavedChartsTableName}.deleted_at`);
+
+        const tileCharts = this.database(DashboardsTableName)
+            .whereNull(`${DashboardsTableName}.deleted_at`)
+            .join(
+                'dashboard_versions',
+                `${DashboardsTableName}.dashboard_id`,
+                'dashboard_versions.dashboard_id',
+            )
+            .join(
+                'dashboard_tiles',
+                'dashboard_versions.dashboard_version_id',
+                'dashboard_tiles.dashboard_version_id',
+            )
+            .join('dashboard_tile_charts', function joinTileCharts() {
+                this.on(
+                    'dashboard_tile_charts.dashboard_version_id',
+                    '=',
+                    'dashboard_tiles.dashboard_version_id',
+                ).andOn(
+                    'dashboard_tile_charts.dashboard_tile_uuid',
+                    '=',
+                    'dashboard_tiles.dashboard_tile_uuid',
+                );
+            })
+            .join(SavedChartsTableName, function nonDeletedChartJoin() {
+                this.on(
+                    `${SavedChartsTableName}.saved_query_id`,
+                    '=',
+                    'dashboard_tile_charts.saved_chart_id',
+                ).andOnNull(`${SavedChartsTableName}.deleted_at`);
+            })
+            .leftJoin(
+                `${SpaceTableName} as chart_space`,
+                'chart_space.space_id',
+                `${SavedChartsTableName}.space_id`,
+            )
+            .leftJoin(
+                `${ProjectTableName} as chart_project`,
+                'chart_project.project_id',
+                'chart_space.project_id',
+            )
+            .select(
+                { uuid: `${SavedChartsTableName}.saved_query_uuid` },
+                `${SavedChartsTableName}.name`,
+                `${SavedChartsTableName}.description`,
+                {
+                    chartType: `${SavedChartsTableName}.last_version_chart_kind`,
+                },
+                { viewsCount: `${SavedChartsTableName}.views_count` },
+                {
+                    exploreName: this.database.raw(
+                        latestSavedChartVersionColumnSql('explore_name'),
+                    ),
+                },
+            )
+            .where(`${DashboardsTableName}.dashboard_uuid`, dashboardUuid)
+            .where((builder) => {
+                void builder
+                    .where(function dashboardOwnedChart() {
+                        void this.whereNull(
+                            `${SavedChartsTableName}.space_id`,
+                        ).where(
+                            `${SavedChartsTableName}.dashboard_uuid`,
+                            dashboardUuid,
+                        );
+                    })
+                    .orWhere('chart_project.project_uuid', projectUuid);
+            })
+            .whereRaw(
+                `dashboard_versions.dashboard_version_id = (
+                    SELECT MAX(dashboard_version_id)
+                    FROM dashboard_versions dv2
+                    WHERE dv2.dashboard_id = ${DashboardsTableName}.dashboard_id
+                )`,
+            );
+
+        type ChartRow = {
+            uuid: string;
+            name: string;
+            description: string;
+            chartType: ChartKind;
+            viewsCount: number;
+            exploreName: string;
+        };
+
+        const chartsQuery = this.database
+            .from(
+                this.database.raw(`(? UNION ?) as dashboard_charts`, [
+                    directCharts,
+                    tileCharts,
+                ]),
+            )
+            .select<ChartRow[]>('*');
+
+        const { data: charts, pagination } = await KnexPaginate.paginate(
+            chartsQuery,
+            { page, pageSize },
+        );
+
+        const chartVerificationMap =
+            await this.contentVerificationModel.getByContentUuids(
+                ContentType.CHART,
+                charts.map((chart) => chart.uuid),
+            );
+
+        return {
+            dashboardName: dashboard.name,
+            charts: charts.map((chart) => ({
+                uuid: chart.uuid,
+                name: chart.name,
+                description: chart.description,
+                chartType: chart.chartType,
+                viewsCount: chart.viewsCount,
+                exploreName: chart.exploreName,
+                verification: chartVerificationMap.get(chart.uuid) ?? null,
+            })),
+            pagination: {
+                page,
+                pageSize,
+                totalResults: pagination?.totalResults ?? 0,
+                totalPageCount: pagination?.totalPageCount ?? 0,
+            },
+        };
     }
 
     private async searchDashboardTabs(
@@ -475,11 +808,32 @@ export class SearchModel {
             return [];
         }
 
-        const dashboardTabs = await this.database(DashboardTabsTableName)
+        const reducedDashboardTabs = 'reduced_dashboard_tabs';
+        const dashboardTabs = await this.database
+            .withMaterialized(reducedDashboardTabs, (queryBuilder) =>
+                queryBuilder
+                    .select(
+                        `${DashboardTabsTableName}.uuid`,
+                        `${DashboardTabsTableName}.dashboard_id`,
+                        `${DashboardTabsTableName}.name`,
+                    )
+                    .from(DashboardTabsTableName)
+                    .where(
+                        `${DashboardTabsTableName}.name`,
+                        'ilike',
+                        this.database.raw('?', [`%${query}%`]),
+                    )
+                    .groupBy(
+                        `${DashboardTabsTableName}.uuid`,
+                        `${DashboardTabsTableName}.dashboard_id`,
+                        `${DashboardTabsTableName}.name`,
+                    ),
+            )
+            .from(reducedDashboardTabs)
             .innerJoin(
                 DashboardsTableName,
                 `${DashboardsTableName}.dashboard_id`,
-                `${DashboardTabsTableName}.dashboard_id`,
+                `${reducedDashboardTabs}.dashboard_id`,
             )
             .leftJoin(
                 SpaceTableName,
@@ -492,21 +846,17 @@ export class SearchModel {
                 `${SpaceTableName}.project_id`,
             )
             .column<DashboardTabResult[]>(
-                { uuid: `${DashboardTabsTableName}.uuid` },
-                { name: `${DashboardTabsTableName}.name` },
+                { uuid: `${reducedDashboardTabs}.uuid` },
+                { name: `${reducedDashboardTabs}.name` },
                 { dashboardUuid: `${DashboardsTableName}.dashboard_uuid` },
+                { dashboardSlug: `${DashboardsTableName}.slug` },
                 { dashboardName: `${DashboardsTableName}.name` },
                 { spaceUuid: `${SpaceTableName}.space_uuid` },
             )
             .where(`${ProjectTableName}.project_uuid`, projectUuid)
             .whereNull(`${DashboardsTableName}.deleted_at`)
             .whereNull(`${SpaceTableName}.deleted_at`)
-            .andWhere(
-                `${DashboardTabsTableName}.name`,
-                'ilike',
-                this.database.raw('?', [`%${query}%`]),
-            )
-            .distinctOn(`${DashboardTabsTableName}.uuid`);
+            .distinctOn(`${reducedDashboardTabs}.uuid`);
 
         return dashboardTabs;
     }
@@ -519,7 +869,10 @@ export class SearchModel {
         projectUuid: string,
         query: string,
         filters?: SearchFilters,
-        fullTextSearchOperator: 'OR' | 'AND' = 'AND',
+        {
+            fullTextSearchOperator = 'AND',
+            verifiedOnly = false,
+        }: SearchContentOptions = {},
     ) {
         const { name: tableName, uuidColumnName } = searchTable;
 
@@ -530,6 +883,7 @@ export class SearchModel {
                 searchQuery: query,
             },
             fullTextSearchOperator,
+            nameColumn: `${tableName}.name`,
         });
 
         // Use GIN index filter to reduce rows before computing ts_rank_cd
@@ -584,6 +938,7 @@ export class SearchModel {
                 {
                     chartType: `${tableName}.last_version_chart_kind`,
                 },
+                { dashboardUuid: `${tableName}.dashboard_uuid` },
                 { spaceUuid: `${tableName}.space_uuid` },
                 { projectUuid: `${ProjectTableName}.project_uuid` },
                 { viewsCount: `${tableName}.views_count` },
@@ -623,6 +978,16 @@ export class SearchModel {
             filters,
         );
 
+        if (verifiedOnly) {
+            subquery = subquery.whereExists(
+                this.verifiedContentExists(
+                    projectUuid,
+                    ContentType.CHART,
+                    `${tableName}.${uuidColumnName}`,
+                ),
+            );
+        }
+
         const charts = await this.database(tableName)
             .select()
             .from(subquery.as('saved_charts_with_rank'))
@@ -655,7 +1020,10 @@ export class SearchModel {
         projectUuid: string,
         query: string,
         filters?: SearchFilters,
-        fullTextSearchOperator: 'OR' | 'AND' = 'AND',
+        {
+            fullTextSearchOperator = 'AND',
+            verifiedOnly = false,
+        }: SearchContentOptions = {},
     ): Promise<SqlChartSearchResult[]> {
         if (!shouldSearchForType(SearchItemType.SQL_CHART, filters?.type)) {
             return [];
@@ -669,7 +1037,7 @@ export class SearchModel {
             projectUuid,
             query,
             filters,
-            fullTextSearchOperator,
+            { fullTextSearchOperator, verifiedOnly },
         );
     }
 
@@ -677,7 +1045,10 @@ export class SearchModel {
         projectUuid: string,
         query: string,
         filters?: SearchFilters,
-        fullTextSearchOperator: 'OR' | 'AND' = 'AND',
+        {
+            fullTextSearchOperator = 'AND',
+            verifiedOnly = false,
+        }: SearchContentOptions = {},
     ): Promise<SavedChartSearchResult[]> {
         if (!shouldSearchForType(SearchItemType.CHART, filters?.type)) {
             return [];
@@ -690,6 +1061,7 @@ export class SearchModel {
                 searchQuery: query,
             },
             fullTextSearchOperator,
+            nameColumn: `${SavedChartsTableName}.name`,
         });
 
         // Use GIN index filter to reduce rows before computing ts_rank_cd
@@ -738,11 +1110,13 @@ export class SearchModel {
             )
             .column(
                 { uuid: 'saved_query_uuid' },
+                `${SavedChartsTableName}.slug`,
                 `${SavedChartsTableName}.name`,
                 `${SavedChartsTableName}.description`,
                 {
                     chartType: `${SavedChartsTableName}.last_version_chart_kind`,
                 },
+                { dashboardUuid: `${SavedChartsTableName}.dashboard_uuid` },
                 { spaceUuid: 'space_uuid' },
                 { projectUuid: `${ProjectTableName}.project_uuid` },
                 { search_rank: searchRankRawSql },
@@ -773,6 +1147,16 @@ export class SearchModel {
             filters,
         );
 
+        if (verifiedOnly) {
+            subquery = subquery.whereExists(
+                this.verifiedContentExists(
+                    projectUuid,
+                    ContentType.CHART,
+                    `${SavedChartsTableName}.saved_query_uuid`,
+                ),
+            );
+        }
+
         const savedCharts = await this.database(SavedChartsTableName)
             .select()
             .from(subquery.as('saved_charts_with_rank'))
@@ -780,25 +1164,39 @@ export class SearchModel {
 
         const chartUuids = savedCharts.map((chart) => chart.uuid);
 
+        const savedChartVerificationMap =
+            await this.contentVerificationModel.getByContentUuids(
+                ContentType.CHART,
+                chartUuids,
+            );
+
         const validationErrors = await this.database('validations')
             .where('project_uuid', projectUuid)
             .whereNull('job_id')
             .whereIn('saved_chart_uuid', chartUuids)
             .andWhereNot('saved_chart_uuid', null)
-            .select('validation_id', 'saved_chart_uuid')
+            .select('validation_uuid', 'validation_id', 'saved_chart_uuid')
             .then((rows) =>
-                rows.reduce<Record<string, Array<{ validationId: number }>>>(
-                    (acc, row) => {
-                        if (row.saved_chart_uuid) {
-                            acc[row.saved_chart_uuid] = [
-                                ...(acc[row.saved_chart_uuid] ?? []),
-                                { validationId: row.validation_id },
-                            ];
-                        }
-                        return acc;
-                    },
-                    {},
-                ),
+                rows.reduce<
+                    Record<
+                        string,
+                        Array<{
+                            validationUuid: string;
+                            validationId: number | null;
+                        }>
+                    >
+                >((acc, row) => {
+                    if (row.saved_chart_uuid) {
+                        acc[row.saved_chart_uuid] = [
+                            ...(acc[row.saved_chart_uuid] ?? []),
+                            {
+                                validationUuid: row.validation_uuid,
+                                validationId: row.validation_id,
+                            },
+                        ];
+                    }
+                    return acc;
+                }, {}),
             );
 
         return savedCharts.map((chart) => ({
@@ -821,13 +1219,205 @@ export class SearchModel {
                       userUuid: chart.lastUpdatedByUserUuid,
                   }
                 : null,
+            verification: savedChartVerificationMap.get(chart.uuid) ?? null,
+        }));
+    }
+
+    async searchDocuments(
+        projectUuid: string,
+        query: string,
+        filters?: SearchFilters,
+    ): Promise<DocumentSearchResult[]> {
+        if (
+            filters?.verifiedOnly ||
+            !shouldSearchForType(SearchItemType.DOCUMENT, filters?.type)
+        ) {
+            return [];
+        }
+        const searchRank = getFullTextSearchRankCalcSql({
+            database: this.database,
+            variables: {
+                searchVectorColumn: 'documents.search_vector',
+                searchQuery: query,
+            },
+            nameColumn: 'documents.name',
+        });
+        const searchFilter = getFullTextSearchFilterSql({
+            database: this.database,
+            searchVectorColumn: 'documents.search_vector',
+            searchQuery: query,
+        });
+        const baseQuery = this.database('documents')
+            .innerJoin('spaces', 'spaces.space_id', 'documents.space_id')
+            .leftJoin(
+                'users as creator',
+                'creator.user_uuid',
+                'documents.created_by_user_uuid',
+            )
+            .select(
+                { uuid: 'documents.document_uuid' },
+                'documents.slug',
+                'documents.name',
+                'documents.description',
+                { projectUuid: 'documents.project_uuid' },
+                { spaceUuid: 'spaces.space_uuid' },
+                { search_rank: searchRank },
+                { firstName: 'creator.first_name' },
+                { lastName: 'creator.last_name' },
+                { userUuid: 'creator.user_uuid' },
+            )
+            .where('documents.project_uuid', projectUuid)
+            .whereNull('documents.deleted_at')
+            .whereNull('spaces.deleted_at')
+            .whereRaw(searchFilter)
+            .orderBy('search_rank', 'desc')
+            .orderBy('documents.document_uuid')
+            .limit(SEARCH_LIMIT_PER_ITEM_TYPE);
+        const dateFiltered = filterByCreatedAt('documents', baseQuery, filters);
+        const rows: (Omit<DocumentSearchResult, 'createdBy'> & {
+            firstName: string | null;
+            lastName: string | null;
+            userUuid: string | null;
+        })[] = await filterByCreatedByUuid(
+            dateFiltered,
+            {
+                tableName: 'documents',
+                tableUserUuidColumnName: 'created_by_user_uuid',
+            },
+            filters,
+        );
+        return rows.map(({ firstName, lastName, userUuid, ...document }) => ({
+            ...document,
+            createdBy: userUuid
+                ? {
+                      firstName: firstName ?? '',
+                      lastName: lastName ?? '',
+                      userUuid,
+                  }
+                : null,
+        }));
+    }
+
+    async searchDataApps(
+        projectUuid: string,
+        query: string,
+        filters?: SearchFilters,
+        {
+            fullTextSearchOperator = 'AND',
+            verifiedOnly = false,
+        }: SearchContentOptions = {},
+    ): Promise<DataAppSearchResult[]> {
+        if (!shouldSearchForType(SearchItemType.DATA_APP, filters?.type)) {
+            return [];
+        }
+
+        const searchRankRawSql = getFullTextSearchRankCalcSql({
+            database: this.database,
+            variables: {
+                searchVectorColumn: `${AppsTableName}.search_vector`,
+                searchQuery: query,
+            },
+            nameColumn: `${AppsTableName}.name`,
+            fullTextSearchOperator,
+        });
+
+        const searchFilterSql = getFullTextSearchFilterSql({
+            database: this.database,
+            searchVectorColumn: `${AppsTableName}.search_vector`,
+            searchQuery: query,
+            fullTextSearchOperator,
+        });
+
+        // Only surface apps that have at least one ready version — apps that
+        // have only ever been building or errored have no preview to land on.
+        const hasReadyVersionSql = this.database.raw(
+            `EXISTS (
+                SELECT 1 FROM ?? v
+                WHERE v.app_id = ??.app_id AND v.status = 'ready'
+            )`,
+            [AppVersionsTableName, AppsTableName],
+        );
+
+        let subquery = this.database(AppsTableName)
+            .leftJoin(
+                `${UserTableName} as created_by_user`,
+                `created_by_user.user_uuid`,
+                `${AppsTableName}.created_by_user_uuid`,
+            )
+            .column(
+                { uuid: `${AppsTableName}.app_id` },
+                `${AppsTableName}.slug`,
+                `${AppsTableName}.name`,
+                `${AppsTableName}.description`,
+                { spaceUuid: `${AppsTableName}.space_uuid` },
+                { projectUuid: `${AppsTableName}.project_uuid` },
+                { search_rank: searchRankRawSql },
+                { viewsCount: `${AppsTableName}.views_count` },
+                { createdByFirstName: 'created_by_user.first_name' },
+                { createdByLastName: 'created_by_user.last_name' },
+                { createdByUserUuid: 'created_by_user.user_uuid' },
+            )
+            .where(`${AppsTableName}.project_uuid`, projectUuid)
+            .whereNull(`${AppsTableName}.deleted_at`)
+            .whereRaw(hasReadyVersionSql)
+            .whereRaw(searchFilterSql)
+            .orderBy('search_rank', 'desc');
+
+        // Custom chart types are not data apps — they have their own gallery
+        // and must not surface as "Data app" search results.
+        AppModel.applyDataAppVizsFilter(subquery, 'exclude');
+
+        if (verifiedOnly) {
+            subquery = subquery.whereExists(
+                this.verifiedContentExists(
+                    projectUuid,
+                    ContentType.DATA_APP,
+                    `${AppsTableName}.app_id`,
+                ),
+            );
+        }
+
+        subquery = filterByCreatedAt(AppsTableName, subquery, filters);
+        subquery = filterByCreatedByUuid(
+            subquery,
+            {
+                tableName: AppsTableName,
+                tableUserUuidColumnName: 'created_by_user_uuid',
+            },
+            filters,
+        );
+
+        const apps = await this.database(AppsTableName)
+            .select()
+            .from(subquery.as('apps_with_rank'))
+            .limit(SEARCH_LIMIT_PER_ITEM_TYPE);
+
+        return apps.map((app) => ({
+            uuid: app.uuid,
+            slug: app.slug,
+            name: app.name,
+            description: app.description,
+            spaceUuid: app.spaceUuid,
+            projectUuid: app.projectUuid,
+            search_rank: app.search_rank,
+            viewsCount: app.viewsCount || 0,
+            createdBy: app.createdByUserUuid
+                ? {
+                      firstName: app.createdByFirstName,
+                      lastName: app.createdByLastName,
+                      userUuid: app.createdByUserUuid,
+                  }
+                : null,
         }));
     }
 
     async searchAllCharts(
         projectUuid: string,
         query: string,
-        fullTextSearchOperator: 'OR' | 'AND' = 'AND',
+        {
+            fullTextSearchOperator = 'AND',
+            verifiedOnly = false,
+        }: SearchContentOptions = {},
     ): Promise<Array<AllChartsSearchResult>> {
         const savedChartsSearchRankRawSql = getFullTextSearchRankCalcSql({
             database: this.database,
@@ -836,6 +1426,7 @@ export class SearchModel {
                 searchQuery: query,
             },
             fullTextSearchOperator,
+            nameColumn: `${SavedChartsTableName}.name`,
         });
 
         // GIN index filter for saved charts
@@ -891,6 +1482,7 @@ export class SearchModel {
                 {
                     chartType: `${SavedChartsTableName}.last_version_chart_kind`,
                 },
+                { dashboardUuid: `${SavedChartsTableName}.dashboard_uuid` },
                 { spaceUuid: `${SpaceTableName}.space_uuid` },
                 { search_rank: savedChartsSearchRankRawSql },
                 { projectUuid: `${ProjectTableName}.project_uuid` },
@@ -930,6 +1522,7 @@ export class SearchModel {
                 searchQuery: query,
             },
             fullTextSearchOperator,
+            nameColumn: `${SavedSqlTableName}.name`,
         });
 
         // GIN index filter for SQL charts
@@ -983,6 +1576,7 @@ export class SearchModel {
                 {
                     chartType: `${SavedSqlTableName}.last_version_chart_kind`,
                 },
+                { dashboardUuid: `${SavedSqlTableName}.dashboard_uuid` },
                 { spaceUuid: `${SavedSqlTableName}.space_uuid` },
                 { search_rank: savedSqlSearchRankRawSql },
                 { projectUuid: `${ProjectTableName}.project_uuid` },
@@ -1014,6 +1608,23 @@ export class SearchModel {
             .whereNull(`${SavedSqlTableName}.deleted_at`)
             .where(`${ProjectTableName}.project_uuid`, projectUuid)
             .whereRaw(savedSqlSearchFilterSql);
+
+        if (verifiedOnly) {
+            savedChartsSubquery.whereExists(
+                this.verifiedContentExists(
+                    projectUuid,
+                    ContentType.CHART,
+                    `${SavedChartsTableName}.saved_query_uuid`,
+                ),
+            );
+            savedSqlSubquery.whereExists(
+                this.verifiedContentExists(
+                    projectUuid,
+                    ContentType.CHART,
+                    `${SavedSqlTableName}.saved_sql_uuid`,
+                ),
+            );
+        }
 
         // Type-safe union by ensuring both subqueries have identical column structure
         const unionQuery = this.database
@@ -1052,6 +1663,7 @@ export class SearchModel {
                     name: string;
                     description: string;
                     chartType: string;
+                    dashboardUuid: string | null;
                     spaceUuid: string;
                     search_rank: number;
                     projectUuid: string;
@@ -1071,12 +1683,20 @@ export class SearchModel {
             .orderBy('search_rank', 'desc')
             .limit(20);
 
+        const chartUuids = results.map((r) => r.uuid);
+        const chartVerificationMap =
+            await this.contentVerificationModel.getByContentUuids(
+                ContentType.CHART,
+                chartUuids,
+            );
+
         return results.map((result) => ({
             uuid: result.uuid,
             slug: result.slug,
             name: result.name,
             description: result.description,
             chartType: result.chartType as ChartKind, // ChartKind type from database
+            dashboardUuid: result.dashboardUuid,
             spaceUuid: result.spaceUuid,
             search_rank: result.search_rank,
             projectUuid: result.projectUuid,
@@ -1098,14 +1718,24 @@ export class SearchModel {
                       userUuid: result.lastUpdatedByUserUuid,
                   }
                 : null,
+            verification: chartVerificationMap.get(result.uuid) ?? null,
         }));
     }
 
-    private async getProjectExplores(projectUuid: string): Promise<Explore[]> {
-        const projects = await this.database(ProjectTableName)
-            .select(['table_selection_type', 'table_selection_value'])
-            .where('project_uuid', projectUuid)
-            .limit(1);
+    private async getProjectExplores(
+        projectUuid: string,
+        timing?: OmnibarSearchTiming,
+    ): Promise<Explore[]> {
+        const getProjects = () =>
+            this.database(ProjectTableName)
+                .select(['table_selection_type', 'table_selection_value'])
+                .where('project_uuid', projectUuid)
+                .limit(1);
+        const projects = await timeOmnibarSearch(
+            timing,
+            'exploreSelection',
+            getProjects,
+        );
         if (projects.length === 0) {
             throw new NotFoundError(
                 `Cannot find project with id: ${projectUuid}`,
@@ -1116,34 +1746,44 @@ export class SearchModel {
             value: projects[0].table_selection_value,
         };
 
-        const explores = await this.database(CachedExploresTableName)
-            .select(['explores'])
-            .where('project_uuid', projectUuid)
-            .limit(1);
+        // One row per explore, not the whole-set blob. That blob was a single jsonb value
+        // holding every explore, so a global search parsed the entire catalog on every
+        // request. The pre-aggregate exclusion is pushed into SQL so those rows never leave
+        // Postgres. Explores with no type predate the column and must be kept, hence
+        // IS DISTINCT FROM rather than <>.
+        const getRows = () =>
+            this.database(CachedExploreTableName)
+                .select<{ explore: Explore | ExploreError }[]>('explore')
+                .where('project_uuid', projectUuid)
+                .whereRaw("explore->>'type' IS DISTINCT FROM ?", [
+                    ExploreType.PRE_AGGREGATE,
+                ])
+                .orderBy('name');
+        const rows = await timeOmnibarSearch(timing, 'exploreRows', getRows);
 
-        if (explores.length > 0 && explores[0].explores) {
-            return explores[0].explores.filter(
-                (explore: Explore | ExploreError) => {
+        const filterRows = () =>
+            rows
+                .map(({ explore }) => explore)
+                .filter((explore: Explore | ExploreError) => {
                     if (tableSelection.type === TableSelectionType.WITH_TAGS) {
                         return (
                             hasIntersection(
                                 explore.tags || [],
                                 tableSelection.value || [],
-                            ) || explore.type === ExploreType.VIRTUAL
+                            ) || isUserManagedExplore(explore)
                         );
                     }
                     if (tableSelection.type === TableSelectionType.WITH_NAMES) {
                         return (
                             (tableSelection.value || []).includes(
                                 explore.name,
-                            ) || explore.type === ExploreType.VIRTUAL
+                            ) || isUserManagedExplore(explore)
                         );
                     }
                     return true;
-                },
-            );
-        }
-        return [];
+                }) as Explore[];
+
+        return timeOmnibarSearchSync(timing, 'exploreFilter', filterRows);
     }
 
     static searchTablesAndFields(
@@ -1234,11 +1874,27 @@ export class SearchModel {
             );
 
         const sortedTables = unsortedTables
-            .sort((a, b) => b.regexMatchCount - a.regexMatchCount)
+            .sort((a, b) => {
+                const exactDiff =
+                    getExactOrPrefixLabelScore(query, b.label) -
+                    getExactOrPrefixLabelScore(query, a.label);
+                if (exactDiff !== 0) {
+                    return exactDiff;
+                }
+                return b.regexMatchCount - a.regexMatchCount;
+            })
             .slice(0, SEARCH_LIMIT_PER_ITEM_TYPE);
 
         const sortedFields = unsortedFields
-            .sort((a, b) => b.regexMatchCount - a.regexMatchCount)
+            .sort((a, b) => {
+                const exactDiff =
+                    getExactOrPrefixLabelScore(query, b.label) -
+                    getExactOrPrefixLabelScore(query, a.label);
+                if (exactDiff !== 0) {
+                    return exactDiff;
+                }
+                return b.regexMatchCount - a.regexMatchCount;
+            })
             .slice(0, SEARCH_LIMIT_PER_ITEM_TYPE);
 
         return [sortedTables, sortedFields];
@@ -1255,20 +1911,28 @@ export class SearchModel {
             .where('project_uuid', projectUuid)
             .whereNull('job_id')
             .whereNotNull('model_name')
-            .select('validation_id', 'model_name')
+            .select('validation_uuid', 'validation_id', 'model_name')
             .then((rows) =>
-                rows.reduce<Record<string, Array<{ validationId: number }>>>(
-                    (acc, row) => {
-                        if (row.model_name) {
-                            acc[row.model_name] = [
-                                ...(acc[row.model_name] ?? []),
-                                { validationId: row.validation_id },
-                            ];
-                        }
-                        return acc;
-                    },
-                    {},
-                ),
+                rows.reduce<
+                    Record<
+                        string,
+                        Array<{
+                            validationUuid: string;
+                            validationId: number | null;
+                        }>
+                    >
+                >((acc, row) => {
+                    if (row.model_name) {
+                        acc[row.model_name] = [
+                            ...(acc[row.model_name] ?? []),
+                            {
+                                validationUuid: row.validation_uuid,
+                                validationId: row.validation_id,
+                            },
+                        ];
+                    }
+                    return acc;
+                }, {}),
             );
 
         return explores.reduce<TableErrorSearchResult[]>((acc, explore) => {
@@ -1316,43 +1980,135 @@ export class SearchModel {
         projectUuid: string,
         query: string,
         filters?: SearchFilters,
+        timing?: OmnibarSearchTiming,
     ): Promise<SearchResults> {
-        const spaces = await this.searchSpaces(projectUuid, query, filters);
-        const dashboards = await this.searchDashboards(
-            projectUuid,
-            query,
-            filters,
+        const verifiedOnly = filters?.verifiedOnly === true;
+        const contentOptions: SearchContentOptions = { verifiedOnly };
+
+        // Verified is only meaningful for charts and dashboards — skip every
+        // other type so the Item type filter behaves as a verified-content view.
+        if (verifiedOnly) {
+            const searchContent = () =>
+                Promise.all([
+                    timeOmnibarSearch(timing, 'dashboards', () =>
+                        this.searchDashboards(
+                            projectUuid,
+                            query,
+                            filters,
+                            contentOptions,
+                        ),
+                    ),
+                    timeOmnibarSearch(timing, 'savedCharts', () =>
+                        this.searchSavedCharts(
+                            projectUuid,
+                            query,
+                            filters,
+                            contentOptions,
+                        ),
+                    ),
+                    timeOmnibarSearch(timing, 'sqlCharts', () =>
+                        this.searchSqlCharts(
+                            projectUuid,
+                            query,
+                            filters,
+                            contentOptions,
+                        ),
+                    ),
+                ]);
+            const [dashboards, savedCharts, sqlCharts] =
+                await timeOmnibarSearch(timing, 'contentGroup', searchContent);
+
+            return {
+                spaces: [],
+                dashboards,
+                savedCharts,
+                sqlCharts,
+                tables: [],
+                fields: [],
+                pages: [],
+                dashboardTabs: [],
+                dataApps: [],
+                documents: [],
+            };
+        }
+
+        const searchSpaces = () =>
+            this.searchSpaces(projectUuid, query, filters);
+        const spaces = await timeOmnibarSearch(timing, 'spaces', searchSpaces);
+        const searchContent = () =>
+            Promise.all([
+                timeOmnibarSearch(timing, 'dashboards', () =>
+                    searchReservingVerified(false, (opts) =>
+                        this.searchDashboards(
+                            projectUuid,
+                            query,
+                            filters,
+                            opts,
+                        ),
+                    ),
+                ),
+                timeOmnibarSearch(timing, 'savedCharts', () =>
+                    searchReservingVerified(false, (opts) =>
+                        this.searchSavedCharts(
+                            projectUuid,
+                            query,
+                            filters,
+                            opts,
+                        ),
+                    ),
+                ),
+                timeOmnibarSearch(timing, 'sqlCharts', () =>
+                    searchReservingVerified(false, (opts) =>
+                        this.searchSqlCharts(projectUuid, query, filters, opts),
+                    ),
+                ),
+            ]);
+        const [dashboards, savedCharts, sqlCharts] = await timeOmnibarSearch(
+            timing,
+            'contentGroup',
+            searchContent,
         );
-        const savedCharts = await this.searchSavedCharts(
-            projectUuid,
-            query,
-            filters,
+        const searchDashboardTabs = () =>
+            this.searchDashboardTabs(projectUuid, query, filters);
+        const dashboardTabs = await timeOmnibarSearch(
+            timing,
+            'dashboardTabs',
+            searchDashboardTabs,
         );
-        const sqlCharts = await this.searchSqlCharts(
-            projectUuid,
-            query,
-            filters,
+        const searchDataApps = () =>
+            this.searchDataApps(projectUuid, query, filters);
+        const dataApps = await timeOmnibarSearch(
+            timing,
+            'dataAppsSearch',
+            searchDataApps,
         );
-        const dashboardTabs = await this.searchDashboardTabs(
+
+        const documents = await this.searchDocuments(
             projectUuid,
             query,
             filters,
         );
 
-        const explores = await this.getProjectExplores(projectUuid);
-        const tableErrors = await this.searchTableErrors(
-            projectUuid,
-            query,
-            explores,
+        const explores = await this.getProjectExplores(projectUuid, timing);
+        const searchTableErrors = () =>
+            this.searchTableErrors(projectUuid, query, explores);
+        const tableErrors = await timeOmnibarSearch(
+            timing,
+            'tableErrors',
+            searchTableErrors,
         );
-        const [tables, fields] = SearchModel.searchTablesAndFields(
-            query,
-            explores,
-            filters,
+        const searchTablesAndFields = () =>
+            SearchModel.searchTablesAndFields(query, explores, filters);
+        const [tables, fields] = timeOmnibarSearchSync(
+            timing,
+            'tablesFields',
+            searchTablesAndFields,
         );
 
         const tablesAndErrors = [...tables, ...tableErrors];
-        const pages = SearchModel.searchPages(projectUuid, query, filters);
+        const searchPages = () =>
+            SearchModel.searchPages(projectUuid, query, filters);
+        const pages = timeOmnibarSearchSync(timing, 'pages', searchPages);
 
         return {
             spaces,
@@ -1363,6 +2119,8 @@ export class SearchModel {
             fields,
             pages,
             dashboardTabs,
+            dataApps,
+            documents,
         };
     }
 }

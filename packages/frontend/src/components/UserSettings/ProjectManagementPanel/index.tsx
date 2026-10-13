@@ -1,198 +1,162 @@
 import { subject } from '@casl/ability';
 import {
     ProjectType,
-    assertUnreachable,
+    WarehouseTypes,
     type OrganizationProject,
 } from '@lightdash/common';
 import {
-    Anchor,
+    ActionIcon,
+    Avatar,
     Badge,
+    Box,
     Button,
     Center,
     Checkbox,
+    Code,
+    CopyButton,
+    Divider,
     Group,
+    Menu,
+    Popover,
+    ScrollArea,
+    SegmentedControl,
     Stack,
-    Table,
-    Tabs,
     Text,
-    Title,
+    Tooltip,
+    UnstyledButton,
+    useMantineTheme,
 } from '@mantine/core';
-import { IconSettings, IconTrash } from '@tabler/icons-react';
+import {
+    IconCalendarTime,
+    IconCheck,
+    IconClock,
+    IconCopy,
+    IconDatabase,
+    IconDots,
+    IconSettings,
+    IconTerminal2,
+    IconTextCaption,
+    IconTrash,
+    IconUser,
+} from '@tabler/icons-react';
+import clsx from 'clsx';
 import { useCallback, useMemo, useState, type FC } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router';
-import { useTableStyles } from '../../../hooks/styles/useTableStyles';
-import { useTableTabStyles } from '../../../hooks/styles/useTableTabStyles';
 import {
     useActiveProject,
     useUpdateActiveProjectMutation,
 } from '../../../hooks/useActiveProject';
 import { useProjects } from '../../../hooks/useProjects';
-import { Can } from '../../../providers/Ability';
 import useApp from '../../../providers/App/useApp';
+import {
+    ContentTableSearchInput,
+    ContentTable,
+    useContentTable,
+    type ContentTableColumnDef,
+} from '../../common/ContentTable';
 import MantineIcon from '../../common/MantineIcon';
-import { SettingsCard } from '../../common/Settings/SettingsCard';
+import MantineModal from '../../common/MantineModal';
+import { SettingsPage } from '../../common/Settings/SettingsPage';
+import {
+    getWarehouseIcon,
+    getWarehouseLabel,
+} from '../../ProjectConnection/ProjectConnectFlow/utils';
 import { ProjectDeleteModal } from '../DeleteProjectPanel/DeleteProjectModal';
 import { ProjectDeleteInBulkModal } from '../DeleteProjectPanel/ProjectDeleteInBulkModal';
+import classes from './ProjectManagementPanel.module.css';
+import {
+    matchesProjectTypeFilter,
+    ProjectTypeFilter,
+} from './projectTypeFilter';
 
-type ProjectListItemProps = {
-    project: OrganizationProject;
-    isCurrentProject: boolean;
-    isBulkActionActive: boolean;
-    isSelected: boolean;
-    onSelect: (isSelected: boolean) => void;
-    onDelete: () => void;
+const WAREHOUSE_LABELS: Record<WarehouseTypes, string> = {
+    [WarehouseTypes.BIGQUERY]: 'BigQuery',
+    [WarehouseTypes.POSTGRES]: 'PostgreSQL',
+    [WarehouseTypes.REDSHIFT]: 'Redshift',
+    [WarehouseTypes.SNOWFLAKE]: 'Snowflake',
+    [WarehouseTypes.DATABRICKS]: 'Databricks',
+    [WarehouseTypes.TRINO]: 'Trino',
+    [WarehouseTypes.CLICKHOUSE]: 'ClickHouse',
+    [WarehouseTypes.ATHENA]: 'Athena',
+    [WarehouseTypes.DUCKDB]: 'DuckDB',
 };
 
-const ProjectListItem: FC<ProjectListItemProps> = ({
-    project,
-    isCurrentProject,
-    isBulkActionActive,
-    isSelected,
-    onSelect,
-    onDelete,
-}) => {
-    const { user } = useApp();
-    const navigate = useNavigate();
-
-    const { mutateAsync: updateActiveProjectMutation } =
-        useUpdateActiveProjectMutation();
-
-    const handleProjectSettingsClick = async () => {
-        if (!isCurrentProject) {
-            await updateActiveProjectMutation(project.projectUuid);
-        }
-        // a lot of cache invalidation happens after the mutation above
-        // so we need to wait for the next event loop to navigate to the new project
-        setTimeout(() => {
-            void navigate(
-                `/generalSettings/projectManagement/${project.projectUuid}/settings`,
-                {
-                    replace: true,
-                },
-            );
-        }, 0);
-    };
-
-    return (
-        <tr>
-            <td width="1%">
-                <Center>
-                    <Checkbox
-                        checked={isSelected}
-                        disabled={user.data?.ability.cannot(
-                            'delete',
-                            subject('Project', {
-                                type: project.type,
-                                projectUuid: project.projectUuid,
-                                organizationUuid: user.data?.organizationUuid,
-                                createdByUserUuid: project.createdByUserUuid,
-                            }),
-                        )}
-                        onChange={(e) => onSelect(e.target.checked)}
-                    />
-                </Center>
-            </td>
-
-            <Text component="td" fw={500}>
-                {project.name}
-            </Text>
-
-            <td>
-                <Group spacing="xs">
-                    {isCurrentProject && (
-                        <Badge variant="filled">Current Project</Badge>
-                    )}
-                    {project.type === ProjectType.PREVIEW && (
-                        <Badge>Preview</Badge>
-                    )}
-                </Group>
-            </td>
-
-            <td width="1%">
-                <div
-                    style={{
-                        visibility: isBulkActionActive ? 'hidden' : 'visible',
-                    }}
-                >
-                    <Group noWrap position="right" spacing="sm">
-                        <Can
-                            I="update"
-                            this={subject('Project', {
-                                organizationUuid: user.data?.organizationUuid,
-                                projectUuid: project.projectUuid,
-                            })}
+const CopyableCommand: FC<{ label: string; command: string }> = ({
+    label,
+    command,
+}) => (
+    <Stack gap={4}>
+        <Text fz="xs" fw={600} c="ldGray.7">
+            {label}
+        </Text>
+        <CopyButton value={command}>
+            {({ copied, copy }) => (
+                <Tooltip label={copied ? 'Copied!' : 'Click to copy'}>
+                    <UnstyledButton onClick={copy}>
+                        <Code
+                            block
+                            fz="xs"
+                            p="xs"
+                            className={clsx(
+                                classes.copyableCommand,
+                                copied
+                                    ? classes.copyFlashActive
+                                    : classes.copyFlash,
+                            )}
                         >
-                            <Button
-                                component={Link}
-                                size="xs"
-                                to={`/generalSettings/projectManagement/${project.projectUuid}`}
-                                leftIcon={<MantineIcon icon={IconSettings} />}
-                                variant="outline"
-                                onClick={handleProjectSettingsClick}
+                            <Group
+                                gap="xs"
+                                justify="space-between"
+                                wrap="nowrap"
                             >
-                                Settings
-                            </Button>
-                        </Can>
-
-                        <Can
-                            I="delete"
-                            this={subject('Project', {
-                                type: project.type,
-                                projectUuid: project.projectUuid,
-                                organizationUuid: user.data?.organizationUuid,
-                                createdByUserUuid: project.createdByUserUuid,
-                            })}
-                        >
-                            <Button
-                                px="xs"
-                                size="xs"
-                                variant="outline"
-                                color="red"
-                                onClick={onDelete}
-                            >
-                                <MantineIcon icon={IconTrash} />
-                            </Button>
-                        </Can>
-                    </Group>
-                </div>
-            </td>
-        </tr>
-    );
-};
-
-enum TabsValue {
-    ALL = 'all',
-    DEFAULT = 'default',
-    PREVIEW = 'preview',
-}
-
-const TABS = [
-    { value: TabsValue.ALL, label: 'All' },
-    { value: TabsValue.DEFAULT, label: 'Projects' },
-    { value: TabsValue.PREVIEW, label: 'Preview Projects' },
-];
+                                <Text fz="xs" ff="monospace" span>
+                                    {command}
+                                </Text>
+                                <MantineIcon
+                                    icon={copied ? IconCheck : IconCopy}
+                                    size="sm"
+                                    color={copied ? 'teal.6' : 'ldGray.5'}
+                                    className={classes.copyIcon}
+                                />
+                            </Group>
+                        </Code>
+                    </UnstyledButton>
+                </Tooltip>
+            )}
+        </CopyButton>
+    </Stack>
+);
 
 const ProjectManagementPanel: FC = () => {
-    const tableStyles = useTableStyles();
-    const tableTabStyles = useTableTabStyles();
-
+    const theme = useMantineTheme();
     const { user } = useApp();
+    const navigate = useNavigate();
 
     const { data: projects = [], isInitialLoading: isLoadingProjects } =
         useProjects();
     const { data: lastProjectUuid, isInitialLoading: isLoadingLastProject } =
         useActiveProject();
 
+    const { mutateAsync: updateActiveProjectMutation } =
+        useUpdateActiveProjectMutation();
+
     const [deletingProjectUuid, setDeletingProjectUuid] = useState<string>();
     const [deletingProjectInBulk, setDeletingProjectInBulk] = useState(false);
+    const [cliProject, setCliProject] = useState<OrganizationProject>();
 
-    const [activeTab, setActiveTab] = useState<TabsValue>(TabsValue.ALL);
-
+    const [activeFilter, setActiveFilter] = useState<ProjectTypeFilter>(
+        ProjectTypeFilter.ALL,
+    );
+    const [search, setSearch] = useState('');
+    const [selectedWarehouses, setSelectedWarehouses] = useState<
+        WarehouseTypes[]
+    >([]);
+    const [selectedCreators, setSelectedCreators] = useState<string[]>([]);
     const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
 
-    const handleTabChange = useCallback((value: TabsValue) => {
+    const handleFilterChange = useCallback((value: string) => {
         setSelectedProjects([]);
-        setActiveTab(value);
+        setActiveFilter(value as ProjectTypeFilter);
     }, []);
 
     const handleSelect = useCallback(
@@ -206,41 +170,131 @@ const ProjectManagementPanel: FC = () => {
         [],
     );
 
-    const filteredProjects = useMemo(() => {
-        return projects.filter((project) => {
-            switch (activeTab) {
-                case TabsValue.DEFAULT:
-                    return project.type === ProjectType.DEFAULT;
-                case TabsValue.PREVIEW:
-                    return project.type === ProjectType.PREVIEW;
-                case TabsValue.ALL:
-                    return true;
-                default:
-                    return assertUnreachable(
-                        activeTab,
-                        `Unknown tab: ${activeTab}`,
-                    );
+    // Derive available warehouses and creators from project data
+    const availableWarehouses = useMemo(() => {
+        const types = new Set<WarehouseTypes>();
+        projects.forEach((p) => {
+            if (p.warehouseType) types.add(p.warehouseType);
+        });
+        return Array.from(types).sort();
+    }, [projects]);
+
+    const availableCreators = useMemo(() => {
+        const creators = new Map<string, string>();
+        projects.forEach((p) => {
+            if (p.createdByUserName && p.createdByUserUuid) {
+                creators.set(p.createdByUserUuid, p.createdByUserName);
             }
         });
-    }, [projects, activeTab]);
+        return Array.from(creators.entries()).map(([uuid, name]) => ({
+            uuid,
+            name,
+        }));
+    }, [projects]);
 
-    const handleSelectAll = useCallback(() => {
-        if (activeTab !== TabsValue.PREVIEW) {
-            throw new Error(
-                'Select all is only available for preview projects',
+    // Deleting the org's training playground takes every learner's copy
+    // with it, so it is offered to org admins only (the same permission
+    // Enable Learn needs); other projects follow the delete ability alone.
+    const canDeleteProject = useCallback(
+        (project: OrganizationProject) => {
+            if (!user.data) return false;
+            const canDelete = user.data.ability.can(
+                'delete',
+                subject('Project', {
+                    type: project.type,
+                    projectUuid: project.projectUuid,
+                    organizationUuid: user.data.organizationUuid,
+                    createdByUserUuid: project.createdByUserUuid,
+                }),
             );
-        }
+            if (project.type !== ProjectType.TRAINING) return canDelete;
+            return (
+                canDelete &&
+                user.data.ability.can(
+                    'manage',
+                    subject('Organization', {
+                        organizationUuid: user.data.organizationUuid,
+                    }),
+                )
+            );
+        },
+        [user.data],
+    );
 
-        setSelectedProjects(
+    const filteredProjects = useMemo(() => {
+        return projects.filter((project) => {
+            const matchesSearch =
+                !search ||
+                project.name.toLowerCase().includes(search.toLowerCase());
+
+            const matchesType = matchesProjectTypeFilter(
+                activeFilter,
+                project.type,
+            );
+
+            const matchesWarehouse =
+                selectedWarehouses.length === 0 ||
+                (project.warehouseType &&
+                    selectedWarehouses.includes(project.warehouseType));
+
+            const matchesCreator =
+                selectedCreators.length === 0 ||
+                (project.createdByUserUuid &&
+                    selectedCreators.includes(project.createdByUserUuid));
+
+            return (
+                matchesSearch &&
+                matchesType &&
+                matchesWarehouse &&
+                matchesCreator
+            );
+        });
+    }, [projects, activeFilter, search, selectedWarehouses, selectedCreators]);
+
+    const selectedUuids = useMemo(
+        () => new Set(selectedProjects),
+        [selectedProjects],
+    );
+
+    // A selection can outlive a filter change, so bulk actions only ever act
+    // on selected projects that are still in view.
+    const visibleSelectedProjects = useMemo(
+        () =>
+            filteredProjects.filter((project) =>
+                selectedUuids.has(project.projectUuid),
+            ),
+        [filteredProjects, selectedUuids],
+    );
+
+    const selectableProjects = useMemo(
+        () => filteredProjects.filter(canDeleteProject),
+        [filteredProjects, canDeleteProject],
+    );
+
+    const allVisibleSelected =
+        selectableProjects.length > 0 &&
+        selectableProjects.every((project) =>
+            selectedUuids.has(project.projectUuid),
+        );
+
+    // The header checkbox reflects and toggles only the rows in view;
+    // selections hidden by a filter are left untouched.
+    const handleToggleSelectAll = useCallback(() => {
+        const visibleUuids = new Set(
             filteredProjects.map((project) => project.projectUuid),
         );
-    }, [activeTab, filteredProjects]);
-
-    const allSelectedProjects = useMemo(() => {
-        return selectedProjects
-            .map((uuid) => projects.find((p) => p.projectUuid === uuid))
-            .filter((p): p is OrganizationProject => !!p);
-    }, [projects, selectedProjects]);
+        setSelectedProjects((prev) => {
+            const hidden = prev.filter((uuid) => !visibleUuids.has(uuid));
+            return allVisibleSelected
+                ? hidden
+                : [
+                      ...hidden,
+                      ...selectableProjects.map(
+                          (project) => project.projectUuid,
+                      ),
+                  ];
+        });
+    }, [filteredProjects, selectableProjects, allVisibleSelected]);
 
     const handleDeleteInBulk = useCallback(() => {
         setDeletingProjectInBulk(true);
@@ -251,114 +305,718 @@ const ProjectManagementPanel: FC = () => {
         setDeletingProjectInBulk(false);
     }, []);
 
-    if (isLoadingProjects || isLoadingLastProject) return null;
-
-    if (projects.length === 0) {
-        return <Navigate to="/createProject" />;
-    }
-
-    const lastProject = projects.find(
-        (project) => project.projectUuid === lastProjectUuid,
+    const handleProjectSettingsClick = useCallback(
+        async (projectUuid: string) => {
+            const isCurrentProject = lastProjectUuid === projectUuid;
+            if (!isCurrentProject) {
+                await updateActiveProjectMutation(projectUuid);
+            }
+            setTimeout(() => {
+                void navigate(
+                    `/generalSettings/projectManagement/${projectUuid}/settings`,
+                    { replace: true },
+                );
+            }, 0);
+        },
+        [lastProjectUuid, navigate, updateActiveProjectMutation],
     );
 
-    return (
-        <Stack mb="lg">
-            <Group position="apart">
-                <Title order={5}>Project management settings</Title>
+    const columns: ContentTableColumnDef<OrganizationProject>[] = useMemo(
+        () => [
+            {
+                id: 'select',
+                header: '',
+                size: 40,
+                enableSorting: false,
+                Header: () =>
+                    activeFilter === ProjectTypeFilter.PREVIEW ? (
+                        <Center>
+                            <Checkbox
+                                aria-label="Select all projects"
+                                checked={allVisibleSelected}
+                                indeterminate={
+                                    !allVisibleSelected &&
+                                    visibleSelectedProjects.length > 0
+                                }
+                                disabled={selectableProjects.length === 0}
+                                onChange={handleToggleSelectAll}
+                            />
+                        </Center>
+                    ) : null,
+                Cell: ({ row }) => {
+                    const project = row.original;
+                    const canDelete = canDeleteProject(project);
+                    return (
+                        <Center>
+                            <Checkbox
+                                checked={selectedProjects.includes(
+                                    project.projectUuid,
+                                )}
+                                disabled={!canDelete}
+                                onChange={(e) =>
+                                    handleSelect(
+                                        project.projectUuid,
+                                        e.target.checked,
+                                    )
+                                }
+                            />
+                        </Center>
+                    );
+                },
+            },
+            {
+                accessorKey: 'name',
+                header: 'Name',
+                enableSorting: true,
+                size: 200,
+                Header: ({ column }) => (
+                    <Group gap="two" wrap="nowrap">
+                        <MantineIcon icon={IconTextCaption} color="dimmed" />
+                        {column.columnDef.header}
+                    </Group>
+                ),
+                Cell: ({ row }) => {
+                    const project = row.original;
+                    const isCurrentProject =
+                        lastProjectUuid === project.projectUuid;
+                    return (
+                        <Group gap="xs" wrap="nowrap">
+                            <Text fz="sm" fw={500} truncate="end">
+                                {project.name}
+                            </Text>
+                            {isCurrentProject && (
+                                <Badge size="xs">Current</Badge>
+                            )}
+                            {project.type === ProjectType.PREVIEW && (
+                                <Badge size="xs">Preview</Badge>
+                            )}
+                            {project.type === ProjectType.TRAINING && (
+                                <Badge size="xs" color="grape" flex="none">
+                                    Playground
+                                </Badge>
+                            )}
+                        </Group>
+                    );
+                },
+            },
+            {
+                accessorKey: 'warehouseType',
+                header: 'Warehouse',
+                enableSorting: true,
+                size: 140,
+                Header: ({ column }) => (
+                    <Group gap="two" wrap="nowrap">
+                        <MantineIcon icon={IconDatabase} color="dimmed" />
+                        {column.columnDef.header}
+                    </Group>
+                ),
+                Cell: ({ row }) => {
+                    const wt = row.original.warehouseType;
+                    if (!wt) {
+                        return (
+                            <Text fz="sm" c="ldGray.5">
+                                {'\u2014'}
+                            </Text>
+                        );
+                    }
+                    const label =
+                        getWarehouseLabel(wt) ?? WAREHOUSE_LABELS[wt] ?? wt;
+                    const icon = getWarehouseIcon(wt, 'xs');
+                    return (
+                        <Group gap="xs" wrap="nowrap">
+                            {icon ?? (
+                                <Avatar size="xs" radius="xl" bg="ldGray.1">
+                                    <MantineIcon
+                                        icon={IconDatabase}
+                                        size="xs"
+                                        color="dimmed"
+                                    />
+                                </Avatar>
+                            )}
+                            <Text fz="sm" c="ldGray.7">
+                                {label}
+                            </Text>
+                        </Group>
+                    );
+                },
+            },
+            {
+                accessorKey: 'createdByUserName',
+                header: 'Created by',
+                enableSorting: true,
+                size: 150,
+                Header: ({ column }) => (
+                    <Group gap="two" wrap="nowrap">
+                        <MantineIcon icon={IconUser} color="dimmed" />
+                        {column.columnDef.header}
+                    </Group>
+                ),
+                Cell: ({ row }) => (
+                    <Text fz="sm" c="ldGray.7">
+                        {row.original.createdByUserName ?? '\u2014'}
+                    </Text>
+                ),
+            },
+            {
+                accessorKey: 'createdAt',
+                header: 'Created',
+                enableSorting: true,
+                size: 120,
+                Header: ({ column }) => (
+                    <Group gap="two" wrap="nowrap">
+                        <MantineIcon icon={IconClock} color="dimmed" />
+                        {column.columnDef.header}
+                    </Group>
+                ),
+                Cell: ({ row }) => (
+                    <Text fz="sm" c="ldGray.7">
+                        {new Date(row.original.createdAt).toLocaleDateString()}
+                    </Text>
+                ),
+            },
+            {
+                accessorKey: 'expiresAt',
+                header: 'Expires',
+                enableSorting: true,
+                sortUndefined: 1,
+                size: 120,
+                Header: ({ column }) => (
+                    <Group gap="two" wrap="nowrap">
+                        <MantineIcon icon={IconCalendarTime} color="dimmed" />
+                        {column.columnDef.header}
+                    </Group>
+                ),
+                Cell: ({ row }) => {
+                    const { expiresAt } = row.original;
+                    if (!expiresAt) {
+                        return (
+                            <Text fz="sm" c="ldGray.5">
+                                {'—'}
+                            </Text>
+                        );
+                    }
+                    return (
+                        <Text fz="sm" c="ldGray.7">
+                            {new Date(expiresAt).toLocaleDateString()}
+                        </Text>
+                    );
+                },
+            },
+            {
+                id: 'actions',
+                header: '',
+                enableSorting: false,
+                size: 60,
+                mantineTableHeadCellProps: { align: 'right' },
+                mantineTableBodyCellProps: { align: 'right' },
+                Cell: ({ row }) => {
+                    const project = row.original;
+                    const canUpdate = user.data?.ability.can(
+                        'update',
+                        subject('Project', {
+                            organizationUuid: user.data?.organizationUuid,
+                            projectUuid: project.projectUuid,
+                        }),
+                    );
+                    const canDelete = canDeleteProject(project);
 
-                <Can
-                    I="create"
-                    this={subject('Project', {
-                        organizationUuid: user.data?.organizationUuid,
-                    })}
-                >
-                    <Button component={Link} to="/createProject">
-                        Create new
-                    </Button>
-                </Can>
-            </Group>
-
-            <SettingsCard style={{ overflow: 'hidden' }} shadow="none" p={0}>
-                <Group position="apart">
-                    <Tabs
-                        classNames={tableTabStyles.classes}
-                        value={activeTab}
-                        onTabChange={handleTabChange}
-                    >
-                        <Tabs.List>
-                            {TABS.map(({ value, label }) => (
-                                <Tabs.Tab key={value} value={value}>
-                                    <Text color="ldGray.7" fz={15} fw={500}>
-                                        {label}
-                                    </Text>
-                                </Tabs.Tab>
-                            ))}
-                        </Tabs.List>
-                    </Tabs>
-
-                    {selectedProjects.length > 0 && (
-                        <Button
-                            leftIcon={<MantineIcon icon={IconTrash} />}
-                            compact
-                            color="red"
-                            mr="sm"
-                            onClick={handleDeleteInBulk}
+                    return (
+                        <Menu
+                            position="bottom-end"
+                            withArrow
+                            arrowPosition="center"
                         >
-                            Delete {selectedProjects.length} selected
-                        </Button>
+                            <Menu.Target>
+                                <ActionIcon>
+                                    <MantineIcon icon={IconDots} />
+                                </ActionIcon>
+                            </Menu.Target>
+                            <Menu.Dropdown>
+                                {canUpdate && (
+                                    <Menu.Item
+                                        leftSection={
+                                            <MantineIcon icon={IconSettings} />
+                                        }
+                                        onClick={() =>
+                                            void handleProjectSettingsClick(
+                                                project.projectUuid,
+                                            )
+                                        }
+                                    >
+                                        Settings
+                                    </Menu.Item>
+                                )}
+                                <CopyButton value={project.projectUuid}>
+                                    {({ copied, copy }) => (
+                                        <Menu.Item
+                                            leftSection={
+                                                <MantineIcon
+                                                    icon={
+                                                        copied
+                                                            ? IconCheck
+                                                            : IconCopy
+                                                    }
+                                                    color={
+                                                        copied
+                                                            ? 'teal.6'
+                                                            : undefined
+                                                    }
+                                                />
+                                            }
+                                            onClick={copy}
+                                        >
+                                            {copied
+                                                ? 'Copied!'
+                                                : 'Copy project UUID'}
+                                        </Menu.Item>
+                                    )}
+                                </CopyButton>
+                                <Menu.Item
+                                    leftSection={
+                                        <MantineIcon icon={IconTerminal2} />
+                                    }
+                                    onClick={() => setCliProject(project)}
+                                >
+                                    CLI reference
+                                </Menu.Item>
+                                {canDelete && <Menu.Divider />}
+                                {canDelete && (
+                                    <Menu.Item
+                                        color="red"
+                                        leftSection={
+                                            <MantineIcon icon={IconTrash} />
+                                        }
+                                        onClick={() =>
+                                            setDeletingProjectUuid(
+                                                project.projectUuid,
+                                            )
+                                        }
+                                    >
+                                        Delete
+                                    </Menu.Item>
+                                )}
+                            </Menu.Dropdown>
+                        </Menu>
+                    );
+                },
+            },
+        ],
+        [
+            activeFilter,
+            allVisibleSelected,
+            handleProjectSettingsClick,
+            handleSelect,
+            handleToggleSelectAll,
+            lastProjectUuid,
+            selectableProjects.length,
+            selectedProjects,
+            user.data?.ability,
+            canDeleteProject,
+            user.data?.organizationUuid,
+            visibleSelectedProjects.length,
+        ],
+    );
+
+    const hasActiveFilters =
+        search.length > 0 ||
+        activeFilter !== ProjectTypeFilter.ALL ||
+        selectedWarehouses.length > 0 ||
+        selectedCreators.length > 0;
+
+    const resetAllFilters = useCallback(() => {
+        setSearch('');
+        setSelectedProjects([]);
+        setSelectedWarehouses([]);
+        setSelectedCreators([]);
+        setActiveFilter(ProjectTypeFilter.ALL);
+    }, []);
+
+    const table = useContentTable({
+        columns,
+        data: filteredProjects,
+        enablePagination: false,
+        enableSorting: true,
+        enableTopToolbar: true,
+        enableBottomToolbar: false,
+        mantinePaperProps: {
+            shadow: undefined,
+            style: {
+                border: `1px solid ${theme.colors.ldGray[2]}`,
+                borderRadius: theme.radius.md,
+                boxShadow: theme.shadows.subtle,
+                display: 'flex',
+                flexDirection: 'column' as const,
+                overflow: 'hidden',
+            },
+        },
+        mantineTableHeadCellProps: {
+            bg: 'ldGray.0',
+            style: {
+                userSelect: 'none',
+                padding: `${theme.spacing.xs} ${theme.spacing.md}`,
+                borderTop: `1px solid ${theme.colors.ldGray[2]}`,
+                borderBottom: `1px solid ${theme.colors.ldGray[2]}`,
+            },
+        },
+        mantineTableBodyCellProps: {
+            style: {
+                padding: `${theme.spacing.sm} ${theme.spacing.md}`,
+                borderBottom: `1px solid ${theme.colors.ldGray[2]}`,
+                borderTop: 'none',
+            },
+        },
+        mantineTableProps: {
+            highlightOnHover: true,
+        },
+        emptyState: {
+            entityName: 'projects',
+            hasActiveFilters,
+            onClearFilters: resetAllFilters,
+            search,
+        },
+        state: {
+            isLoading: isLoadingProjects || isLoadingLastProject,
+        },
+        renderTopToolbar: () => (
+            <Group
+                className={classes.toolbar}
+                justify="space-between"
+                p={`${theme.spacing.sm} ${theme.spacing.md}`}
+                wrap="nowrap"
+            >
+                <Group
+                    className={classes.filters}
+                    gap="xs"
+                    wrap="nowrap"
+                    flex={1}
+                    miw={0}
+                >
+                    <Tooltip label="Search by project name">
+                        <ContentTableSearchInput
+                            className={classes.search}
+                            aria-label="Search projects"
+                            placeholder="Search projects..."
+                            value={search}
+                            onChange={setSearch}
+                        />
+                    </Tooltip>
+
+                    <Divider
+                        orientation="vertical"
+                        w={1}
+                        h={20}
+                        visibleFrom="sm"
+                    />
+
+                    <SegmentedControl
+                        size="xs"
+                        value={activeFilter}
+                        onChange={handleFilterChange}
+                        classNames={{
+                            root: classes.segmentedControl,
+                            indicator: classes.segmentedIndicator,
+                            label: classes.segmentedLabel,
+                        }}
+                        data={[
+                            {
+                                value: ProjectTypeFilter.ALL,
+                                label: (
+                                    <Tooltip label="Show all projects">
+                                        <Box>
+                                            <Text fz="xs" fw={500}>
+                                                All
+                                            </Text>
+                                        </Box>
+                                    </Tooltip>
+                                ),
+                            },
+                            {
+                                value: ProjectTypeFilter.DEFAULT,
+                                label: (
+                                    <Tooltip label="Show only standard projects">
+                                        <Box>
+                                            <Text fz="xs" fw={500}>
+                                                Projects
+                                            </Text>
+                                        </Box>
+                                    </Tooltip>
+                                ),
+                            },
+                            {
+                                value: ProjectTypeFilter.PREVIEW,
+                                label: (
+                                    <Tooltip label="Show only preview projects">
+                                        <Box>
+                                            <Text fz="xs" fw={500}>
+                                                Preview
+                                            </Text>
+                                        </Box>
+                                    </Tooltip>
+                                ),
+                            },
+                            {
+                                value: ProjectTypeFilter.TRAINING,
+                                label: (
+                                    <Tooltip label="Show only the training playground Learn created">
+                                        <Box>
+                                            <Text fz="xs" fw={500}>
+                                                Training
+                                            </Text>
+                                        </Box>
+                                    </Tooltip>
+                                ),
+                            },
+                        ]}
+                    />
+
+                    <Divider orientation="vertical" w={1} h={20} />
+
+                    {/* Warehouse filter */}
+                    <Popover width={220} position="bottom-start">
+                        <Popover.Target>
+                            <Tooltip label="Filter by warehouse">
+                                <Button
+                                    h={32}
+                                    c="foreground"
+                                    fz="sm"
+                                    variant="default"
+                                    px="sm"
+                                    className={
+                                        selectedWarehouses.length > 0
+                                            ? classes.filterButtonSelected
+                                            : classes.filterButton
+                                    }
+                                    classNames={{
+                                        label: classes.buttonLabel,
+                                    }}
+                                    rightSection={
+                                        selectedWarehouses.length > 0 ? (
+                                            <Badge
+                                                size="xs"
+                                                variant="filled"
+                                                color="indigo.6"
+                                                circle
+                                                styles={{
+                                                    root: {
+                                                        minWidth: 18,
+                                                        height: 18,
+                                                        padding: '0 4px',
+                                                    },
+                                                }}
+                                            >
+                                                {selectedWarehouses.length}
+                                            </Badge>
+                                        ) : null
+                                    }
+                                >
+                                    Warehouse
+                                </Button>
+                            </Tooltip>
+                        </Popover.Target>
+                        <Popover.Dropdown p="sm">
+                            <Stack gap={4}>
+                                <Text fz="xs" fw={600}>
+                                    Filter by warehouse:
+                                </Text>
+                                <ScrollArea.Autosize
+                                    mah={200}
+                                    type="always"
+                                    scrollbars="y"
+                                >
+                                    <Stack gap="xs">
+                                        {availableWarehouses.map((wt) => (
+                                            <Checkbox
+                                                key={wt}
+                                                label={
+                                                    WAREHOUSE_LABELS[wt] ?? wt
+                                                }
+                                                checked={selectedWarehouses.includes(
+                                                    wt,
+                                                )}
+                                                size="xs"
+                                                classNames={{
+                                                    body: classes.checkboxBody,
+                                                    input: classes.checkboxInput,
+                                                    label: classes.checkboxLabel,
+                                                }}
+                                                onChange={() => {
+                                                    if (
+                                                        selectedWarehouses.includes(
+                                                            wt,
+                                                        )
+                                                    ) {
+                                                        setSelectedWarehouses(
+                                                            selectedWarehouses.filter(
+                                                                (w) => w !== wt,
+                                                            ),
+                                                        );
+                                                    } else {
+                                                        setSelectedWarehouses([
+                                                            ...selectedWarehouses,
+                                                            wt,
+                                                        ]);
+                                                    }
+                                                }}
+                                            />
+                                        ))}
+                                    </Stack>
+                                </ScrollArea.Autosize>
+                            </Stack>
+                        </Popover.Dropdown>
+                    </Popover>
+
+                    {/* Created by filter */}
+                    {availableCreators.length > 0 && (
+                        <Popover width={250} position="bottom-start">
+                            <Popover.Target>
+                                <Tooltip label="Filter by creator">
+                                    <Button
+                                        h={32}
+                                        c="foreground"
+                                        fz="sm"
+                                        variant="default"
+                                        px="sm"
+                                        className={
+                                            selectedCreators.length > 0
+                                                ? classes.filterButtonSelected
+                                                : classes.filterButton
+                                        }
+                                        classNames={{
+                                            label: classes.buttonLabel,
+                                        }}
+                                        rightSection={
+                                            selectedCreators.length > 0 ? (
+                                                <Badge
+                                                    size="xs"
+                                                    variant="filled"
+                                                    color="indigo.6"
+                                                    circle
+                                                    styles={{
+                                                        root: {
+                                                            minWidth: 18,
+                                                            height: 18,
+                                                            padding: '0 4px',
+                                                        },
+                                                    }}
+                                                >
+                                                    {selectedCreators.length}
+                                                </Badge>
+                                            ) : null
+                                        }
+                                    >
+                                        Created by
+                                    </Button>
+                                </Tooltip>
+                            </Popover.Target>
+                            <Popover.Dropdown p="sm">
+                                <Stack gap={4}>
+                                    <Text fz="xs" fw={600}>
+                                        Filter by creator:
+                                    </Text>
+                                    <ScrollArea.Autosize
+                                        mah={200}
+                                        type="always"
+                                        scrollbars="y"
+                                    >
+                                        <Stack gap="xs">
+                                            {availableCreators.map(
+                                                (creator) => (
+                                                    <Checkbox
+                                                        key={creator.uuid}
+                                                        label={creator.name}
+                                                        checked={selectedCreators.includes(
+                                                            creator.uuid,
+                                                        )}
+                                                        size="xs"
+                                                        classNames={{
+                                                            body: classes.checkboxBody,
+                                                            input: classes.checkboxInput,
+                                                            label: classes.checkboxLabel,
+                                                        }}
+                                                        onChange={() => {
+                                                            if (
+                                                                selectedCreators.includes(
+                                                                    creator.uuid,
+                                                                )
+                                                            ) {
+                                                                setSelectedCreators(
+                                                                    selectedCreators.filter(
+                                                                        (c) =>
+                                                                            c !==
+                                                                            creator.uuid,
+                                                                    ),
+                                                                );
+                                                            } else {
+                                                                setSelectedCreators(
+                                                                    [
+                                                                        ...selectedCreators,
+                                                                        creator.uuid,
+                                                                    ],
+                                                                );
+                                                            }
+                                                        }}
+                                                    />
+                                                ),
+                                            )}
+                                        </Stack>
+                                    </ScrollArea.Autosize>
+                                </Stack>
+                            </Popover.Dropdown>
+                        </Popover>
                     )}
                 </Group>
 
-                <Table className={tableStyles.classes.root}>
-                    <thead>
-                        <tr>
-                            <th>
-                                <div
-                                    style={{
-                                        whiteSpace: 'nowrap',
-                                        visibility:
-                                            activeTab === TabsValue.PREVIEW
-                                                ? 'visible'
-                                                : 'hidden',
-                                    }}
-                                >
-                                    <Anchor size="xs" onClick={handleSelectAll}>
-                                        Select all
-                                    </Anchor>
-                                </div>
-                            </th>
-                            <th>Name</th>
-                            <th></th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {filteredProjects.map((project) => (
-                            <ProjectListItem
-                                key={project.projectUuid}
-                                project={project}
-                                isCurrentProject={
-                                    lastProject?.projectUuid ===
-                                    project.projectUuid
-                                }
-                                isBulkActionActive={selectedProjects.length > 0}
-                                isSelected={selectedProjects.includes(
-                                    project.projectUuid,
-                                )}
-                                onSelect={(isSelected) =>
-                                    handleSelect(
-                                        project.projectUuid,
-                                        isSelected,
-                                    )
-                                }
-                                onDelete={() =>
-                                    setDeletingProjectUuid(project.projectUuid)
-                                }
-                            />
-                        ))}
-                    </tbody>
-                </Table>
-            </SettingsCard>
+                <Group gap="sm" wrap="nowrap" flex="0 0 auto">
+                    {hasActiveFilters && (
+                        <Tooltip label="Clear all filters">
+                            <ActionIcon size="sm" onClick={resetAllFilters}>
+                                <MantineIcon icon={IconTrash} />
+                            </ActionIcon>
+                        </Tooltip>
+                    )}
+                    {visibleSelectedProjects.length > 0 && (
+                        <>
+                            <Text size="sm" c="dimmed">
+                                {visibleSelectedProjects.length} selected
+                            </Text>
+                            <Button
+                                size="xs"
+                                color="red"
+                                variant="light"
+                                leftSection={<MantineIcon icon={IconTrash} />}
+                                onClick={handleDeleteInBulk}
+                            >
+                                Delete
+                            </Button>
+                        </>
+                    )}
+                </Group>
+            </Group>
+        ),
+    });
+
+    if (!isLoadingProjects && !isLoadingLastProject && projects.length === 0) {
+        return <Navigate to="/createProject" />;
+    }
+
+    return (
+        <SettingsPage
+            title="All projects"
+            description="Manage projects, connections, access, and project lifecycle."
+            actions={
+                user.data?.ability.can(
+                    'create',
+                    subject('Project', {
+                        organizationUuid: user.data?.organizationUuid,
+                    }),
+                ) && (
+                    <Button size="xs" component={Link} to="/createProject">
+                        Create project
+                    </Button>
+                )
+            }
+        >
+            <ContentTable table={table} />
 
             {deletingProjectUuid ? (
                 <ProjectDeleteModal
@@ -372,12 +1030,45 @@ const ProjectManagementPanel: FC = () => {
             {deletingProjectInBulk && (
                 <ProjectDeleteInBulkModal
                     currentProjectUuid={lastProjectUuid ?? null}
-                    opened={selectedProjects.length > 0}
+                    opened={visibleSelectedProjects.length > 0}
                     onClose={handleCloseDeleteInBulk}
-                    projects={allSelectedProjects}
+                    projects={visibleSelectedProjects}
                 />
             )}
-        </Stack>
+
+            <MantineModal
+                opened={cliProject !== undefined}
+                onClose={() => setCliProject(undefined)}
+                title={`CLI reference: ${cliProject?.name ?? ''}`}
+                icon={IconTerminal2}
+                size="xl"
+            >
+                {cliProject && (
+                    <Stack gap="md">
+                        <CopyableCommand
+                            label="Set as active project"
+                            command={`lightdash config set-project --uuid ${cliProject.projectUuid}`}
+                        />
+                        <CopyableCommand
+                            label="Deploy to this project"
+                            command={`lightdash deploy --project ${cliProject.projectUuid}`}
+                        />
+                        <CopyableCommand
+                            label="Start a preview from this project"
+                            command={`LIGHTDASH_PROJECT=${cliProject.projectUuid} lightdash start-preview --name <name>`}
+                        />
+                        <CopyableCommand
+                            label="Validate this project"
+                            command={`lightdash validate --project ${cliProject.projectUuid}`}
+                        />
+                        <CopyableCommand
+                            label="Project UUID"
+                            command={cliProject.projectUuid}
+                        />
+                    </Stack>
+                )}
+            </MantineModal>
+        </SettingsPage>
     );
 };
 

@@ -5,6 +5,7 @@ import {
     OnboardingStatus,
 } from '@lightdash/common';
 import express, { type Router } from 'express';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -13,9 +14,31 @@ import {
 
 export const organizationRouter: Router = express.Router();
 
+organizationRouter.get(
+    '/access',
+    allowApiKeyAuthentication,
+    isAuthenticated,
+    requireOAuthScopeOperation('organizationRouter.getOrganizationAccess'),
+    async (req, res, next) => {
+        try {
+            const results = await req.services
+                .getOrganizationAccessService()
+                .getOrganizationAccess(req.account);
+
+            res.json({
+                status: 'ok',
+                results,
+            });
+        } catch (e) {
+            next(e);
+        }
+    },
+);
+
 organizationRouter.post(
     '/projects/precompiled',
     allowApiKeyAuthentication,
+    requireOAuthScopeOperation('organizationRouter POST /projects/precompiled'),
     isAuthenticated,
     unauthorisedInDemo,
     async (req, res, next) =>
@@ -33,6 +56,27 @@ organizationRouter.post(
                 });
             })
             .catch(next),
+);
+
+organizationRouter.get(
+    '/jobs/create-project/active',
+    allowApiKeyAuthentication,
+    isAuthenticated,
+    requireOAuthScopeOperation('organizationRouter.getActiveCreateProjectJob'),
+    async (req, res, next) => {
+        try {
+            const results = await req.services
+                .getProjectService()
+                .getActiveCreateProjectJob(req.user!);
+
+            res.json({
+                status: 'ok',
+                results,
+            });
+        } catch (e) {
+            next(e);
+        }
+    },
 );
 
 organizationRouter.delete(
@@ -55,7 +99,9 @@ organizationRouter.delete(
 
 organizationRouter.get(
     '/onboardingStatus',
+    allowApiKeyAuthentication,
     isAuthenticated,
+    requireOAuthScopeOperation('organizationRouter.getOnboarding'),
     async (req, res, next) => {
         try {
             const onboarding = await req.services
@@ -76,7 +122,9 @@ organizationRouter.get(
 
 organizationRouter.post(
     '/onboardingStatus/shownSuccess',
+    allowApiKeyAuthentication,
     isAuthenticated,
+    requireOAuthScopeOperation('organizationRouter.setOnboardingSuccessDate'),
     async (req, res, next) => {
         try {
             await req.services

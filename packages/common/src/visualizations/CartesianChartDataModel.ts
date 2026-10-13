@@ -20,7 +20,9 @@ import {
     applyCustomFormat,
     formatDateWithPattern,
     formatNumberValue,
+    getCustomFormatFromLegacy,
 } from '../utils/formatting';
+import { assignSeriesZByOrder } from './helpers/seriesZOrder';
 import {
     getAxisLabelStyle,
     getAxisLineStyle,
@@ -54,6 +56,7 @@ import {
     type AxisSide,
     type PivotChartData,
     type PivotChartLayout,
+    type PivotValuesColumn,
     type SqlRunnerEChartsSeries,
     type VizCartesianChartConfig,
     type VizCartesianChartOptions,
@@ -118,6 +121,10 @@ export class CartesianChartDataModel {
                     type: CustomFormatType.PERCENT,
                 });
         }
+        if (format === Format.SI) {
+            return (value: number) =>
+                applyCustomFormat(value, getCustomFormatFromLegacy({ format }));
+        }
         return undefined;
     }
 
@@ -151,6 +158,17 @@ export class CartesianChartDataModel {
                 return applyCustomFormat(value, {
                     type: CustomFormatType.PERCENT,
                 });
+            };
+        }
+        if (format === Format.SI) {
+            return (params: AnyType) => {
+                const value =
+                    params.value[params.dimensionNames[params.encode.y[0]]];
+
+                return applyCustomFormat(
+                    value,
+                    getCustomFormatFromLegacy({ format }),
+                );
             };
         }
         return undefined;
@@ -397,6 +415,21 @@ export class CartesianChartDataModel {
         };
     }
 
+    static getOrderedSeries(
+        series: PivotValuesColumn[],
+        seriesOrder: string[] | undefined,
+    ): PivotValuesColumn[] {
+        if (!seriesOrder?.length) return series;
+        const positions = new Map(
+            seriesOrder.map((reference, index) => [reference, index]),
+        );
+        return [...series].sort(
+            (a, b) =>
+                (positions.get(a.pivotColumnName) ?? seriesOrder.length) -
+                (positions.get(b.pivotColumnName) ?? seriesOrder.length),
+        );
+    }
+
     static getDefaultColor(index: number, orgColors?: string[]) {
         const colorPalette = orgColors || ECHARTS_DEFAULT_COLORS;
         // This code assigns a color to a series in the chart
@@ -630,8 +663,17 @@ export class CartesianChartDataModel {
               )
             : undefined;
 
+        const originalSeriesIndices = new Map(
+            transformedData.valuesColumns.map((column, index) => [
+                column,
+                index,
+            ]),
+        );
         let series: SqlRunnerEChartsSeries[] =
-            transformedData.valuesColumns.map((seriesColumn, index) => {
+            CartesianChartDataModel.getOrderedSeries(
+                transformedData.valuesColumns,
+                display?.seriesOrder,
+            ).map((seriesColumn) => {
                 const seriesColumnId = seriesColumn.pivotColumnName;
 
                 // NOTE: seriesColumnId is the post pivoted column name and we now store the display based on that.
@@ -645,6 +687,12 @@ export class CartesianChartDataModel {
                 const seriesValueLabelPosition =
                     seriesDisplay?.valueLabelPosition;
                 const seriesType = seriesDisplay?.type ?? defaultSeriesType;
+                const resolvedSeriesColor =
+                    seriesColor ||
+                    CartesianChartDataModel.getDefaultColor(
+                        originalSeriesIndices.get(seriesColumn) ?? 0,
+                        orgColors,
+                    );
 
                 // Any value other than 1 is considered the left axis.
                 const whichYAxis = seriesDisplay?.whichYAxis === 1 ? 1 : 0;
@@ -676,6 +724,8 @@ export class CartesianChartDataModel {
                               | 'bottom'
                               | 'inside',
                           seriesType as CartesianSeriesType,
+                          resolvedSeriesColor,
+                          seriesDisplay?.valueLabelColor,
                       )
                     : {};
 
@@ -750,12 +800,7 @@ export class CartesianChartDataModel {
                     labelLayout: {
                         hideOverlap: true,
                     },
-                    color:
-                        seriesColor ||
-                        CartesianChartDataModel.getDefaultColor(
-                            index,
-                            orgColors,
-                        ),
+                    color: resolvedSeriesColor,
                     ...(seriesType === 'bar' ? getBarStyle() : {}),
                     // Apply border radius for non-stacked bars
                     ...(itemStyle ? { itemStyle } : {}),
@@ -797,6 +842,13 @@ export class CartesianChartDataModel {
             getFirstIndexColumns(transformedData.indexColumn)?.type ||
             DEFAULT_X_AXIS_TYPE;
 
+        // Under "None" on a time-typed X-axis, default to a readable Day
+        // format so the axis label formatter and tooltip header render the
+        // same clean date — fixes PROD-5672/PROD-2659.
+        const effectiveDateFormat: string | undefined =
+            display?.xAxis?.dateFormat ??
+            (xAxisType === VizIndexType.TIME ? 'MMM D, YYYY' : undefined);
+
         // Determine tooltip configuration
         let tooltipConfig = {};
         if (shouldStack100 && xAxisReference && originalValues) {
@@ -832,7 +884,7 @@ export class CartesianChartDataModel {
                     },
                     xAxisReference,
                     undefined,
-                    display?.xAxis?.dateFormat,
+                    effectiveDateFormat,
                 ),
             };
         } else if (xAxisType === VizIndexType.TIME && xAxisReference) {
@@ -849,13 +901,10 @@ export class CartesianChartDataModel {
                         }) => {
                             const rawValue =
                                 params.seriesData[0]?.value[xAxisReference];
-                            if (
-                                display?.xAxis?.dateFormat &&
-                                rawValue != null
-                            ) {
+                            if (effectiveDateFormat && rawValue != null) {
                                 return formatDateWithPattern(
                                     rawValue as string | number,
-                                    display.xAxis.dateFormat,
+                                    effectiveDateFormat,
                                 );
                             }
                             return rawValue;
@@ -880,7 +929,13 @@ export class CartesianChartDataModel {
         // Show legend when there are multiple series
         const showLegend = transformedData.valuesColumns.length > 1;
 
+        // Series-list order controls paint order, same as explore charts
+        series = assignSeriesZByOrder(series);
+
         const spec = {
+            // Snap time-axis ticks in UTC to match the UTC label formatter;
+            // local snapping shifts labels back a day for UTC-positive viewers
+            useUTC: true,
             tooltip: {
                 ...getTooltipStyle(),
                 trigger: 'axis',
@@ -892,7 +947,7 @@ export class CartesianChartDataModel {
                     flipAxes: false,
                     xFieldId: xAxisReference,
                     originalValues,
-                    xAxisDateFormat: display?.xAxis?.dateFormat,
+                    xAxisDateFormat: effectiveDateFormat,
                 }),
                 extraCssText: `overflow-y: auto; max-height:280px; ${
                     getTooltipStyle().extraCssText
@@ -921,13 +976,15 @@ export class CartesianChartDataModel {
                 nameTextStyle: getAxisTitleStyle(),
                 axisLabel: {
                     ...getAxisLabelStyle(),
-                    ...(xAxisType === VizIndexType.TIME &&
-                    display?.xAxis?.dateFormat
+                    // Time axes emit month-boundary ticks on top of regular
+                    // ones; the shared formatter makes those labels collide
+                    hideOverlap: true,
+                    ...(xAxisType === VizIndexType.TIME && effectiveDateFormat
                         ? {
                               formatter: (value: string | number) =>
                                   formatDateWithPattern(
                                       value,
-                                      display.xAxis!.dateFormat!,
+                                      effectiveDateFormat,
                                   ),
                           }
                         : {}),
@@ -1017,6 +1074,8 @@ export class CartesianChartDataModel {
 }
 
 export type CartesianChartDisplay = {
+    // Pivot column names in back-to-front draw order.
+    seriesOrder?: string[];
     xAxis?: {
         label?: string;
         type?: VizIndexType;
@@ -1040,6 +1099,7 @@ export type CartesianChartDisplay = {
             type?: CartesianSeriesType.LINE | CartesianSeriesType.BAR;
             // Value labels maps to 'label' in ECharts
             valueLabelPosition?: ValueLabelPositionOptions;
+            valueLabelColor?: string;
             // whichAxis maps to the yAxis index in Echarts.
             whichYAxis?: AxisSide;
         };

@@ -5,13 +5,17 @@ import {
     type CompiledMetric,
     type Metric,
 } from '../types/field';
-import { isDateFilterRule, type DateFilterSettings } from '../types/filter';
+import {
+    getCurrentPeriodBounds,
+    isDateFilterRule,
+    type DateFilterSettings,
+} from '../types/filter';
 import { type AdditionalMetric } from '../types/metricQuery';
 import type { ParametersValuesMap } from '../types/parameters';
 import {
-    type ReplaceCustomFields,
     type ReplaceableCustomFields,
     type ReplaceableFieldMatchMap,
+    type ReplaceCustomFields,
 } from '../types/savedCharts';
 import { getFormatExpression } from './formatting';
 import { getItemId } from './item';
@@ -218,9 +222,17 @@ export function compareMetricAndCustomMetric({
                                 filter.settings as DateFilterSettings;
                             const customMetricSettings =
                                 customFilter.settings as DateFilterSettings;
+                            const metricBounds =
+                                getCurrentPeriodBounds(metricSettings);
+                            const customMetricBounds =
+                                getCurrentPeriodBounds(customMetricSettings);
                             settingsMatch =
                                 metricSettings.unitOfTime ===
-                                customMetricSettings.unitOfTime;
+                                    customMetricSettings.unitOfTime &&
+                                metricBounds.toDate ===
+                                    customMetricBounds.toDate &&
+                                metricBounds.excludeToday ===
+                                    customMetricBounds.excludeToday;
                         }
                         return (
                             fieldRefMatch &&

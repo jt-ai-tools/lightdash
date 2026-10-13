@@ -1,23 +1,24 @@
 import {
+    assertUnreachable,
+    QueryExecutionContext,
+    QueryHistoryStatus,
+    sleep,
     type ApiError,
     type ApiExecuteAsyncMetricQueryResults,
     type ApiGetAsyncQueryResults,
     type ApiQueryResults,
-    assertUnreachable,
     type DateZoom,
     type ExecuteAsyncUnderlyingDataRequestParams,
     type MetricQuery,
     type ParametersValuesMap,
-    QueryExecutionContext,
-    QueryHistoryStatus,
     type ResultRow,
-    sleep,
     type SortField,
 } from '@lightdash/common';
 import { useQuery } from '@tanstack/react-query';
 import { lightdashApi } from '../api';
 import { convertDateFilters } from '../utils/dateFilter';
 import { useProjectUuid } from './useProjectUuid';
+import { getAsyncQueryError } from './useQueryResults';
 
 type UnderlyingDataResults = ApiQueryResults & {
     queryUuid: string;
@@ -52,6 +53,8 @@ export const getUnderlyingDataResults = async (
     while (
         !currentPage ||
         currentPage.status === QueryHistoryStatus.PENDING ||
+        currentPage.status === QueryHistoryStatus.QUEUED ||
+        currentPage.status === QueryHistoryStatus.EXECUTING ||
         (currentPage.status === QueryHistoryStatus.READY &&
             currentPage.nextPage)
     ) {
@@ -92,19 +95,14 @@ export const getUnderlyingDataResults = async (
                     },
                 };
             case QueryHistoryStatus.ERROR:
-                throw <ApiError>{
-                    status: 'error',
-                    error: {
-                        name: 'Error',
-                        statusCode: 500,
-                        message: currentPage.error ?? 'Query failed',
-                        data: {},
-                    },
-                };
+            case QueryHistoryStatus.EXPIRED:
+                throw getAsyncQueryError(currentPage.error);
             case QueryHistoryStatus.READY:
                 allRows = allRows.concat(currentPage.rows);
                 break;
             case QueryHistoryStatus.PENDING:
+            case QueryHistoryStatus.QUEUED:
+            case QueryHistoryStatus.EXECUTING:
                 await sleep(backoffMs);
                 // Implement backoff: 250ms -> 500ms -> 1000ms (then stay at 1000ms)
                 if (backoffMs < 1000) {
@@ -127,7 +125,8 @@ export const getUnderlyingDataResults = async (
         fields: executeQueryResponse.fields,
         warehouseExecutionTimeMs:
             currentPage.status === QueryHistoryStatus.READY
-                ? currentPage.initialQueryExecutionMs
+                ? (currentPage.metadata.performance.initialQueryExecutionMs ??
+                  undefined)
                 : undefined,
         totalClientFetchTimeMs: totalTime,
     };

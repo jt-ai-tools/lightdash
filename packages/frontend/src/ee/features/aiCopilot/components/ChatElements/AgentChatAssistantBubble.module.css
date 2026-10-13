@@ -6,3 +6,156 @@
         outline: 4px solid var(--mantine-color-ldGray-2);
     }
 }
+
+@keyframes streamPartFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.streamPart {
+    animation: streamPartFadeIn 240ms ease-out;
+    transition:
+        opacity 360ms ease,
+        filter 360ms ease;
+}
+
+.streamingNarration {
+    color: var(--mantine-color-ldGray-7);
+    transition:
+        color 320ms ease,
+        opacity 320ms ease;
+}
+
+.rollingPreview {
+    padding: 2px 0;
+    animation: rollingPreviewSwap 360ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.rollingPreviewText {
+    animation: rollingPreviewPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes rollingPreviewSwap {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes rollingPreviewPulse {
+    0%,
+    100% {
+        opacity: 0.65;
+    }
+    50% {
+        opacity: 1;
+    }
+}
+
+.collapsedText {
+    display: block;
+    width: 100%;
+    padding: 2px 6px;
+    margin: 0 -6px;
+    border-radius: 6px;
+    transition: background-color 160ms ease;
+}
+
+.collapsedText:hover {
+    background-color: light-dark(
+        rgba(15, 23, 42, 0.035),
+        rgba(255, 255, 255, 0.04)
+    );
+}
+
+.collapsedTextLive {
+    opacity: 1;
+    animation: liveTextPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes liveTextPulse {
+    0%,
+    100% {
+        opacity: 0.7;
+    }
+    50% {
+        opacity: 1;
+    }
+}
+
+.collapsedTextChevron {
+    flex-shrink: 0;
+}
+
+.sqlMarkdownCodeBlock {
+    overflow: hidden;
+    border: 1px solid var(--mantine-color-ldGray-2);
+    border-radius: 8px;
+    background-color: var(--mantine-color-ldGray-0);
+}
+
+.sqlMarkdownCodeHeader {
+    min-height: 36px;
+    padding: 6px 8px 6px 12px;
+    border-bottom: 1px solid var(--mantine-color-ldGray-2);
+    background-color: var(--mantine-color-white);
+}
+
+.sqlRunnerLinkButton {
+    --button-bg: var(--mantine-color-body);
+    --button-hover: light-dark(
+        var(--mantine-color-ldGray-0),
+        var(--mantine-color-dark-5)
+    );
+    --button-color: light-dark(
+        var(--mantine-color-ldGray-8),
+        var(--mantine-color-ldGray-1)
+    );
+    --button-bd: 1px solid var(--mantine-color-ldGray-3);
+
+    box-shadow: 0 1px 2px
+        light-dark(rgba(15, 23, 42, 0.04), rgba(0, 0, 0, 0.22));
+    font-weight: 500;
+}
+
+.sqlMarkdownCodeBody {
+    display: block;
+    width: 100%;
+    max-height: 320px;
+    margin: 0;
+    padding: 12px 14px;
+    overflow: auto;
+    border-radius: 0;
+    background-color: transparent;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .streamPart {
+        animation: none;
+        transition: none;
+    }
+    .collapsedTextLive,
+    .rollingPreview,
+    .rollingPreviewText {
+        animation: none;
+    }
+}
+
+/* Persisted (non-streaming) final answer gets a touch of vertical padding so
+ * it doesn't butt against the activity card above it. */
+.persistedAnswer {
+    padding-block: 0.5rem;
+}

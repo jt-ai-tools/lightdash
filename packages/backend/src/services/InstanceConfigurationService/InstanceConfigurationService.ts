@@ -1,12 +1,17 @@
 import {
     AllowedEmailDomains,
+    CreateGroupAttributeValue,
     CreateProject,
+    CreateUserAttribute,
     CreateWarehouseCredentials,
     DbtProjectConfig,
+    DbtVersionOptionLatest,
     isGitProjectType,
+    isSystemRole,
     NotFoundError,
     OrganizationMemberRole,
     ParameterError,
+    ProjectMemberRole,
     ProjectType,
     RequestMethod,
     ServiceAccountScope,
@@ -16,14 +21,20 @@ import {
     WarehouseTypes,
 } from '@lightdash/common';
 import { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
-import { LightdashConfig } from '../../config/parseConfig';
+import {
+    LightdashConfig,
+    MultiProjectSetupEntry,
+} from '../../config/parseConfig';
 import { EmbedModel } from '../../ee/models/EmbedModel';
 import { ServiceAccountModel } from '../../ee/models/ServiceAccountModel';
 import { PersonalAccessTokenModel } from '../../models/DashboardModel/PersonalAccessTokenModel';
 import { EmailModel } from '../../models/EmailModel';
+import { GroupsModel } from '../../models/GroupsModel';
 import { OrganizationAllowedEmailDomainsModel } from '../../models/OrganizationAllowedEmailDomainsModel';
 import { OrganizationModel } from '../../models/OrganizationModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
+import { RolesModel } from '../../models/RolesModel';
+import { UserAttributesModel } from '../../models/UserAttributesModel';
 import { UserModel } from '../../models/UserModel';
 import { EncryptionUtil } from '../../utils/EncryptionUtil/EncryptionUtil';
 import { BaseService } from '../BaseService';
@@ -43,6 +54,9 @@ type InstanceConfigurationServiceArguments = {
     serviceAccountModel?: ServiceAccountModel; // For creating service account on new setup
     embedModel?: EmbedModel; // For updating embed settings on new setup
     encryptionUtil: EncryptionUtil; // For encrypting embed secrets
+    userAttributesModel: UserAttributesModel; // For declaring user attributes as config
+    groupsModel: GroupsModel; // For resolving attribute group mappings by name
+    rolesModel: RolesModel; // For resolving custom roles by name + existing group access
 };
 
 export class InstanceConfigurationService extends BaseService {
@@ -70,6 +84,12 @@ export class InstanceConfigurationService extends BaseService {
 
     private readonly encryptionUtil: EncryptionUtil;
 
+    private readonly userAttributesModel: UserAttributesModel;
+
+    private readonly groupsModel: GroupsModel;
+
+    private readonly rolesModel: RolesModel;
+
     constructor({
         lightdashConfig,
         analytics,
@@ -83,6 +103,9 @@ export class InstanceConfigurationService extends BaseService {
         serviceAccountModel,
         embedModel,
         encryptionUtil,
+        userAttributesModel,
+        groupsModel,
+        rolesModel,
     }: InstanceConfigurationServiceArguments) {
         super();
         this.lightdashConfig = lightdashConfig;
@@ -98,6 +121,9 @@ export class InstanceConfigurationService extends BaseService {
         this.serviceAccountModel = serviceAccountModel;
         this.embedModel = embedModel;
         this.encryptionUtil = encryptionUtil;
+        this.userAttributesModel = userAttributesModel;
+        this.groupsModel = groupsModel;
+        this.rolesModel = rolesModel;
     }
 
     async initializeInstance() {
@@ -163,38 +189,16 @@ export class InstanceConfigurationService extends BaseService {
 
             this.logger.info(`Initial setup: User ${user.userUuid} created`);
 
-            this.logger.debug(
-                `Initial setup: Creating project "${setup.project.name}"`,
-            );
-            const project: CreateProject = {
-                name: setup.project.name,
-                type: ProjectType.DEFAULT,
-                warehouseConnection: setup.project,
-                copyWarehouseConnectionFromUpstreamProject: undefined,
-                dbtConnection: setup.dbt,
-                upstreamProjectUuid: undefined,
-                dbtVersion: setup.project.dbtVersion,
-            };
-
-            const projectUuid = await this.projectModel.create(
-                user.userUuid,
-                organizationUuid,
-                project,
-            );
-            this.logger.info(`Initial setup: Project ${projectUuid} created`);
-
-            this.logger.info(`Initial setup: Compiling project ${projectUuid}`);
-
             const sessionUser =
                 await this.userModel.findSessionUserAndOrgByUuid(
                     user.userUuid,
                     organizationUuid,
                 );
-            await this.projectService.scheduleCompileProject(
-                sessionUser,
-                projectUuid,
-                RequestMethod.BACKEND,
-                true, // Skip permission check
+
+            await this.initializeMultipleProjects(
+                setup.projects,
+                user.userUuid,
+                organizationUuid,
             );
 
             // Optional steps are performed at the end
@@ -268,19 +272,195 @@ export class InstanceConfigurationService extends BaseService {
                     `Initial setup: No API key provided, skipping`,
                 );
             }
-
-            // Setup embed if configured
-            if (this.lightdashConfig.updateSetup?.embed) {
-                await this.updateEmbedSettingsForInstance(
-                    this.lightdashConfig.updateSetup,
-                );
-            }
         } catch (error) {
             this.logger.error(
                 `Initial setup: Error initializing project: ${error}`,
             );
             throw error;
         }
+    }
+
+    /**
+     * Initialize projects from the setup config.
+     * Each project is created with its own warehouse and dbt connections.
+     */
+    private async initializeMultipleProjects(
+        projects: MultiProjectSetupEntry[],
+        userUuid: string,
+        organizationUuid: string,
+    ) {
+        /* eslint-disable no-await-in-loop */
+        for (const entry of projects) {
+            this.logger.debug(
+                `Initial setup: Creating project "${entry.name}"`,
+            );
+
+            const createProject: CreateProject = {
+                name: entry.name,
+                type: ProjectType.DEFAULT,
+                warehouseConnection: entry.warehouseConnection,
+                copyWarehouseConnectionFromUpstreamProject: undefined,
+                dbtConnection: entry.dbtConnection,
+                upstreamProjectUuid: undefined,
+                dbtVersion: entry.dbtVersion ?? DbtVersionOptionLatest.LATEST,
+            };
+
+            const projectUuid = await this.projectModel.create(
+                userUuid,
+                organizationUuid,
+                createProject,
+            );
+            this.logger.info(
+                `Initial setup: Project "${entry.name}" created with UUID ${projectUuid}`,
+            );
+
+            const sessionUser =
+                await this.userModel.findSessionUserAndOrgByUuid(
+                    userUuid,
+                    organizationUuid,
+                );
+            await this.projectService.scheduleCompileProject(
+                sessionUser,
+                projectUuid,
+                RequestMethod.BACKEND,
+                true,
+            );
+
+            // Apply embed config if present for this project
+            if (entry.embed) {
+                const adminEmail =
+                    this.lightdashConfig.updateSetup?.organization?.admin
+                        ?.email;
+                await this.updateEmbedForProject(
+                    projectUuid,
+                    entry.embed,
+                    adminEmail,
+                );
+            }
+        }
+        /* eslint-enable no-await-in-loop */
+    }
+
+    /**
+     * Update or create multiple projects from LD_SETUP_PROJECTS env var.
+     * Projects are matched by name. If a project doesn't exist, it is created.
+     * Throws if multiple projects share the same name.
+     */
+    private async updateMultipleProjectsConfiguration(
+        projects: MultiProjectSetupEntry[],
+    ) {
+        const adminEmail =
+            this.lightdashConfig.updateSetup?.organization?.admin?.email;
+
+        /* eslint-disable no-await-in-loop */
+        for (const entry of projects) {
+            const projectUuids =
+                await this.projectModel.getDefaultProjectUuidsByName(
+                    entry.name,
+                );
+
+            if (projectUuids.length > 1) {
+                throw new ParameterError(
+                    `Multiple projects found with name "${entry.name}". Project names must be unique when using LD_SETUP_PROJECTS.`,
+                );
+            }
+
+            let projectUuid: string;
+
+            if (projectUuids.length === 0) {
+                // Project doesn't exist yet — create it
+                projectUuid = await this.createProjectFromSetup(entry);
+            } else {
+                [projectUuid] = projectUuids;
+                this.logger.debug(
+                    `Update instance: Updating project "${entry.name}" (${projectUuid})`,
+                );
+
+                const project =
+                    await this.projectModel.getWithSensitiveFields(projectUuid);
+
+                const updatedProject: UpdateProject = {
+                    ...project,
+                    warehouseConnection: entry.warehouseConnection,
+                    dbtConnection: entry.dbtConnection,
+                    dbtVersion: entry.dbtVersion ?? project.dbtVersion,
+                };
+
+                await this.projectModel.update(
+                    projectUuid,
+                    updatedProject,
+                    null,
+                );
+
+                this.logger.info(
+                    `Update instance: Updated project "${entry.name}" (${projectUuid})`,
+                );
+            }
+
+            // Apply embed config if present for this project
+            if (entry.embed) {
+                await this.updateEmbedForProject(
+                    projectUuid,
+                    entry.embed,
+                    adminEmail,
+                );
+            }
+        }
+        /* eslint-enable no-await-in-loop */
+    }
+
+    /**
+     * Create a project from a multi-project setup entry.
+     * Finds the admin user from LD_SETUP_ADMIN_EMAIL and the org to create the project in.
+     */
+    private async createProjectFromSetup(
+        entry: MultiProjectSetupEntry,
+    ): Promise<string> {
+        const adminEmail =
+            this.lightdashConfig.updateSetup?.organization?.admin?.email;
+        if (!adminEmail) {
+            throw new ParameterError(
+                `LD_SETUP_ADMIN_EMAIL is required to create project "${entry.name}" from LD_SETUP_PROJECTS`,
+            );
+        }
+
+        const sessionUser =
+            await this.userModel.findSessionUserByPrimaryEmail(adminEmail);
+        if (!sessionUser) {
+            throw new NotFoundError(
+                `Admin user "${adminEmail}" not found. Cannot create project "${entry.name}".`,
+            );
+        }
+
+        const orgUuid = await this.getSingleOrg();
+
+        const createProject: CreateProject = {
+            name: entry.name,
+            type: ProjectType.DEFAULT,
+            warehouseConnection: entry.warehouseConnection,
+            copyWarehouseConnectionFromUpstreamProject: undefined,
+            dbtConnection: entry.dbtConnection,
+            upstreamProjectUuid: undefined,
+            dbtVersion: entry.dbtVersion ?? DbtVersionOptionLatest.LATEST,
+        };
+
+        const projectUuid = await this.projectModel.create(
+            sessionUser.userUuid,
+            orgUuid,
+            createProject,
+        );
+        this.logger.info(
+            `Update instance: Created project "${entry.name}" (${projectUuid})`,
+        );
+
+        await this.projectService.scheduleCompileProject(
+            sessionUser,
+            projectUuid,
+            RequestMethod.BACKEND,
+            true,
+        );
+
+        return projectUuid;
     }
 
     /**
@@ -299,7 +479,10 @@ export class InstanceConfigurationService extends BaseService {
             const sessionUser =
                 await this.userModel.findSessionUserByPrimaryEmail(adminEmail);
             if (!sessionUser) {
-                throw new NotFoundError(`User ${adminEmail} not found`);
+                this.logger.warn(
+                    `Update instance: User ${adminEmail} not found, skipping API key update`,
+                );
+                return;
             }
             // Revoke other existing PATs for the admin.
             await this.personalAccessTokenModel.deleteAllTokensForUser(
@@ -448,7 +631,7 @@ export class InstanceConfigurationService extends BaseService {
                 dbtConnection: updatedDbtConnection ?? dbtConnection,
             };
 
-            await this.projectModel.update(projectUuid, updatedProject);
+            await this.projectModel.update(projectUuid, updatedProject, null);
 
             this.logger.info(
                 `Update instance: Updated configuration for project ${projectUuid}`,
@@ -459,20 +642,46 @@ export class InstanceConfigurationService extends BaseService {
     }
 
     private async getSingleOrg() {
+        const configOrgUuid =
+            this.lightdashConfig.updateSetup?.organizationUuid;
+
+        if (configOrgUuid) {
+            const orgUuids = await this.organizationModel.getOrgUuids();
+            if (!orgUuids.includes(configOrgUuid)) {
+                throw new ParameterError(
+                    `Organization with UUID "${configOrgUuid}" (from LD_SETUP_ORGANIZATION_UUID) not found`,
+                );
+            }
+            return configOrgUuid;
+        }
+
         const orgUuids = await this.organizationModel.getOrgUuids();
         if (orgUuids.length !== 1) {
             throw new ParameterError(
-                `There must be exactly 1 organization to update instance configuration, remove all the LD_SETUP* env variables or keep only one organization to continue`,
+                `There must be exactly 1 organization to update instance configuration. Set LD_SETUP_ORGANIZATION_UUID to target a specific organization, remove all the LD_SETUP* env variables, or keep only one organization to continue`,
             );
         }
         return orgUuids[0];
     }
 
     private async getSingleProject() {
+        const configProjectUuid = this.lightdashConfig.updateSetup?.projectUuid;
+
+        if (configProjectUuid) {
+            const projectUuids =
+                await this.projectModel.getDefaultProjectUuids();
+            if (!projectUuids.includes(configProjectUuid)) {
+                throw new ParameterError(
+                    `Project with UUID "${configProjectUuid}" (from LD_SETUP_PROJECT_UUID) not found`,
+                );
+            }
+            return configProjectUuid;
+        }
+
         const projectUuids = await this.projectModel.getDefaultProjectUuids();
         if (projectUuids.length !== 1) {
             throw new ParameterError(
-                `There must be exactly 1 project to update instance configuration, remove all the LD_SETUP* env variables or keep only one project to continue`,
+                `There must be exactly 1 project to update instance configuration. Set LD_SETUP_PROJECT_UUID to target a specific project, remove all the LD_SETUP* env variables, or keep only one project to continue`,
             );
         }
         return projectUuids[0];
@@ -519,6 +728,57 @@ export class InstanceConfigurationService extends BaseService {
         );
     }
 
+    private async updateEmbedForProject(
+        projectUuid: string,
+        embedConfig: { secret?: string; allowAllDashboards?: boolean },
+        adminEmail?: string,
+    ) {
+        if (!this.embedModel) return;
+
+        const { secret, allowAllDashboards } = embedConfig;
+        if (allowAllDashboards === undefined && !secret) return;
+
+        if (secret) {
+            let userUuid: string | undefined;
+            if (adminEmail) {
+                const sessionUser =
+                    await this.userModel.findSessionUserByPrimaryEmail(
+                        adminEmail,
+                    );
+                userUuid = sessionUser?.userUuid;
+            }
+
+            if (!userUuid) {
+                throw new ParameterError(
+                    `Setting embed secret requires LD_SETUP_ADMIN_EMAIL`,
+                );
+            }
+
+            const encodedSecret = this.encryptionUtil.encrypt(secret);
+
+            await this.embedModel.save(
+                projectUuid,
+                encodedSecret,
+                userUuid,
+                [],
+                allowAllDashboards ?? false,
+            );
+            this.logger.info(
+                `Embed configured for project ${projectUuid} with allowAllDashboards=${
+                    allowAllDashboards ?? false
+                }`,
+            );
+        } else if (allowAllDashboards) {
+            await this.embedModel.updateDashboards(projectUuid, {
+                dashboardUuids: [],
+                allowAllDashboards,
+            });
+            this.logger.info(
+                `Embed allowAllDashboards enabled for project ${projectUuid}`,
+            );
+        }
+    }
+
     private async updateEmbedSettingsForInstance(
         config: NonNullable<LightdashConfig['updateSetup']>,
     ) {
@@ -529,51 +789,228 @@ export class InstanceConfigurationService extends BaseService {
 
         try {
             const projectUuid = await this.getSingleProject();
-
-            // If config embed secret is provided, we need to call .save to upsert the embed record
-            // This requires a user UUID, we get it from the admin email
-            if (secret) {
-                let userUuid: string | undefined;
-                const adminEmail = config.organization?.admin?.email;
-                if (adminEmail) {
-                    const sessionUser =
-                        await this.userModel.findSessionUserByPrimaryEmail(
-                            adminEmail,
-                        );
-                    userUuid = sessionUser?.userUuid;
-                }
-
-                if (!userUuid) {
-                    throw new ParameterError(
-                        `Setting embed secret LD_SETUP_EMBED_SECRET requires an admin email LD_SETUP_ADMIN_EMAIL`,
-                    );
-                }
-
-                const encodedSecret = this.encryptionUtil.encrypt(secret);
-
-                await this.embedModel.save(
-                    projectUuid,
-                    encodedSecret,
-                    userUuid,
-                    [],
-                    allowAllDashboards ?? false,
-                );
-                this.logger.info(
-                    `Embed created for project ${projectUuid} with allowAllDashboards=${
-                        allowAllDashboards ?? false
-                    }`,
-                );
-            } else if (allowAllDashboards) {
-                this.logger.info(
-                    'No embed secret provided, enabling allowAllDashboards if configured',
-                );
-                await this.embedModel.updateDashboards(projectUuid, {
-                    dashboardUuids: [],
-                    allowAllDashboards,
-                });
-            }
+            const adminEmail = config.organization?.admin?.email;
+            await this.updateEmbedForProject(
+                projectUuid,
+                { secret, allowAllDashboards },
+                adminEmail,
+            );
         } catch (error) {
             this.logger.error(`Error updating embed settings: ${error}`);
+        }
+    }
+
+    /**
+     * Reconcile user attributes declared via LD_SETUP_USER_ATTRIBUTES. Upserts
+     * each declared attribute by name and resolves its group mappings by group
+     * name. Groups that don't exist yet (e.g. not yet synced from SCIM) are
+     * skipped with a warning and reconciled on a later deploy — never fatal.
+     * Attributes not listed in config are left untouched (non-destructive).
+     */
+    private async updateUserAttributesConfiguration(
+        config: NonNullable<LightdashConfig['updateSetup']>,
+    ) {
+        if (!config.userAttributes || config.userAttributes.length === 0) {
+            this.logger.debug(
+                `Update instance: No user attributes config found, skipping`,
+            );
+            return;
+        }
+
+        const organizationUuid = await this.getSingleOrg();
+        const existingAttributes = await this.userAttributesModel.find({
+            organizationUuid,
+        });
+
+        /* eslint-disable no-await-in-loop */
+        for (const entry of config.userAttributes) {
+            const groups: CreateGroupAttributeValue[] = [];
+            for (const mapping of entry.groups) {
+                const { data } = await this.groupsModel.find({
+                    organizationUuid,
+                    name: mapping.group,
+                });
+                const group = data.find((g) => g.name === mapping.group);
+                if (group) {
+                    groups.push({
+                        groupUuid: group.uuid,
+                        values: mapping.values,
+                    });
+                } else {
+                    this.logger.warn(
+                        `Update instance: group "${mapping.group}" for user attribute "${entry.name}" not found (not yet synced?); skipping this mapping`,
+                    );
+                }
+            }
+
+            const payload: CreateUserAttribute = {
+                name: entry.name,
+                description: entry.description,
+                attributeDefault: entry.attributeDefault,
+                users: [],
+                groups,
+            };
+
+            const existing = existingAttributes.find(
+                (a) => a.name === entry.name,
+            );
+            if (existing) {
+                await this.userAttributesModel.update(
+                    organizationUuid,
+                    existing.uuid,
+                    payload,
+                );
+                this.logger.info(
+                    `Update instance: Updated user attribute "${entry.name}"`,
+                );
+            } else {
+                await this.userAttributesModel.create(
+                    organizationUuid,
+                    payload,
+                );
+                this.logger.info(
+                    `Update instance: Created user attribute "${entry.name}"`,
+                );
+            }
+        }
+        /* eslint-enable no-await-in-loop */
+    }
+
+    /**
+     * Reconcile group → project role assignments declared via
+     * LD_SETUP_GROUP_PROJECT_ACCESS. For each entry resolves the project (by
+     * uuid or name), the group (by name) and the role (system role string, or a
+     * custom role resolved by name to its uuid), then upserts the group's
+     * project access. Anything that can't be resolved yet (e.g. SCIM groups or
+     * custom roles not yet synced) is skipped with a warning and reconciled on a
+     * later deploy — never fatal. Accesses not listed are left untouched
+     * (non-destructive).
+     */
+    private async updateGroupProjectAccessConfiguration(
+        config: NonNullable<LightdashConfig['updateSetup']>,
+    ) {
+        if (
+            !config.groupProjectAccess ||
+            config.groupProjectAccess.length === 0
+        ) {
+            this.logger.debug(
+                `Update instance: No group project access config found, skipping`,
+            );
+            return;
+        }
+
+        const organizationUuid = await this.getSingleOrg();
+        const customRoles = await this.rolesModel.getRolesByOrganizationUuid(
+            organizationUuid,
+            'user',
+        );
+
+        /* eslint-disable no-await-in-loop */
+        for (const entry of config.groupProjectAccess) {
+            await this.reconcileGroupProjectAccessEntry(
+                entry,
+                organizationUuid,
+                customRoles,
+            );
+        }
+        /* eslint-enable no-await-in-loop */
+    }
+
+    /**
+     * Reconcile a single LD_SETUP_GROUP_PROJECT_ACCESS entry. Resolves project,
+     * group and role; any that can't be resolved are warned-and-skipped (never
+     * fatal). Adds access when absent, updates it when the role differs, and is
+     * a no-op when it already matches.
+     */
+    private async reconcileGroupProjectAccessEntry(
+        entry: NonNullable<
+            NonNullable<LightdashConfig['updateSetup']>['groupProjectAccess']
+        >[number],
+        organizationUuid: string,
+        customRoles: Awaited<
+            ReturnType<RolesModel['getRolesByOrganizationUuid']>
+        >,
+    ) {
+        // Resolve the project — projectUuid wins over projectName.
+        let projectUuid: string | undefined;
+        if (entry.projectUuid) {
+            try {
+                await this.projectModel.getSummary(entry.projectUuid);
+                projectUuid = entry.projectUuid;
+            } catch {
+                projectUuid = undefined;
+            }
+        } else if (entry.projectName) {
+            const [firstUuid] =
+                await this.projectModel.getDefaultProjectUuidsByName(
+                    entry.projectName,
+                );
+            projectUuid = firstUuid;
+        }
+        if (!projectUuid) {
+            this.logger.warn(
+                `Update instance: project "${
+                    entry.projectUuid ?? entry.projectName
+                }" for group "${entry.groupName}" not found; skipping`,
+            );
+            return;
+        }
+
+        // Resolve the group by name.
+        const { data: groups } = await this.groupsModel.find({
+            organizationUuid,
+            name: entry.groupName,
+        });
+        const group = groups.find((g) => g.name === entry.groupName);
+        if (!group) {
+            this.logger.warn(
+                `Update instance: group "${entry.groupName}" not found (not yet synced?); skipping`,
+            );
+            return;
+        }
+
+        // Resolve the role: system role as-is, else custom role by name.
+        let resolvedRole: string;
+        if (isSystemRole(entry.role)) {
+            resolvedRole = entry.role;
+        } else {
+            const customRole = customRoles.find((r) => r.name === entry.role);
+            if (!customRole) {
+                this.logger.warn(
+                    `Update instance: role "${entry.role}" for group "${entry.groupName}" not found as a system or custom role; skipping`,
+                );
+                return;
+            }
+            resolvedRole = customRole.roleUuid;
+        }
+
+        // Upsert (non-destructive): add if absent, update if role differs.
+        const existingAccess =
+            await this.rolesModel.getGroupProjectAccess(projectUuid);
+        const existing = existingAccess.find((a) => a.groupUuid === group.uuid);
+
+        if (!existing) {
+            await this.groupsModel.addProjectAccess({
+                groupUuid: group.uuid,
+                projectUuid,
+                role: resolvedRole,
+            });
+            this.logger.info(
+                `Update instance: Added "${entry.role}" access for group "${entry.groupName}" on project ${projectUuid}`,
+            );
+        } else if (existing.roleUuid !== resolvedRole) {
+            await this.groupsModel.updateProjectAccess(
+                { groupUuid: group.uuid, projectUuid },
+                isSystemRole(resolvedRole)
+                    ? { role: resolvedRole, role_uuid: null }
+                    : {
+                          role: ProjectMemberRole.VIEWER,
+                          role_uuid: resolvedRole,
+                      },
+            );
+            this.logger.info(
+                `Update instance: Updated group "${entry.groupName}" access on project ${projectUuid} to "${entry.role}"`,
+            );
         }
     }
 
@@ -590,10 +1027,19 @@ export class InstanceConfigurationService extends BaseService {
 
         await this.updateServiceAccountForAdmin(config);
 
-        await this.updateProjectConfiguration(config);
+        if (config.projects) {
+            // LD_SETUP_PROJECTS: sync project configs by name (embed handled per-project)
+            await this.updateMultipleProjectsConfiguration(config.projects);
+        } else {
+            // Legacy single-project env vars (LD_SETUP_PROJECT_*)
+            await this.updateProjectConfiguration(config);
+            await this.updateEmbedSettingsForInstance(config);
+        }
 
         await this.updateOrganizationDefaultRole(config);
 
-        await this.updateEmbedSettingsForInstance(config);
+        await this.updateUserAttributesConfiguration(config);
+
+        await this.updateGroupProjectAccessConfiguration(config);
     }
 }

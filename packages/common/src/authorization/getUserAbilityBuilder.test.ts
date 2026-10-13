@@ -1,0 +1,968 @@
+import { Ability, AbilityBuilder, subject } from '@casl/ability';
+import { OrganizationMemberRole } from '../types/organizationMemberProfile';
+import { ProjectMemberRole } from '../types/projectMemberRole';
+import { ProjectType } from '../types/projects';
+import { collapseAbilityRules } from './collapseAbilityRules';
+import { getUserAbilityBuilder } from './index';
+import applyOrganizationMemberAbilities from './organizationMemberAbility';
+import { type MemberAbility } from './types';
+
+const ORG_UUID = 'test-org-uuid';
+const USER_UUID = 'test-user-uuid';
+const CUSTOM_ROLE_UUID = '11111111-1111-4111-a111-111111111111';
+
+const PERMISSIONS_CONFIG = {
+    pat: { enabled: false, allowedOrgRoles: [] },
+};
+
+const buildExpected = (role: OrganizationMemberRole) => {
+    const builder = new AbilityBuilder<MemberAbility>(Ability);
+    applyOrganizationMemberAbilities({
+        role,
+        member: { organizationUuid: ORG_UUID, userUuid: USER_UUID },
+        builder,
+        permissionsConfig: PERMISSIONS_CONFIG,
+    });
+    // getUserAbilityBuilder collapses rules before returning, so the reference
+    // set must be collapsed the same way for an apples-to-apples comparison.
+    builder.rules = collapseAbilityRules(builder.rules);
+    return builder.build().rules;
+};
+
+const ruleSetEqual = (a: unknown[], b: unknown[]) => {
+    expect(a.length).toBe(b.length);
+    expect(JSON.stringify(a.slice().sort())).toBe(
+        JSON.stringify(b.slice().sort()),
+    );
+};
+
+describe('getUserAbilityBuilder — org-level role resolution', () => {
+    describe('Backwards compatibility with system roles', () => {
+        it.each([
+            OrganizationMemberRole.MEMBER,
+            OrganizationMemberRole.VIEWER,
+            OrganizationMemberRole.INTERACTIVE_VIEWER,
+            OrganizationMemberRole.EDITOR,
+            OrganizationMemberRole.DEVELOPER,
+            OrganizationMemberRole.ADMIN,
+        ])(
+            '%s user without roleUuid uses the system role path (unchanged)',
+            (role) => {
+                const { builder } = getUserAbilityBuilder({
+                    user: {
+                        role,
+                        organizationUuid: ORG_UUID,
+                        userUuid: USER_UUID,
+                        roleUuid: undefined,
+                    },
+                    projectProfiles: [],
+                    permissionsConfig: PERMISSIONS_CONFIG,
+                });
+                ruleSetEqual(builder.build().rules, buildExpected(role));
+            },
+        );
+    });
+
+    describe('Custom-roles feature flag', () => {
+        it('falls through to the system role path when customRolesEnabled=false (even if roleUuid is set)', () => {
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.ADMIN,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: CUSTOM_ROLE_UUID,
+                },
+                projectProfiles: [],
+                permissionsConfig: PERMISSIONS_CONFIG,
+                customRoleScopes: { [CUSTOM_ROLE_UUID]: ['view:Dashboard'] },
+                customRolesEnabled: false, // gate off
+            });
+            ruleSetEqual(
+                builder.build().rules,
+                buildExpected(OrganizationMemberRole.ADMIN),
+            );
+        });
+
+        it('falls through to the system role path when customRolesEnabled=true but the role has no scopes loaded', () => {
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.ADMIN,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: CUSTOM_ROLE_UUID,
+                },
+                projectProfiles: [],
+                permissionsConfig: PERMISSIONS_CONFIG,
+                customRoleScopes: {}, // no scopes for this role
+                customRolesEnabled: true,
+            });
+            ruleSetEqual(
+                builder.build().rules,
+                buildExpected(OrganizationMemberRole.ADMIN),
+            );
+        });
+    });
+
+    describe('Org-level custom role active', () => {
+        it('uses the scope-derived path when roleUuid + customRolesEnabled + scopes are all present', () => {
+            // A custom role granting only view:Dashboard. Admin's normal
+            // abilities should NOT appear (e.g. manage:InviteLink).
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.ADMIN, // ignored — custom role wins
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: CUSTOM_ROLE_UUID,
+                },
+                projectProfiles: [],
+                permissionsConfig: PERMISSIONS_CONFIG,
+                customRoleScopes: { [CUSTOM_ROLE_UUID]: ['view:Dashboard'] },
+                customRolesEnabled: true,
+            });
+            const ability = builder.build();
+            // Custom role grants what the scope says
+            expect(
+                ability.rules.find((r) => r.subject === 'Dashboard'),
+            ).toBeDefined();
+            // Admin abilities are NOT present
+            expect(
+                ability.rules.find((r) => r.subject === 'InviteLink'),
+            ).toBeUndefined();
+            expect(
+                ability.rules.find((r) => r.subject === 'Organization'),
+            ).toBeUndefined();
+        });
+
+        it('different custom roles produce different abilities (smoke)', () => {
+            const READ_ONLY_UUID = '22222222-2222-4222-a222-222222222222';
+            const EDIT_UUID = '33333333-3333-4333-a333-333333333333';
+
+            const { builder: readOnlyBuilder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: READ_ONLY_UUID,
+                },
+                projectProfiles: [],
+                permissionsConfig: PERMISSIONS_CONFIG,
+                customRoleScopes: {
+                    [READ_ONLY_UUID]: ['view:Dashboard'],
+                    [EDIT_UUID]: ['view:Dashboard', 'manage:Dashboard'],
+                },
+                customRolesEnabled: true,
+            });
+
+            const { builder: editBuilder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: EDIT_UUID,
+                },
+                projectProfiles: [],
+                permissionsConfig: PERMISSIONS_CONFIG,
+                customRoleScopes: {
+                    [READ_ONLY_UUID]: ['view:Dashboard'],
+                    [EDIT_UUID]: ['view:Dashboard', 'manage:Dashboard'],
+                },
+                customRolesEnabled: true,
+            });
+
+            const readOnlyRules = readOnlyBuilder.build().rules;
+            const editRules = editBuilder.build().rules;
+            // Edit role has manage rules; readOnly does not
+            expect(editRules.some((r) => r.action === 'manage')).toBe(true);
+            expect(readOnlyRules.some((r) => r.action === 'manage')).toBe(
+                false,
+            );
+        });
+    });
+
+    describe('Project profile resolution still works alongside org-level custom roles', () => {
+        it('combines org system role with project-level system role', () => {
+            const PROJECT_UUID = 'test-project-uuid';
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: undefined,
+                },
+                projectProfiles: [
+                    {
+                        projectUuid: PROJECT_UUID,
+                        role: 'admin' as never, // ProjectMemberRole.ADMIN
+                        userUuid: USER_UUID,
+                        roleUuid: undefined,
+                    },
+                ],
+                permissionsConfig: PERMISSIONS_CONFIG,
+            });
+            const { rules } = builder.build();
+            // Org member abilities (minimal) plus project admin abilities
+            expect(rules.length).toBeGreaterThan(0);
+        });
+
+        it('returns collapsed rules for multi-project system role grants', () => {
+            const projectUuids = Array.from(
+                { length: 125 },
+                (_, i) => `project-${i}`,
+            );
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: undefined,
+                },
+                projectProfiles: [
+                    ...projectUuids,
+                    projectUuids[0], // duplicate direct + group style grant
+                ].map((projectUuid) => ({
+                    projectUuid,
+                    role: ProjectMemberRole.ADMIN,
+                    userUuid: USER_UUID,
+                    roleUuid: undefined,
+                })),
+                permissionsConfig: PERMISSIONS_CONFIG,
+            });
+            const ability = builder.build();
+            const mergedDashboardRule = ability.rules.find(
+                (rule) =>
+                    rule.subject === 'Dashboard' &&
+                    rule.action === 'view' &&
+                    Boolean(
+                        (
+                            rule.conditions as
+                                | Record<string, { $in?: string[] }>
+                                | undefined
+                        )?.projectUuid?.$in,
+                    ),
+            );
+
+            if (!mergedDashboardRule) {
+                throw new Error('Expected Dashboard rule to be collapsed');
+            }
+
+            expect(
+                (
+                    mergedDashboardRule.conditions as Record<
+                        string,
+                        { $in: string[] }
+                    >
+                ).projectUuid.$in,
+            ).toEqual([...projectUuids].sort());
+            const singleProject = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: undefined,
+                },
+                projectProfiles: [
+                    {
+                        projectUuid: projectUuids[0],
+                        role: ProjectMemberRole.ADMIN,
+                        userUuid: USER_UUID,
+                        roleUuid: undefined,
+                    },
+                ],
+                permissionsConfig: PERMISSIONS_CONFIG,
+            });
+            expect(ability.rules).toHaveLength(
+                singleProject.builder.rules.length,
+            );
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', { projectUuid: 'project-0' }),
+                ),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', { projectUuid: 'not-granted' }),
+                ),
+            ).toBe(false);
+        });
+
+        it('returns collapsed rules for repeated custom project scopes', () => {
+            const projectUuids = Array.from(
+                { length: 10 },
+                (_, i) => `custom-project-${i}`,
+            );
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: undefined,
+                },
+                projectProfiles: projectUuids.map((projectUuid) => ({
+                    projectUuid,
+                    role: ProjectMemberRole.VIEWER,
+                    userUuid: USER_UUID,
+                    roleUuid: CUSTOM_ROLE_UUID,
+                    projectType: ProjectType.PREVIEW,
+                    projectCreatedByUserUuid: USER_UUID,
+                })),
+                permissionsConfig: PERMISSIONS_CONFIG,
+                customRoleScopes: {
+                    [CUSTOM_ROLE_UUID]: [
+                        'view:Dashboard',
+                        'manage:Dashboard@self',
+                    ],
+                },
+                customRolesEnabled: true,
+                isEnterprise: true,
+            });
+            const ability = builder.build();
+            const mergedViewDashboardRule = ability.rules.find(
+                (rule) =>
+                    rule.subject === 'Dashboard' &&
+                    rule.action === 'view' &&
+                    Boolean(
+                        (
+                            rule.conditions as
+                                | Record<string, { $in?: string[] }>
+                                | undefined
+                        )?.projectUuid?.$in,
+                    ),
+            );
+
+            if (!mergedViewDashboardRule) {
+                throw new Error('Expected custom Dashboard rule to collapse');
+            }
+
+            expect(
+                (
+                    mergedViewDashboardRule.conditions as Record<
+                        string,
+                        { $in: string[] }
+                    >
+                ).projectUuid.$in,
+            ).toEqual(projectUuids);
+            expect(
+                ability.can(
+                    'view',
+                    subject('Dashboard', {
+                        projectUuid: 'custom-project-0',
+                        inheritsFromOrgOrProject: true,
+                    }),
+                ),
+            ).toBe(true);
+            expect(
+                ability.can(
+                    'view',
+                    subject('Dashboard', { projectUuid: 'not-granted' }),
+                ),
+            ).toBe(false);
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        projectUuid: 'custom-project-1',
+                        inheritsFromOrgOrProject: true,
+                        access: [],
+                    }),
+                ),
+            ).toBe(true);
+        });
+    });
+
+    describe('selfPreview scopes via project profiles', () => {
+        it('grants manage:Dashboard@self only in self-created preview projects', () => {
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: undefined,
+                },
+                projectProfiles: [
+                    {
+                        projectUuid: 'prod-project',
+                        role: 'viewer' as never, // ProjectMemberRole.VIEWER
+                        userUuid: USER_UUID,
+                        roleUuid: CUSTOM_ROLE_UUID,
+                        projectType: ProjectType.DEFAULT,
+                        projectCreatedByUserUuid: null,
+                    },
+                    {
+                        projectUuid: 'preview-project',
+                        role: 'viewer' as never, // ProjectMemberRole.VIEWER
+                        userUuid: USER_UUID,
+                        roleUuid: CUSTOM_ROLE_UUID,
+                        projectType: ProjectType.PREVIEW,
+                        projectCreatedByUserUuid: USER_UUID,
+                    },
+                ],
+                permissionsConfig: PERMISSIONS_CONFIG,
+                customRoleScopes: {
+                    [CUSTOM_ROLE_UUID]: ['manage:Dashboard@self'],
+                },
+                customRolesEnabled: true,
+                isEnterprise: true,
+            });
+            const ability = builder.build();
+
+            // Public/shared space in the own preview → editable
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: ORG_UUID,
+                        projectUuid: 'preview-project',
+                        inheritsFromOrgOrProject: true,
+                        access: [],
+                    }),
+                ),
+            ).toBe(true);
+            // Private space the user isn't a member of (copied verbatim from
+            // prod) → invisible + uneditable, even in the own preview
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: ORG_UUID,
+                        projectUuid: 'preview-project',
+                        inheritsFromOrgOrProject: false,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+            // Nothing in production
+            expect(
+                ability.can(
+                    'manage',
+                    subject('Dashboard', {
+                        organizationUuid: ORG_UUID,
+                        projectUuid: 'prod-project',
+                        inheritsFromOrgOrProject: true,
+                        access: [],
+                    }),
+                ),
+            ).toBe(false);
+        });
+    });
+});
+
+describe('getUserAbilityBuilder — role sets (extra custom roles)', () => {
+    const EXTRA_ROLE_UUID = '22222222-2222-4222-a222-222222222222';
+    const PROJECT_UUID = 'project-uuid';
+    const PROJECT_EXTRA_ROLE_UUID = '33333333-3333-4333-a333-333333333333';
+
+    it('unions an extra org custom role on top of a system role', () => {
+        const { builder } = getUserAbilityBuilder({
+            user: {
+                role: OrganizationMemberRole.VIEWER,
+                organizationUuid: ORG_UUID,
+                userUuid: USER_UUID,
+                roleUuid: undefined,
+            },
+            orgExtraRoleUuids: [EXTRA_ROLE_UUID],
+            projectProfiles: [],
+            permissionsConfig: PERMISSIONS_CONFIG,
+            customRoleScopes: { [EXTRA_ROLE_UUID]: ['view:Roadmap'] },
+            customRolesEnabled: true,
+            isEnterprise: true,
+        });
+        const ability = builder.build();
+        // Base viewer abilities are kept…
+        expect(
+            ability.can(
+                'view',
+                subject('Dashboard', {
+                    organizationUuid: ORG_UUID,
+                    inheritsFromOrgOrProject: true,
+                }),
+            ),
+        ).toBe(true);
+        // …and the extra role adds on top (viewer alone cannot view the roadmap)
+        expect(
+            ability.can(
+                'view',
+                subject('Roadmap', { organizationUuid: ORG_UUID }),
+            ),
+        ).toBe(true);
+        expect(
+            buildExpected(OrganizationMemberRole.VIEWER).some(
+                (r) => r.subject === 'Roadmap',
+            ),
+        ).toBe(false);
+    });
+
+    it('unions an extra org custom role on top of a custom-only slot', () => {
+        const { builder } = getUserAbilityBuilder({
+            user: {
+                role: OrganizationMemberRole.MEMBER, // placeholder
+                organizationUuid: ORG_UUID,
+                userUuid: USER_UUID,
+                roleUuid: CUSTOM_ROLE_UUID,
+            },
+            orgExtraRoleUuids: [EXTRA_ROLE_UUID],
+            projectProfiles: [],
+            permissionsConfig: PERMISSIONS_CONFIG,
+            customRoleScopes: {
+                [CUSTOM_ROLE_UUID]: ['view:Dashboard'],
+                [EXTRA_ROLE_UUID]: ['view:Roadmap'],
+            },
+            customRolesEnabled: true,
+            isEnterprise: true,
+        });
+        const ability = builder.build();
+        expect(ability.rules.some((r) => r.subject === 'Dashboard')).toBe(true);
+        expect(ability.rules.some((r) => r.subject === 'Roadmap')).toBe(true);
+        // still no admin/system abilities leaking in
+        expect(ability.rules.some((r) => r.subject === 'InviteLink')).toBe(
+            false,
+        );
+    });
+
+    it('ignores extra roles when custom roles are disabled or scopes are missing', () => {
+        const disabled = getUserAbilityBuilder({
+            user: {
+                role: OrganizationMemberRole.VIEWER,
+                organizationUuid: ORG_UUID,
+                userUuid: USER_UUID,
+                roleUuid: undefined,
+            },
+            orgExtraRoleUuids: [EXTRA_ROLE_UUID],
+            projectProfiles: [],
+            permissionsConfig: PERMISSIONS_CONFIG,
+            customRoleScopes: { [EXTRA_ROLE_UUID]: ['view:Roadmap'] },
+            customRolesEnabled: false,
+        });
+        ruleSetEqual(
+            disabled.builder.build().rules,
+            buildExpected(OrganizationMemberRole.VIEWER),
+        );
+
+        const missing = getUserAbilityBuilder({
+            user: {
+                role: OrganizationMemberRole.VIEWER,
+                organizationUuid: ORG_UUID,
+                userUuid: USER_UUID,
+                roleUuid: undefined,
+            },
+            orgExtraRoleUuids: [EXTRA_ROLE_UUID],
+            projectProfiles: [],
+            permissionsConfig: PERMISSIONS_CONFIG,
+            customRoleScopes: {},
+            customRolesEnabled: true,
+        });
+        ruleSetEqual(
+            missing.builder.build().rules,
+            buildExpected(OrganizationMemberRole.VIEWER),
+        );
+    });
+
+    it('unions extra project custom roles on top of a project system role', () => {
+        const { builder } = getUserAbilityBuilder({
+            user: {
+                role: OrganizationMemberRole.MEMBER,
+                organizationUuid: ORG_UUID,
+                userUuid: USER_UUID,
+                roleUuid: undefined,
+            },
+            projectProfiles: [
+                {
+                    projectUuid: PROJECT_UUID,
+                    role: ProjectMemberRole.VIEWER,
+                    userUuid: USER_UUID,
+                    roleUuid: undefined,
+                    projectType: ProjectType.DEFAULT,
+                    extraRoleUuids: [PROJECT_EXTRA_ROLE_UUID],
+                },
+            ],
+            permissionsConfig: PERMISSIONS_CONFIG,
+            customRoleScopes: {
+                [PROJECT_EXTRA_ROLE_UUID]: ['manage:SqlRunner'],
+            },
+            customRolesEnabled: true,
+        });
+        const ability = builder.build();
+        expect(
+            ability.can(
+                'view',
+                subject('Dashboard', {
+                    projectUuid: PROJECT_UUID,
+                    inheritsFromOrgOrProject: true,
+                }),
+            ),
+        ).toBe(true);
+        expect(
+            ability.can(
+                'manage',
+                subject('SqlRunner', { projectUuid: PROJECT_UUID }),
+            ),
+        ).toBe(true);
+    });
+
+    it('rules stay collapsible (no inverted rules) with extras present', () => {
+        const { builder } = getUserAbilityBuilder({
+            user: {
+                role: OrganizationMemberRole.VIEWER,
+                organizationUuid: ORG_UUID,
+                userUuid: USER_UUID,
+                roleUuid: undefined,
+            },
+            orgExtraRoleUuids: [EXTRA_ROLE_UUID],
+            projectProfiles: [],
+            permissionsConfig: PERMISSIONS_CONFIG,
+            customRoleScopes: { [EXTRA_ROLE_UUID]: ['view:Roadmap'] },
+            customRolesEnabled: true,
+            isEnterprise: true,
+        });
+        expect(builder.rules.some((r) => r.inverted)).toBe(false);
+    });
+});
+
+describe('getUserAbilityBuilder — personal access tokens', () => {
+    const PROJECT_UUID = 'test-project-uuid';
+    const PAT_ROLE_UUID = '33333333-3333-4333-a333-333333333333';
+    const OTHER_ROLE_UUID = '44444444-4444-4444-a444-444444444444';
+    const PAT_SCOPE = 'manage:PersonalAccessToken';
+
+    const patAllowed = {
+        pat: {
+            enabled: true,
+            allowedOrgRoles: Object.values(OrganizationMemberRole),
+        },
+    };
+    const patDisabled = { pat: { enabled: false, allowedOrgRoles: [] } };
+
+    // Mirrors PersonalAccessTokenService, which checks `create` on the subject
+    // carrying the caller's organization.
+    const canCreatePat = (builder: AbilityBuilder<MemberAbility>) =>
+        builder
+            .build()
+            .can(
+                'create',
+                subject('PersonalAccessToken', { organizationUuid: ORG_UUID }),
+            );
+
+    const buildFor = ({
+        roleUuid,
+        scopes,
+        permissionsConfig = patAllowed,
+        projectProfiles = [],
+        patScopeAuthoritative = true,
+    }: {
+        roleUuid?: string;
+        scopes?: string[];
+        permissionsConfig?: typeof patAllowed | typeof patDisabled;
+        projectProfiles?: Parameters<
+            typeof getUserAbilityBuilder
+        >[0]['projectProfiles'];
+        patScopeAuthoritative?: boolean;
+    }) =>
+        getUserAbilityBuilder({
+            user: {
+                role: OrganizationMemberRole.MEMBER,
+                organizationUuid: ORG_UUID,
+                userUuid: USER_UUID,
+                roleUuid,
+            },
+            projectProfiles,
+            permissionsConfig,
+            customRoleScopes: scopes ? { [PAT_ROLE_UUID]: scopes } : undefined,
+            customRolesEnabled: true,
+            isEnterprise: true,
+            patScopeAuthoritative,
+        }).builder;
+
+    describe('an org-level custom role in the primary slot is authoritative', () => {
+        it('denies PAT when the role omits the scope, even though the deployment allows it', () => {
+            const builder = buildFor({
+                roleUuid: PAT_ROLE_UUID,
+                scopes: ['view:Dashboard'],
+            });
+            expect(canCreatePat(builder)).toBe(false);
+        });
+
+        it('grants PAT when the role lists the scope', () => {
+            const builder = buildFor({
+                roleUuid: PAT_ROLE_UUID,
+                scopes: ['view:Dashboard', PAT_SCOPE],
+            });
+            expect(canCreatePat(builder)).toBe(true);
+        });
+
+        it('still denies PAT when the role lists the scope but the deployment disabled PATs', () => {
+            const builder = buildFor({
+                roleUuid: PAT_ROLE_UUID,
+                scopes: [PAT_SCOPE],
+                permissionsConfig: patDisabled,
+            });
+            expect(canCreatePat(builder)).toBe(false);
+        });
+
+        // Regression: the fallback used to run for every scope set, reading
+        // the primary slot's deliberate refusal as an omission to repair.
+        it('stays denied when the user also holds a project custom role', () => {
+            const builder = buildFor({
+                roleUuid: PAT_ROLE_UUID,
+                scopes: ['view:Dashboard'],
+                projectProfiles: [
+                    {
+                        projectUuid: PROJECT_UUID,
+                        role: ProjectMemberRole.VIEWER,
+                        userUuid: USER_UUID,
+                        roleUuid: OTHER_ROLE_UUID,
+                    },
+                ],
+            });
+            expect(canCreatePat(builder)).toBe(false);
+        });
+
+        it('stays denied when the user also holds an extra org custom role', () => {
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: PAT_ROLE_UUID,
+                },
+                orgExtraRoleUuids: [OTHER_ROLE_UUID],
+                projectProfiles: [],
+                permissionsConfig: patAllowed,
+                customRoleScopes: {
+                    [PAT_ROLE_UUID]: ['view:Dashboard'],
+                    [OTHER_ROLE_UUID]: ['view:Dashboard'],
+                },
+                customRolesEnabled: true,
+                isEnterprise: true,
+                patScopeAuthoritative: true,
+            });
+            expect(canCreatePat(builder)).toBe(false);
+        });
+
+        it('stays denied when the user also holds a project system role', () => {
+            const builder = buildFor({
+                roleUuid: PAT_ROLE_UUID,
+                scopes: ['view:Dashboard'],
+                projectProfiles: [
+                    {
+                        projectUuid: PROJECT_UUID,
+                        role: ProjectMemberRole.VIEWER,
+                        userUuid: USER_UUID,
+                        roleUuid: undefined,
+                    },
+                ],
+            });
+            expect(canCreatePat(builder)).toBe(false);
+        });
+
+        it('denies PAT when the role lists the scope but the org role is outside allowedOrgRoles', () => {
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: PAT_ROLE_UUID,
+                },
+                projectProfiles: [],
+                permissionsConfig: {
+                    pat: {
+                        enabled: true,
+                        allowedOrgRoles: [OrganizationMemberRole.ADMIN],
+                    },
+                },
+                customRoleScopes: { [PAT_ROLE_UUID]: [PAT_SCOPE] },
+                customRolesEnabled: true,
+                isEnterprise: true,
+                patScopeAuthoritative: true,
+            });
+            expect(canCreatePat(builder)).toBe(false);
+        });
+    });
+
+    it('keeps inheriting tokens on an unlicensed deployment', () => {
+        // Proves the license guard beats the flag: without a license the
+        // scope is absent from the vocabulary, so no role could list it.
+        const { builder, invalidScopes } = getUserAbilityBuilder({
+            user: {
+                role: OrganizationMemberRole.MEMBER,
+                organizationUuid: ORG_UUID,
+                userUuid: USER_UUID,
+                roleUuid: PAT_ROLE_UUID,
+            },
+            projectProfiles: [],
+            permissionsConfig: patAllowed,
+            customRoleScopes: { [PAT_ROLE_UUID]: [PAT_SCOPE] },
+            customRolesEnabled: true,
+            isEnterprise: false,
+            patScopeAuthoritative: true,
+        });
+        expect(invalidScopes).toContain(PAT_SCOPE);
+        expect(canCreatePat(builder)).toBe(true);
+    });
+
+    describe('system org roles are unchanged', () => {
+        it.each([
+            OrganizationMemberRole.MEMBER,
+            OrganizationMemberRole.VIEWER,
+            OrganizationMemberRole.ADMIN,
+        ])('%s keeps the deployment default', (role) => {
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: undefined,
+                },
+                projectProfiles: [],
+                permissionsConfig: patAllowed,
+                customRolesEnabled: true,
+                isEnterprise: true,
+            });
+            expect(canCreatePat(builder)).toBe(true);
+        });
+
+        it('a project-level custom role cannot take PAT away from a system org role', () => {
+            const builder = buildFor({
+                scopes: ['view:Dashboard'],
+                projectProfiles: [
+                    {
+                        projectUuid: PROJECT_UUID,
+                        role: ProjectMemberRole.VIEWER,
+                        userUuid: USER_UUID,
+                        roleUuid: PAT_ROLE_UUID,
+                    },
+                ],
+            });
+            expect(canCreatePat(builder)).toBe(true);
+        });
+
+        it('an extra org custom role cannot take PAT away from a system org role', () => {
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.VIEWER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: undefined,
+                },
+                orgExtraRoleUuids: [PAT_ROLE_UUID],
+                projectProfiles: [],
+                permissionsConfig: patAllowed,
+                customRoleScopes: { [PAT_ROLE_UUID]: ['view:Dashboard'] },
+                customRolesEnabled: true,
+                isEnterprise: true,
+            });
+            expect(canCreatePat(builder)).toBe(true);
+        });
+    });
+
+    describe('explicitly-listed downstream PAT scopes are suppressed while authoritative', () => {
+        it('an extra org custom role listing the scope does not restore tokens', () => {
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: PAT_ROLE_UUID,
+                },
+                orgExtraRoleUuids: [OTHER_ROLE_UUID],
+                projectProfiles: [],
+                permissionsConfig: patAllowed,
+                customRoleScopes: {
+                    [PAT_ROLE_UUID]: ['view:Dashboard'],
+                    [OTHER_ROLE_UUID]: ['view:Dashboard', PAT_SCOPE],
+                },
+                customRolesEnabled: true,
+                isEnterprise: true,
+                patScopeAuthoritative: true,
+            });
+            expect(canCreatePat(builder)).toBe(false);
+        });
+
+        it('a project custom role listing the scope does not restore tokens', () => {
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: PAT_ROLE_UUID,
+                },
+                projectProfiles: [
+                    {
+                        projectUuid: PROJECT_UUID,
+                        role: ProjectMemberRole.VIEWER,
+                        userUuid: USER_UUID,
+                        roleUuid: OTHER_ROLE_UUID,
+                    },
+                ],
+                permissionsConfig: patAllowed,
+                customRoleScopes: {
+                    [PAT_ROLE_UUID]: ['view:Dashboard'],
+                    [OTHER_ROLE_UUID]: ['view:Dashboard', PAT_SCOPE],
+                },
+                customRolesEnabled: true,
+                isEnterprise: true,
+                patScopeAuthoritative: true,
+            });
+            expect(canCreatePat(builder)).toBe(false);
+        });
+
+        it('the primary org slot keeps its own listed scope', () => {
+            const builder = buildFor({
+                roleUuid: PAT_ROLE_UUID,
+                scopes: ['view:Dashboard', PAT_SCOPE],
+            });
+            expect(canCreatePat(builder)).toBe(true);
+        });
+    });
+
+    describe('without the org opt-in, behavior is unchanged', () => {
+        it('an org custom role omitting the scope still inherits tokens from the deployment config', () => {
+            const builder = buildFor({
+                roleUuid: PAT_ROLE_UUID,
+                scopes: ['view:Dashboard'],
+                patScopeAuthoritative: false,
+            });
+            expect(canCreatePat(builder)).toBe(true);
+        });
+
+        it('still denies when the deployment disables PATs', () => {
+            const builder = buildFor({
+                roleUuid: PAT_ROLE_UUID,
+                scopes: ['view:Dashboard'],
+                permissionsConfig: patDisabled,
+                patScopeAuthoritative: false,
+            });
+            expect(canCreatePat(builder)).toBe(false);
+        });
+
+        it('a downstream role explicitly listing the scope grants it, as today', () => {
+            const { builder } = getUserAbilityBuilder({
+                user: {
+                    role: OrganizationMemberRole.MEMBER,
+                    organizationUuid: ORG_UUID,
+                    userUuid: USER_UUID,
+                    roleUuid: PAT_ROLE_UUID,
+                },
+                orgExtraRoleUuids: [OTHER_ROLE_UUID],
+                projectProfiles: [],
+                permissionsConfig: patAllowed,
+                customRoleScopes: {
+                    [PAT_ROLE_UUID]: ['view:Dashboard'],
+                    [OTHER_ROLE_UUID]: ['view:Dashboard', PAT_SCOPE],
+                },
+                customRolesEnabled: true,
+                isEnterprise: true,
+                patScopeAuthoritative: false,
+            });
+            expect(canCreatePat(builder)).toBe(true);
+        });
+    });
+
+    it('emits no inverted rules (collapse stays sound)', () => {
+        const builder = buildFor({
+            roleUuid: PAT_ROLE_UUID,
+            scopes: ['view:Dashboard'],
+        });
+        expect(builder.rules.some((r) => r.inverted)).toBe(false);
+    });
+});

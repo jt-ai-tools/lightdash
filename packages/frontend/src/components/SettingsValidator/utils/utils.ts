@@ -1,7 +1,8 @@
 import {
-    type ValidationResponse,
     isChartValidationError,
+    isDataAppValidationError,
     isDashboardValidationError,
+    type ValidationResponse,
 } from '@lightdash/common';
 
 export const getLinkToResource = (
@@ -15,7 +16,10 @@ export const getLinkToResource = (
         isDashboardValidationError(validationError) &&
         validationError.dashboardUuid
     )
-        return `/projects/${projectUuid}/dashboards/${validationError.dashboardUuid}/view`;
+        return `/projects/${projectUuid}/dashboards/${validationError.dashboardSlug ?? validationError.dashboardUuid}/view`;
+
+    if (isDataAppValidationError(validationError) && validationError.appUuid)
+        return `/projects/${projectUuid}/apps/${validationError.appUuid}`;
 
     return;
 };

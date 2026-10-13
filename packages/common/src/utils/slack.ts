@@ -41,6 +41,40 @@ export const getSlackErrorCode = (error: unknown): string | undefined => {
 };
 
 /**
+ * Extracts the indices of the blocks Slack rejected from an invalid_blocks
+ * error. Slack reports block-level failures in response_metadata.messages as
+ * strings containing json-pointers, e.g.
+ * "[ERROR] downloading image failed [json-pointer:/blocks/3/image_url]".
+ * [WARN] entries are ignored — Slack mixes non-fatal warnings into the same
+ * list and those blocks were not the cause of the rejection.
+ * Returns an empty array when the error carries no block pointers.
+ */
+export const getSlackInvalidBlockIndices = (error: unknown): number[] => {
+    if (getSlackErrorCode(error) !== 'invalid_blocks') return [];
+    const { data } = error as { data: Record<string, unknown> };
+    const responseMetadata = data.response_metadata;
+    if (
+        !responseMetadata ||
+        typeof responseMetadata !== 'object' ||
+        !('messages' in responseMetadata) ||
+        !Array.isArray(responseMetadata.messages)
+    ) {
+        return [];
+    }
+    const indices = responseMetadata.messages.reduce<Set<number>>(
+        (acc, message) => {
+            if (typeof message !== 'string' || !message.includes('[ERROR]'))
+                return acc;
+            const match = message.match(/json-pointer:\/blocks\/(\d+)/);
+            if (match) acc.add(Number(match[1]));
+            return acc;
+        },
+        new Set(),
+    );
+    return [...indices].sort((a, b) => a - b);
+};
+
+/**
  * Checks if a Slack error is unrecoverable (installation is broken).
  */
 export const isUnrecoverableSlackError = (error: unknown): boolean => {
@@ -54,6 +88,15 @@ export const isUnrecoverableSlackError = (error: unknown): boolean => {
 };
 
 /**
+ * Whether a Slack error is the message being too large to deliver — a delivery
+ * failure, not a generation failure.
+ */
+export const isSlackMessageTooLongError = (error: unknown): boolean => {
+    const errorCode = getSlackErrorCode(error);
+    return errorCode === 'msg_too_long' || errorCode === 'msg_blocks_too_long';
+};
+
+/**
  * Checks if a Slack error is a rate limit error.
  * These errors have a special code from the @slack/web-api package.
  */
@@ -61,3 +104,44 @@ export const isSlackRateLimitedError = (error: unknown): boolean =>
     error instanceof Error &&
     'code' in error &&
     error.code === 'slack_webapi_rate_limited_error';
+
+/**
+ * User-facing translations for common Slack API error codes. Surfaced in
+ * scheduler logs so the delivery recipient gets an actionable explanation
+ * instead of a raw API code. The raw code is also recorded as
+ * `details.slackErrorCode` for debugging.
+ */
+export const SLACK_USER_FACING_ERROR_MESSAGES: Record<string, string> = {
+    invalid_blocks:
+        "Slack rejected this message because it exceeds Slack's size or formatting limits (e.g. dashboard has too many charts, or very long names/descriptions). Please reach out to support if the issue persists.",
+    channel_not_found:
+        'The Slack channel for this delivery no longer exists. Edit this delivery to choose another channel.',
+    not_in_channel:
+        "The Slack app isn't a member of this channel. Invite the app to the channel or choose a different one.",
+    is_archived:
+        'This Slack channel has been archived. Edit this delivery to choose another channel.',
+    account_inactive:
+        'The Slack app has been deactivated for your workspace. Ask your admin to reconnect Slack in organization settings, or contact support.',
+    invalid_auth:
+        'Slack authentication is invalid for your workspace. Ask your admin to reconnect Slack in organization settings, or contact support.',
+    missing_scope:
+        'The Slack app is missing required permissions. Ask your admin to reconnect Slack to grant the new scopes, or contact support.',
+};
+
+/**
+ * Translates a Slack error into an actionable, user-facing message.
+ * Returns null when no translation applies — callers should fall back to their
+ * default error message in that case.
+ */
+export const translateSlackError = (
+    error: unknown,
+): { error: string; slackErrorCode: string } | null => {
+    const slackErrorCode = getSlackErrorCode(error);
+    if (slackErrorCode && slackErrorCode in SLACK_USER_FACING_ERROR_MESSAGES) {
+        return {
+            error: SLACK_USER_FACING_ERROR_MESSAGES[slackErrorCode],
+            slackErrorCode,
+        };
+    }
+    return null;
+};

@@ -8,13 +8,29 @@ import {
 } from './scheduler';
 import { type SchedulerTaskName } from './schedulerTaskList';
 
-export type SchedulerTargetType = 'email' | 'slack' | 'gsheets' | 'msteams';
+export type SchedulerTargetType =
+    | 'email'
+    | 'slack'
+    | 'gsheets'
+    | 'msteams'
+    | 'googlechat';
+
+export enum SchedulerResourceType {
+    CHART = 'chart',
+    DASHBOARD = 'dashboard',
+    SQL_CHART = 'sqlChart',
+    APP = 'app',
+}
 
 // Partial failure types for different scenarios
 export enum PartialFailureType {
     MISSING_TARGETS = 'missing_targets',
     DASHBOARD_CHART = 'dashboard_chart',
     DASHBOARD_SQL_CHART = 'dashboard_sql_chart',
+    AI_AUGMENTATION = 'ai_augmentation',
+    APP_QUERY = 'app_query',
+    APP_QUERY_MISSING = 'app_query_missing',
+    APP_CAPTURE_OVERFLOW = 'app_capture_overflow',
 }
 
 export type DashboardChartPartialFailure = {
@@ -37,11 +53,57 @@ export type MissingTargetsPartialFailure = {
     type: PartialFailureType.MISSING_TARGETS;
 };
 
+// The delivery shipped, but its AI-written message could not be generated so
+// the stored message (if any) was sent instead.
+export type AiAugmentationPartialFailure = {
+    type: PartialFailureType.AI_AUGMENTATION;
+    error: string;
+};
+
+// A captured app query failed during the delivery: at initial render, at
+// download, or (limit: 'all' only) while re-running a capped query unbounded —
+// 'rerun' failures still deliver the original capped file, so the caller must
+// keep the limit-reached notice for that entry.
+export type AppQueryPartialFailure = {
+    type: PartialFailureType.APP_QUERY;
+    stage: 'render' | 'download' | 'rerun';
+    captureKey: string;
+    label: string;
+    error: string;
+};
+
+// A query declared in the delivery manifest wasn't found among the captured queries.
+export type AppQueryMissingPartialFailure = {
+    type: PartialFailureType.APP_QUERY_MISSING;
+    captureKey: string;
+    label: string;
+};
+
+// Distinct captureKeys dropped once the app delivery hit MAX_DELIVERY_QUERIES.
+export type AppCaptureOverflowPartialFailure = {
+    type: PartialFailureType.APP_CAPTURE_OVERFLOW;
+    droppedCount: number;
+};
+
 // Union of all partial failure types
 export type PartialFailure =
     | DashboardChartPartialFailure
     | DashboardSqlChartPartialFailure
-    | MissingTargetsPartialFailure;
+    | MissingTargetsPartialFailure
+    | AiAugmentationPartialFailure
+    | AppQueryPartialFailure
+    | AppQueryMissingPartialFailure
+    | AppCaptureOverflowPartialFailure;
+
+/**
+ * Outcome of evaluating a threshold-alert scheduler against the latest query results.
+ * Emitted on `SchedulerDetails.thresholdStatus` and on the `scheduler_job.completed`
+ * analytics event so downstream consumers (UI toasts, dashboards) can branch reliably.
+ */
+export enum ThresholdStatus {
+    MET = 'met',
+    NOT_MET = 'not_met',
+}
 
 export type SchedulerDetails = {
     projectUuid?: string;
@@ -49,6 +111,8 @@ export type SchedulerDetails = {
     createdByUserUuid?: string;
     /** Partial failures that occurred during the scheduled delivery (e.g., some charts failed in a dashboard export) */
     partialFailures?: PartialFailure[];
+    /** Set when a threshold-alert scheduler completed without sending a notification because the threshold was not met. */
+    thresholdStatus?: ThresholdStatus;
     [key: string]: AnyType;
 };
 
@@ -111,7 +175,7 @@ export type SchedulerRun = {
     details: Record<string, AnyType> | null;
     logCounts: LogCounts;
     // Metadata for filtering/display
-    resourceType: 'chart' | 'dashboard';
+    resourceType: SchedulerResourceType;
     resourceUuid: string;
     resourceName: string;
     createdByUserUuid: string;
@@ -140,7 +204,7 @@ export type SchedulerRunLogsResponse = {
     scheduledTime: Date;
     logs: SchedulerRunLog[];
     // Metadata
-    resourceType: 'chart' | 'dashboard';
+    resourceType: SchedulerResourceType;
     resourceUuid: string;
     resourceName: string;
     createdByUserUuid: string;

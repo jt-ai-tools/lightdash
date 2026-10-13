@@ -2,14 +2,13 @@ import {
     Stack,
     Text,
     Title,
-    type BoxProps,
     type StackProps,
     type TextProps,
     type TitleProps,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { type FC, type ReactNode } from 'react';
 
-type EmptyStateProps = BoxProps & {
+type EmptyStateProps = Omit<StackProps, 'title'> & {
     icon?: ReactNode;
     title?: ReactNode;
     titleProps?: TitleProps;
@@ -38,13 +37,7 @@ export const EmptyState: FC<React.PropsWithChildren<EmptyStateProps>> = ({
         ) : null}
 
         {description ? (
-            <Text
-                span
-                ta="center"
-                c="dimmed"
-                maw={maw}
-                {...descriptionProps}
-            >
+            <Text span ta="center" c="dimmed" maw={maw} {...descriptionProps}>
                 {description}
             </Text>
         ) : null}

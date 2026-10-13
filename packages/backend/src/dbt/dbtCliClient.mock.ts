@@ -10,8 +10,11 @@ export const cliArgs = {
     dbtProjectDirectory: 'dbtProjectDirectory',
     dbtProfilesDirectory: 'dbtProfilesDirectory',
     environment: {},
+    environmentVariableAllowlist: [],
+    explicitCredentials: false,
     profileName: 'profileName',
     target: 'target',
+    partialParseBaselinePath: null,
 };
 
 export const expectedDbtOptions = ['--no-use-colors', '--log-format', 'json'];
@@ -28,7 +31,10 @@ export const expectedCommandOptions = [
 ];
 
 export const cliMocks = {
-    success: { all: 'success message' } as Partial<ExecaReturnValue>,
+    success: {
+        all: 'success message',
+        stdout: '{"info": {"code": "Z049"}, "data": {"msg": "{\\"unique_id\\": \\"model.project.test_model\\"}"}}\n',
+    } as Partial<ExecaReturnValue>,
     error: {
         shortMessage: 'error message',
         all: 'all error messages',
@@ -37,17 +43,10 @@ export const cliMocks = {
 export const cliMockImplementation = {
     success: async () => cliMocks.success,
     error: async () => {
-        // eslint-disable-next-line @typescript-eslint/no-throw-literal
+        // eslint-disable-next-line @typescript-eslint/only-throw-error, @typescript-eslint/no-throw-literal
         throw cliMocks.error;
     },
 };
-
-export const dbtProjectYml = `
-name: 'jaffle_shop'
-version: '0.1'
-profile: 'jaffle_shop'
-config-version: 2
-`;
 
 export const manifestMock: DbtManifest = {
     nodes: {},

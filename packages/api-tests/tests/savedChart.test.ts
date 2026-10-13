@@ -1,0 +1,552 @@
+import {
+    CreateChartInDashboard,
+    CreateChartInSpace,
+    Dashboard,
+    FilterOperator,
+    MergeJoinType,
+    SavedChart,
+    SEED_ORG_1_EDITOR,
+    SEED_PROJECT,
+    SpaceMemberRole,
+    upgradeSavedMergeQuery,
+    type SavedMergeQuery,
+} from '@lightdash/common';
+import { login, loginAsEditor } from '../helpers/auth';
+import { chartMock, dashboardMock } from '../helpers/mocks';
+import { uniqueName } from '../helpers/test-isolation';
+
+const apiUrl = '/api/v1';
+
+describe('Saved chart space selection', () => {
+    const chartName = uniqueName('Chart space selection');
+    const dashboardName = uniqueName('Dashboard for chart space');
+
+    let admin: Awaited<ReturnType<typeof login>>;
+    const createdChartUuids: string[] = [];
+    const createdDashboardUuids: string[] = [];
+    const createdSpaceUuids: string[] = [];
+
+    beforeAll(async () => {
+        admin = await login();
+    });
+
+    afterAll(async () => {
+        // Clean up charts
+        for (const uuid of createdChartUuids) {
+            await admin
+                .delete(`${apiUrl}/saved/${uuid}`, {
+                    failOnStatusCode: false,
+                })
+                .catch(() => {});
+        }
+        // Clean up dashboards
+        for (const uuid of createdDashboardUuids) {
+            await admin
+                .delete(`${apiUrl}/dashboards/${uuid}`, {
+                    failOnStatusCode: false,
+                })
+                .catch(() => {});
+        }
+        // Clean up spaces
+        for (const uuid of createdSpaceUuids) {
+            await admin
+                .delete(
+                    `${apiUrl}/projects/${SEED_PROJECT.project_uuid}/spaces/${uuid}`,
+                    { failOnStatusCode: false },
+                )
+                .catch(() => {});
+        }
+    });
+
+    it('Should create a chart in the specified space', async () => {
+        const projectUuid = SEED_PROJECT.project_uuid;
+        const spaceName = `test-chart-space-${Date.now()}`;
+
+        // Create space
+        const spaceResp = await admin.post<{
+            results: { uuid: string };
+        }>(`${apiUrl}/projects/${projectUuid}/spaces/`, {
+            name: spaceName,
+            inheritParentPermissions: true,
+        });
+        const spaceUuid = spaceResp.body.results.uuid;
+        createdSpaceUuids.push(spaceUuid);
+
+        const body: CreateChartInSpace = {
+            ...chartMock,
+            name: chartName,
+            spaceUuid,
+            dashboardUuid: null,
+        };
+
+        const response = await admin.post<{ results: SavedChart }>(
+            `${apiUrl}/projects/${projectUuid}/saved`,
+            body,
+        );
+        expect(response.status).toBe(200);
+        const chart = response.body.results;
+        createdChartUuids.push(chart.uuid);
+
+        // Fetch the chart to verify persisted state
+        const getResponse = await admin.get<{ results: SavedChart }>(
+            `${apiUrl}/saved/${chart.uuid}`,
+        );
+        expect(getResponse.status).toBe(200);
+        const fetchedChart = getResponse.body.results;
+        expect(fetchedChart.spaceUuid).toBe(spaceUuid);
+        expect(fetchedChart.dashboardUuid).toBeNull();
+    });
+
+    it('Should create a chart in the first accessible space when no spaceUuid is provided', async () => {
+        const projectUuid = SEED_PROJECT.project_uuid;
+
+        const body: CreateChartInSpace = {
+            ...chartMock,
+            name: chartName,
+            spaceUuid: undefined,
+            dashboardUuid: null,
+        };
+
+        const response = await admin.post<{ results: SavedChart }>(
+            `${apiUrl}/projects/${projectUuid}/saved`,
+            body,
+        );
+        expect(response.status).toBe(200);
+        const chart = response.body.results;
+        createdChartUuids.push(chart.uuid);
+
+        // Fetch the chart to verify persisted state
+        const getResponse = await admin.get<{ results: SavedChart }>(
+            `${apiUrl}/saved/${chart.uuid}`,
+        );
+        expect(getResponse.status).toBe(200);
+        const fetchedChart = getResponse.body.results;
+        expect(fetchedChart.spaceUuid).toBeDefined();
+        expect(typeof fetchedChart.spaceUuid).toBe('string');
+        expect(fetchedChart.dashboardUuid).toBeNull();
+
+        // Verify the space exists in the project
+        const spacesResponse = await admin.get<{
+            results: Array<{ uuid: string }>;
+        }>(`${apiUrl}/projects/${projectUuid}/spaces`);
+        const spaceUuids = spacesResponse.body.results.map((s) => s.uuid);
+        expect(spaceUuids).toContain(fetchedChart.spaceUuid);
+    });
+
+    it('Should persist ordered pivot rows when the chart is reloaded', async () => {
+        const projectUuid = SEED_PROJECT.project_uuid;
+        const body: CreateChartInSpace = {
+            ...chartMock,
+            name: uniqueName('Chart with ordered pivot rows'),
+            pivotConfig: {
+                columns: ['orders_status'],
+                rows: ['orders_average_order_size'],
+            },
+            spaceUuid: undefined,
+            dashboardUuid: null,
+        };
+
+        const response = await admin.post<{ results: SavedChart }>(
+            `${apiUrl}/projects/${projectUuid}/saved`,
+            body,
+        );
+        expect(response.status).toBe(200);
+        createdChartUuids.push(response.body.results.uuid);
+
+        const getResponse = await admin.get<{ results: SavedChart }>(
+            `${apiUrl}/saved/${response.body.results.uuid}`,
+        );
+        expect(getResponse.status).toBe(200);
+        expect(getResponse.body.results.pivotConfig).toEqual({
+            columns: ['orders_status'],
+            rows: ['orders_average_order_size'],
+        });
+    });
+
+    it('Should persist and edit a merged chart without losing filters or parameters', async () => {
+        const projectUuid = SEED_PROJECT.project_uuid;
+        const completedOnly = {
+            dimensions: {
+                id: 'completed-orders',
+                and: [
+                    {
+                        id: 'completed-orders-filter',
+                        target: { fieldId: 'orders_status' },
+                        operator: FilterOperator.EQUALS,
+                        values: ['completed'],
+                    },
+                ],
+            },
+        };
+        const additionalMetricQuery = {
+            exploreName: 'payments',
+            dimensions: ['orders_status'],
+            metrics: ['payments_unique_payment_count'],
+            filters: completedOnly,
+            sorts: [],
+            limit: 500,
+            tableCalculations: [],
+            additionalMetrics: [],
+        };
+        const merge: SavedMergeQuery = {
+            primarySourceId: 'a',
+            sources: [
+                { id: 'a', kind: 'chart' },
+                {
+                    id: 'b',
+                    kind: 'query',
+                    metricQuery: additionalMetricQuery,
+                },
+            ],
+            joinKey: [
+                {
+                    name: 'status',
+                    fieldIdBySourceId: {
+                        a: 'orders_status',
+                        b: 'orders_status',
+                    },
+                },
+            ],
+            joinType: MergeJoinType.FULL,
+            tableCalculations: [],
+        };
+        const parameters = { 'customers.customer_name': 'Ken' };
+        const createResponse = await admin.post<{ results: SavedChart }>(
+            `${apiUrl}/projects/${projectUuid}/saved`,
+            {
+                ...chartMock,
+                name: uniqueName('Merged chart persistence'),
+                metricQuery: {
+                    ...chartMock.metricQuery,
+                    filters: completedOnly,
+                },
+                merge,
+                parameters,
+                dashboardUuid: null,
+                spaceUuid: undefined,
+            } satisfies CreateChartInSpace,
+        );
+        expect(createResponse.status).toBe(200);
+        createdChartUuids.push(createResponse.body.results.uuid);
+
+        const getCreated = await admin.get<{ results: SavedChart }>(
+            `${apiUrl}/saved/${createResponse.body.results.uuid}`,
+        );
+        // A request may still send the schema v2 merge; the chart stores and
+        // returns the merge it rewrites to.
+        const chartMetricQuery = {
+            ...chartMock.metricQuery,
+            filters: completedOnly,
+        };
+        expect(getCreated.body.results).not.toHaveProperty('pipeline');
+        expect(getCreated.body.results.merge).toEqual(
+            upgradeSavedMergeQuery(merge, chartMetricQuery),
+        );
+        expect(getCreated.body.results.metricQuery.filters).toEqual(
+            completedOnly,
+        );
+        expect(getCreated.body.results.parameters).toEqual(parameters);
+
+        const editedMerge: SavedMergeQuery = {
+            ...merge,
+            joinType: MergeJoinType.LEFT,
+            sources: [
+                merge.sources[0],
+                {
+                    id: 'b',
+                    kind: 'query',
+                    metricQuery: {
+                        ...additionalMetricQuery,
+                        filters: {},
+                    },
+                },
+            ],
+        };
+        const editedMergeDefinition = upgradeSavedMergeQuery(
+            editedMerge,
+            chartMetricQuery,
+        );
+        const editResponse = await admin.post(
+            `${apiUrl}/saved/${createResponse.body.results.uuid}/version`,
+            {
+                ...chartMock,
+                metricQuery: chartMetricQuery,
+                merge: editedMergeDefinition,
+                parameters,
+            },
+        );
+        expect(editResponse.status).toBe(200);
+
+        const getEdited = await admin.get<{ results: SavedChart }>(
+            `${apiUrl}/saved/${createResponse.body.results.uuid}`,
+        );
+        expect(getEdited.body.results.merge).toEqual(editedMergeDefinition);
+        expect(getEdited.body.results.merge?.join).toBe(MergeJoinType.LEFT);
+        expect(getEdited.body.results.parameters).toEqual(parameters);
+    });
+
+    it('Should create a chart belonging to a dashboard', async () => {
+        const projectUuid = SEED_PROJECT.project_uuid;
+
+        // Create dashboard
+        const dashResp = await admin.post<{ results: Dashboard }>(
+            `${apiUrl}/projects/${projectUuid}/dashboards`,
+            { ...dashboardMock, name: dashboardName },
+        );
+        const dashboard = dashResp.body.results;
+        createdDashboardUuids.push(dashboard.uuid);
+
+        const body: CreateChartInDashboard = {
+            ...chartMock,
+            name: chartName,
+            dashboardUuid: dashboard.uuid,
+            spaceUuid: null,
+        };
+
+        const response = await admin.post<{ results: SavedChart }>(
+            `${apiUrl}/projects/${projectUuid}/saved`,
+            body,
+        );
+        expect(response.status).toBe(200);
+        const chart = response.body.results;
+        createdChartUuids.push(chart.uuid);
+
+        // Fetch the chart to verify persisted state
+        const getResponse = await admin.get<{ results: SavedChart }>(
+            `${apiUrl}/saved/${chart.uuid}`,
+        );
+        expect(getResponse.status).toBe(200);
+        const fetchedChart = getResponse.body.results;
+        expect(fetchedChart.dashboardUuid).toBe(dashboard.uuid);
+        expect(fetchedChart.spaceUuid).toBe(dashboard.spaceUuid);
+    });
+});
+
+describe('Saved chart color palette on create', () => {
+    const projectUuid = SEED_PROJECT.project_uuid;
+
+    let admin: Awaited<ReturnType<typeof login>>;
+    let colorPaletteUuid: string;
+    const createdChartUuids: string[] = [];
+    const createdDashboardUuids: string[] = [];
+
+    beforeAll(async () => {
+        admin = await login();
+
+        const paletteResp = await admin.post<{
+            results: { colorPaletteUuid: string };
+        }>(`${apiUrl}/org/color-palettes`, {
+            name: uniqueName('Palette for chart create'),
+            // The API requires exactly 20 colors
+            colors: Array.from({ length: 20 }, () => '#112233'),
+        });
+        colorPaletteUuid = paletteResp.body.results.colorPaletteUuid;
+    });
+
+    afterAll(async () => {
+        for (const uuid of createdChartUuids) {
+            await admin
+                .delete(`${apiUrl}/saved/${uuid}`, { failOnStatusCode: false })
+                .catch(() => {});
+        }
+        for (const uuid of createdDashboardUuids) {
+            await admin
+                .delete(`${apiUrl}/dashboards/${uuid}`, {
+                    failOnStatusCode: false,
+                })
+                .catch(() => {});
+        }
+        if (colorPaletteUuid) {
+            await admin
+                .delete(`${apiUrl}/org/color-palettes/${colorPaletteUuid}`, {
+                    failOnStatusCode: false,
+                })
+                .catch(() => {});
+        }
+    });
+
+    it('Should persist the chart-level palette when a chart is first saved to a space', async () => {
+        const body: CreateChartInSpace = {
+            ...chartMock,
+            name: uniqueName('Chart with palette in space'),
+            spaceUuid: undefined,
+            dashboardUuid: null,
+            colorPaletteUuid,
+        };
+
+        const response = await admin.post<{ results: SavedChart }>(
+            `${apiUrl}/projects/${projectUuid}/saved`,
+            body,
+        );
+        expect(response.status).toBe(200);
+        createdChartUuids.push(response.body.results.uuid);
+
+        const getResponse = await admin.get<{ results: SavedChart }>(
+            `${apiUrl}/saved/${response.body.results.uuid}`,
+        );
+        expect(getResponse.status).toBe(200);
+        const fetchedChart = getResponse.body.results;
+        expect(fetchedChart.colorPaletteUuid).toBe(colorPaletteUuid);
+        // Resolving from the chart means the cascade did not override it
+        expect(fetchedChart.resolvedColorPalette.source.type).toBe('chart');
+    });
+
+    it('Should persist the chart-level palette when a chart is first saved to a dashboard', async () => {
+        const dashResp = await admin.post<{ results: Dashboard }>(
+            `${apiUrl}/projects/${projectUuid}/dashboards`,
+            { ...dashboardMock, name: uniqueName('Dashboard for palette') },
+        );
+        const dashboard = dashResp.body.results;
+        createdDashboardUuids.push(dashboard.uuid);
+
+        const body: CreateChartInDashboard = {
+            ...chartMock,
+            name: uniqueName('Chart with palette in dashboard'),
+            dashboardUuid: dashboard.uuid,
+            spaceUuid: null,
+            colorPaletteUuid,
+        };
+
+        const response = await admin.post<{ results: SavedChart }>(
+            `${apiUrl}/projects/${projectUuid}/saved`,
+            body,
+        );
+        expect(response.status).toBe(200);
+        createdChartUuids.push(response.body.results.uuid);
+
+        const getResponse = await admin.get<{ results: SavedChart }>(
+            `${apiUrl}/saved/${response.body.results.uuid}`,
+        );
+        expect(getResponse.status).toBe(200);
+        const fetchedChart = getResponse.body.results;
+        expect(fetchedChart.dashboardUuid).toBe(dashboard.uuid);
+        expect(fetchedChart.colorPaletteUuid).toBe(colorPaletteUuid);
+        expect(fetchedChart.resolvedColorPalette.source.type).toBe('chart');
+    });
+
+    it('Should inherit from the cascade when no palette is given on create', async () => {
+        const body: CreateChartInSpace = {
+            ...chartMock,
+            name: uniqueName('Chart without palette'),
+            spaceUuid: undefined,
+            dashboardUuid: null,
+        };
+
+        const response = await admin.post<{ results: SavedChart }>(
+            `${apiUrl}/projects/${projectUuid}/saved`,
+            body,
+        );
+        expect(response.status).toBe(200);
+        createdChartUuids.push(response.body.results.uuid);
+
+        const getResponse = await admin.get<{ results: SavedChart }>(
+            `${apiUrl}/saved/${response.body.results.uuid}`,
+        );
+        expect(getResponse.status).toBe(200);
+        const fetchedChart = getResponse.body.results;
+        expect(fetchedChart.colorPaletteUuid).toBeNull();
+        expect(fetchedChart.resolvedColorPalette.source.type).not.toBe('chart');
+    });
+});
+
+describe('Saved chart cross-space dashboard permissions', () => {
+    const projectUuid = SEED_PROJECT.project_uuid;
+    const testPrefix = `test-cross-space-${Date.now()}`;
+    const editorUserUuid = SEED_ORG_1_EDITOR.user_uuid;
+
+    let admin: Awaited<ReturnType<typeof login>>;
+    let editor: Awaited<ReturnType<typeof loginAsEditor>>;
+    let chartSpaceUuid: string;
+    let dashboardSpaceUuid: string;
+    let dashboardUuid: string;
+
+    beforeAll(async () => {
+        admin = await login();
+        editor = await loginAsEditor();
+
+        // Create Space A (chart space - editor will have VIEW access)
+        const spaceAResp = await admin.post<{
+            results: { uuid: string };
+        }>(`${apiUrl}/projects/${projectUuid}/spaces/`, {
+            name: `${testPrefix}-chart-space`,
+            inheritParentPermissions: false,
+        });
+        chartSpaceUuid = spaceAResp.body.results.uuid;
+
+        // Create Space B (dashboard space - editor will have ADMIN access)
+        const spaceBResp = await admin.post<{
+            results: { uuid: string };
+        }>(`${apiUrl}/projects/${projectUuid}/spaces/`, {
+            name: `${testPrefix}-dashboard-space`,
+            inheritParentPermissions: false,
+        });
+        dashboardSpaceUuid = spaceBResp.body.results.uuid;
+
+        // Create dashboard in Space B
+        const dashResp = await admin.post<{ results: Dashboard }>(
+            `${apiUrl}/projects/${projectUuid}/dashboards`,
+            {
+                ...dashboardMock,
+                name: `${testPrefix}-dashboard`,
+                spaceUuid: dashboardSpaceUuid,
+            },
+        );
+        dashboardUuid = dashResp.body.results.uuid;
+
+        // Give editor VIEW access to chart space
+        await admin.post(
+            `${apiUrl}/projects/${projectUuid}/spaces/${chartSpaceUuid}/share`,
+            {
+                userUuid: editorUserUuid,
+                spaceRole: SpaceMemberRole.VIEWER,
+            },
+        );
+
+        // Give editor ADMIN access to dashboard space
+        await admin.post(
+            `${apiUrl}/projects/${projectUuid}/spaces/${dashboardSpaceUuid}/share`,
+            {
+                userUuid: editorUserUuid,
+                spaceRole: SpaceMemberRole.ADMIN,
+            },
+        );
+    });
+
+    afterAll(async () => {
+        // Clean up spaces (cascades to dashboards and charts)
+        await admin
+            .delete(
+                `${apiUrl}/projects/${projectUuid}/spaces/${chartSpaceUuid}`,
+                { failOnStatusCode: false },
+            )
+            .catch(() => {});
+        await admin
+            .delete(
+                `${apiUrl}/projects/${projectUuid}/spaces/${dashboardSpaceUuid}`,
+                { failOnStatusCode: false },
+            )
+            .catch(() => {});
+    });
+
+    it('Should allow saving a chart to a dashboard when user has admin access to dashboard space but only view access to chart space', async () => {
+        // Send both dashboardUuid and spaceUuid (pointing to a different space)
+        // This mimics the frontend behavior of "explore from here" -> save to dashboard
+        // Permission should be checked against the dashboard's space, not the chart's spaceUuid
+        const body = {
+            ...chartMock,
+            name: `${testPrefix}-chart`,
+            dashboardUuid,
+            spaceUuid: chartSpaceUuid,
+        };
+
+        const response = await editor.post<{ results: SavedChart }>(
+            `${apiUrl}/projects/${projectUuid}/saved`,
+            body,
+        );
+        expect(response.status).toBe(200);
+        const chart = response.body.results;
+
+        expect(chart.dashboardUuid).toBe(dashboardUuid);
+        expect(chart.spaceUuid).toBe(dashboardSpaceUuid);
+    });
+});

@@ -8,16 +8,16 @@ import {
     Stack,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconCheck, IconCopy, IconDownload } from '@tabler/icons-react';
+import { type PieSeriesOption } from 'echarts';
 import React, { useCallback, useState } from 'react';
+import useToaster from '../../../hooks/toaster/useToaster';
+import { copyImageToClipboard } from '../../../utils/copyImageToClipboard';
 import {
     type EChartsInstance,
     type EChartsOption,
 } from '../../EChartsReactWrapper';
-
-import { type PieSeriesOption } from 'echarts';
-import { copyImageToClipboard } from '../../../utils/copyImageToClipboard';
 import MantineIcon from '../MantineIcon';
 import {
     base64SvgToBase64Image,
@@ -28,7 +28,7 @@ import {
 } from './chartDownloadUtils';
 
 type DownloadOptions = {
-    getChartInstance: () => EChartsInstance | undefined;
+    getChartInstance: () => EChartsInstance;
     chartName?: string;
     unavailableOptions?: DownloadType[];
 };
@@ -120,13 +120,14 @@ const ChartDownloadOptions: React.FC<DownloadOptions> = ({
 }) => {
     const [isCopied, setIsCopied] = useState(false);
     const [type, setType] = useState<DownloadType>(DownloadType.PNG);
+    const { showToastError } = useToaster();
     const [isBackgroundTransparent, setIsBackgroundTransparent] =
         useState(false);
 
     const onDownload = useCallback(async () => {
         const chartInstance = getChartInstance();
         if (!chartInstance) {
-            console.error('Chart instance is not available');
+            showToastError({ title: 'Unable to download chart image' });
             return;
         }
         const { needsWorkaround, updatedOptions, originalOptions } =
@@ -148,6 +149,7 @@ const ChartDownloadOptions: React.FC<DownloadOptions> = ({
                         await base64SvgToBase64Image(svgBase64, width),
                         width,
                         height,
+                        chartName,
                     );
                     break;
                 case DownloadType.SVG:
@@ -181,20 +183,26 @@ const ChartDownloadOptions: React.FC<DownloadOptions> = ({
                 }
             }
         } catch (e) {
-            console.error(`Unable to download ${type} from chart ${e}`);
+            console.error(`Unable to download ${type} from chart`, e);
+            showToastError({ title: 'Unable to download chart image' });
         } finally {
             // rollback workaround
             if (needsWorkaround) {
                 chartInstance.setOption(originalOptions);
             }
         }
-    }, [getChartInstance, chartName, type, isBackgroundTransparent]);
+    }, [
+        getChartInstance,
+        chartName,
+        type,
+        isBackgroundTransparent,
+        showToastError,
+    ]);
 
     const onCopyToClipboard = useCallback(async () => {
-        setIsCopied(true);
         const chartInstance = getChartInstance();
         if (!chartInstance) {
-            console.error('Chart instance is not available');
+            showToastError({ title: 'Unable to copy chart image' });
             return;
         }
 
@@ -209,13 +217,15 @@ const ChartDownloadOptions: React.FC<DownloadOptions> = ({
             );
             await copyImageToClipboard(base64Image);
 
+            setIsCopied(true);
             setTimeout(() => {
                 setIsCopied(false);
             }, 1000);
         } catch (e) {
             console.error('Unable to copy chart to clipboard:', e);
+            showToastError({ title: 'Unable to copy chart image' });
         }
-    }, [getChartInstance, isBackgroundTransparent]);
+    }, [getChartInstance, isBackgroundTransparent, showToastError]);
 
     return (
         <Stack>
@@ -225,6 +235,8 @@ const ChartDownloadOptions: React.FC<DownloadOptions> = ({
                 id="download-type"
                 value={type}
                 onChange={(value) => setType(value as DownloadType)}
+                allowDeselect={false}
+                comboboxProps={{ withinPortal: false }}
                 data={Object.values(DownloadType)
                     .filter(
                         (downloadType) =>
@@ -251,13 +263,11 @@ const ChartDownloadOptions: React.FC<DownloadOptions> = ({
             )}
             <Group gap="xs" justify="flex-end">
                 <Tooltip
-                    withinPortal
                     color={isCopied ? 'teal' : undefined}
                     label={isCopied ? 'Copied!' : 'Copy to clipboard'}
                 >
                     <ActionIcon
                         size="md"
-                        radius="md"
                         onClick={onCopyToClipboard}
                         variant="default"
                     >

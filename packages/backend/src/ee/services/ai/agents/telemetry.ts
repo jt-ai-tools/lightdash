@@ -1,0 +1,85 @@
+import type { AiDeepResearchPhase } from '@lightdash/common';
+import type { AiAgentArgs } from '../types/aiAgent';
+import {
+    AiCallFeature,
+    getAiCallTelemetry,
+    getLanguageModelAttribution,
+} from '../utils/aiCallTelemetry';
+
+export const getDeepResearchTelemetryExtra = (
+    runUuid: string,
+    phase: AiDeepResearchPhase,
+) => ({
+    deepResearchRunUuid: runUuid,
+    deepResearchPhase: phase,
+});
+
+export const getAiAgentModelName = (model: AiAgentArgs['model']) =>
+    typeof model === 'string' ? model : model.modelId;
+
+/**
+ * Builds the `runtimeContext` + `telemetry` pair for an agent-level
+ * generateText/streamText call.
+ *
+ * Passing distinct `functionId`s — e.g. `generateAgentResponse`,
+ * `streamAgentResponse`, `generateAgentResponse` — lets observability
+ * stacks separate parent vs. subagent latency, token usage, and step
+ * counts. The runtime context pins each call to the
+ * org/project/agent/thread/prompt for cost attribution and
+ * cross-referencing with persisted tool calls.
+ *
+ * Spans always emit; `telemetryEnabled` only controls whether prompt/response
+ * content is recorded (it can contain user data) — see `getAiCallTelemetry`.
+ */
+export const getAgentTelemetryConfig = (
+    functionId: string,
+    {
+        agentSettings,
+        threadUuid,
+        promptUuid,
+        organizationId,
+        userId,
+        telemetryEnabled,
+        model,
+        keyManagement,
+        channel,
+        externalUserId,
+        execution,
+    }: Pick<
+        AiAgentArgs,
+        | 'agentSettings'
+        | 'threadUuid'
+        | 'promptUuid'
+        | 'organizationId'
+        | 'userId'
+        | 'telemetryEnabled'
+        | 'model'
+        | 'keyManagement'
+        | 'channel'
+        | 'externalUserId'
+    > & { execution?: AiAgentArgs['execution'] },
+    feature: AiCallFeature = 'agent',
+) =>
+    getAiCallTelemetry({
+        functionId,
+        feature,
+        organizationUuid: organizationId,
+        projectUuid: agentSettings.projectUuid,
+        agentUuid: agentSettings.uuid,
+        threadUuid,
+        promptUuid,
+        userUuid: userId,
+        ...getLanguageModelAttribution(model),
+        keyManagement,
+        channel,
+        externalUserId,
+        ...(execution?.mode === 'deep_research'
+            ? {
+                  extra: getDeepResearchTelemetryExtra(
+                      execution.runUuid,
+                      execution.phase,
+                  ),
+              }
+            : {}),
+        recordIO: telemetryEnabled,
+    });

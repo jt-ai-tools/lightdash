@@ -8,10 +8,30 @@ import { getSearchResults } from '../api/search';
 import { type SearchResultMap } from '../types/searchResultMap';
 import { getSearchItemMap } from '../utils/getSearchItemMap';
 
-export const OMNIBAR_MIN_QUERY_LENGTH = 3;
+const OMNIBAR_MIN_QUERY_LENGTH = 3;
+const OMNIBAR_MIN_QUERY_LENGTH_CJK = 1;
+
+// Detect CJK input: Han characters, Japanese kana, and Korean Hangul.
+const CJK_CHARACTER_REGEX =
+    /[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Hangul}]/u;
+
+export const hasMinQueryLength = (query: string | undefined): boolean => {
+    const trimmedQuery = query?.trim();
+
+    if (!trimmedQuery) {
+        return false;
+    }
+
+    const minLength = CJK_CHARACTER_REGEX.test(trimmedQuery)
+        ? OMNIBAR_MIN_QUERY_LENGTH_CJK
+        : OMNIBAR_MIN_QUERY_LENGTH;
+
+    return trimmedQuery.length >= minLength;
+};
 
 type Params = UseQueryOptions<SearchResults, ApiError, SearchResultMap> & {
     projectUuid: string;
+    projectUrlIdentifier?: string;
     query?: string;
     filters?: SearchFilters;
     source: 'omnibar' | 'ai_search_box';
@@ -19,6 +39,7 @@ type Params = UseQueryOptions<SearchResults, ApiError, SearchResultMap> & {
 
 const useSearch = ({
     projectUuid,
+    projectUrlIdentifier = projectUuid,
     query = '',
     filters,
     source,
@@ -29,8 +50,9 @@ const useSearch = ({
         queryFn: () =>
             getSearchResults({ projectUuid, query, filters, source }),
         retry: false,
-        enabled: query.length >= OMNIBAR_MIN_QUERY_LENGTH,
-        select: (data) => getSearchItemMap(data, projectUuid),
+        enabled: hasMinQueryLength(query),
+        select: (data) =>
+            getSearchItemMap(data, projectUuid, projectUrlIdentifier),
         ...params,
     });
 

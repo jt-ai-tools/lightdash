@@ -1,4 +1,15 @@
-import { getParameterReferences, validateParameterNames } from './parameters';
+import { ExploreType, type Explore } from '../types/explore';
+import { type LightdashProjectParameter } from '../types/lightdashProjectConfig';
+import {
+    getExploreParameterDefinitions,
+    getExploreParameterReferences,
+    getMissingRequiredParameters,
+    getParameterReferences,
+    getReferencedParameterDefinitions,
+    hasReservedParameterReference,
+    validateParameterConfiguration,
+    validateParameterNames,
+} from './parameters';
 
 describe('getParameterReferences', () => {
     describe('Project-level parameters', () => {
@@ -92,6 +103,186 @@ describe('getParameterReferences', () => {
             expect(result).toContain('customers.target_region');
             expect(result).toContain('active_status');
             expect(result.length).toBe(2);
+        });
+    });
+
+    describe('Conditional format references', () => {
+        it.each([
+            ['${ld.parameters.currency=="USD"?"$":"€"}0.00', 'currency'],
+            ['${lightdash.parameters.currency!="USD"?"€":"$"}0.00', 'currency'],
+            [
+                '${ld.parameters.orders.currency=="USD"?"$":"€"}0.00',
+                'orders.currency',
+            ],
+            [
+                '${lightdash.parameters.orders.currency?"$":"€"}0.00',
+                'orders.currency',
+            ],
+        ])('extracts parameters from %s', (format, parameter) => {
+            expect(getParameterReferences('SUM(amount)', format)).toEqual([
+                parameter,
+            ]);
+        });
+
+        it('deduplicates references across SQL and conditional formats', () => {
+            expect(
+                getParameterReferences(
+                    '${ld.parameters.currency}',
+                    '${ld.parameters.currency==lightdash.parameters.preferred?"$":"€"}0.00',
+                ),
+            ).toEqual(['currency', 'preferred']);
+        });
+
+        it('does not scan bare references outside a conditional placeholder', () => {
+            expect(
+                getParameterReferences(
+                    '${ld.parameters.currency=="USD"?"$":"€"} ld.parameters.fake',
+                ),
+            ).toEqual(['currency']);
+        });
+
+        it.each([
+            '${ld.parameters.currency=="USD"?"ld.parameters.caption":"lightdash.parameters.fallback"}',
+            "${ld.parameters.currency=='ld.parameters.caption'?'$':'€'}",
+            '${"lightdash.parameters.caption"==ld.parameters.currency?"$":"€"}',
+            '${ld.parameters.currency=="Why? ld.parameters.caption: \\"USD\\""?"$":"€"}',
+            '${ld.parameters.currency?ld.parameters.caption:lightdash.parameters.fallback}',
+        ])('ignores literal text and output branches in %s', (format) => {
+            expect(getParameterReferences(format)).toEqual(['currency']);
+        });
+
+        it.each([
+            '${ld.parameters.currency=="USD?: ld.parameters.caption"}',
+            '${ld.parameters.orders.currency.extra=="USD"?"$":"€"}',
+            '${ld.parameters.currency-invalid=="USD"?"$":"€"}',
+        ])(
+            'does not extract references from unsupported expressions: %s',
+            (format) => {
+                expect(getParameterReferences(format)).toEqual([]);
+            },
+        );
+    });
+
+    describe('Liquid template references', () => {
+        it('should extract parameters from {% if %} liquid tags', () => {
+            const sql =
+                '{% if ld.parameters.source_schema == "jaffle" %}jaffle.orders{% else %}public.orders{% endif %}';
+            const result = getParameterReferences(sql);
+            expect(result).toEqual(['source_schema']);
+        });
+
+        it('should extract parameters from {% elsif %} branches', () => {
+            const sql =
+                '{% if ld.parameters.grain == "day" %}d' +
+                '{% elsif ld.parameters.fallback == "week" %}w' +
+                '{% endif %}';
+            const result = getParameterReferences(sql);
+            expect(result).toContain('grain');
+            expect(result).toContain('fallback');
+            expect(result.length).toBe(2);
+        });
+
+        it('should extract parameters from {% case %} / {% when %} blocks', () => {
+            const sql =
+                '{% case ld.parameters.region %}{% when "EU" %}eu{% when "US" %}us{% endcase %}';
+            const result = getParameterReferences(sql);
+            expect(result).toEqual(['region']);
+        });
+
+        it('should extract parameters from {% assign %} tags', () => {
+            const sql = '{% assign foo = ld.parameters.bar %}SELECT {{ foo }}';
+            const result = getParameterReferences(sql);
+            expect(result).toEqual(['bar']);
+        });
+
+        it('should extract parameters used with liquid operators (contains)', () => {
+            const sql =
+                '{% if ld.parameters.tags contains "premium" %}premium{% endif %}';
+            const result = getParameterReferences(sql);
+            expect(result).toEqual(['tags']);
+        });
+
+        it('should extract parameters from lightdash.parameters in liquid tags', () => {
+            const sql =
+                '{% if lightdash.parameters.grain == "day" %}day{% endif %}';
+            const result = getParameterReferences(sql);
+            expect(result).toEqual(['grain']);
+        });
+
+        it('should extract model-scoped parameters from liquid tags', () => {
+            const sql =
+                '{% if ld.parameters.orders.status == "active" %}active{% endif %}';
+            const result = getParameterReferences(sql);
+            expect(result).toEqual(['orders.status']);
+        });
+
+        it('should NOT detect ld.query.fields as a parameter', () => {
+            const sql =
+                '{% if ld.query.fields contains "orders.id" %}has_id{% endif %}';
+            const result = getParameterReferences(sql);
+            expect(result).toEqual([]);
+        });
+
+        it('should extract both ${} and liquid-bare references in the same string', () => {
+            const sql =
+                '{% if ld.parameters.region == "EU" %}SELECT * FROM eu_orders{% else %}SELECT * FROM ${ld.parameters.fallback_table}{% endif %}';
+            const result = getParameterReferences(sql);
+            expect(result).toContain('region');
+            expect(result).toContain('fallback_table');
+            expect(result.length).toBe(2);
+        });
+
+        it('should accept multiple sources and dedupe', () => {
+            const sql = '${ld.parameters.x}';
+            const format = '${ld.parameters.x}${ld.parameters.y}';
+            const result = getParameterReferences(sql, format);
+            expect(result).toContain('x');
+            expect(result).toContain('y');
+            expect(result.length).toBe(2);
+        });
+
+        it('should ignore undefined sources', () => {
+            const result = getParameterReferences(
+                '${ld.parameters.x}',
+                undefined,
+            );
+            expect(result).toEqual(['x']);
+        });
+    });
+
+    describe('Negative cases — false-positive guards', () => {
+        it('should not match bare ld.parameters.X when no liquid tags are present', () => {
+            // Without {%, the broad scan never fires — only ${...} is matched.
+            const sql =
+                'SELECT * FROM tbl -- ld.parameters.fake_ref in a comment';
+            const result = getParameterReferences(sql);
+            expect(result).toEqual([]);
+        });
+
+        it('should not match suffixed identifiers like myld.parameters.x in liquid SQL', () => {
+            // Left boundary in the broad regex prevents matching after a word/dot char.
+            const sql =
+                '{% if ld.parameters.real == 1 %}SELECT myld.parameters.fake{% endif %}';
+            const result = getParameterReferences(sql);
+            expect(result).toEqual(['real']);
+        });
+
+        it('should not match if the left boundary is another dot (e.g. table.ld.parameters.x)', () => {
+            const sql =
+                '{% if ld.parameters.real == 1 %}SELECT t.ld.parameters.fake{% endif %}';
+            const result = getParameterReferences(sql);
+            expect(result).toEqual(['real']);
+        });
+
+        it('limitation: a quoted SQL identifier "ld.parameters.fake" inside liquid SQL IS still matched', () => {
+            // Documented behavior: column names with literal `ld.parameters.X` are
+            // exceedingly rare (warehouses require quoting for dots in identifiers)
+            // and a false-positive in detection is harmless (UI shows extra param).
+            const sql =
+                'SELECT "ld.parameters.fake" FROM t WHERE {% if ld.parameters.real %}1{% endif %}';
+            const result = getParameterReferences(sql);
+            expect(result).toContain('real');
+            expect(result).toContain('fake');
         });
     });
 
@@ -264,5 +455,349 @@ describe('validateParameterNames', () => {
         expect(result.invalidParameters).toHaveLength(2);
         expect(result.invalidParameters).toContain('invalid.param');
         expect(result.invalidParameters).toContain('another invalid');
+    });
+
+    it('should not fail on reserved parameter names (user param wins, surfaced separately)', () => {
+        const result = validateParameterNames({
+            date_zoom: { label: 'Date zoom', default: 'week' },
+        });
+        expect(result.isInvalid).toBe(false);
+        expect(result.reservedParameters).toContain('date_zoom');
+        expect(result.invalidParameters).toEqual([]);
+    });
+
+    it('should report invalid and reserved names separately (only invalid fails)', () => {
+        const result = validateParameterNames({
+            'bad.name': { label: 'Bad', default: 'x' },
+            date_zoom: { label: 'Date zoom', default: 'week' },
+            good_name: { label: 'Good', default: 'y' },
+        });
+        expect(result.isInvalid).toBe(true);
+        expect(result.invalidParameters).toEqual(['bad.name']);
+        expect(result.reservedParameters).toEqual(['date_zoom']);
+    });
+});
+
+describe('hasReservedParameterReference', () => {
+    it('returns true when a reserved parameter is referenced', () => {
+        expect(hasReservedParameterReference(['region', 'date_zoom'])).toBe(
+            true,
+        );
+    });
+
+    it('returns false when only user parameters are referenced', () => {
+        expect(hasReservedParameterReference(['region', 'status'])).toBe(false);
+    });
+
+    it('returns false for an empty list', () => {
+        expect(hasReservedParameterReference([])).toBe(false);
+    });
+});
+
+describe('getMissingRequiredParameters', () => {
+    it('flags a referenced parameter with no value and no default', () => {
+        const result = getMissingRequiredParameters(
+            ['region'],
+            {},
+            { region: { label: 'Region' } },
+        );
+        expect(result).toEqual(['region']);
+    });
+
+    it('does not flag a parameter that has a value', () => {
+        const result = getMissingRequiredParameters(
+            ['region'],
+            { region: 'EU' },
+            { region: { label: 'Region' } },
+        );
+        expect(result).toEqual([]);
+    });
+
+    it('does not flag a parameter explicitly set to a falsy value', () => {
+        // Key presence, not truthiness: a user can deliberately pick 0, '' or [].
+        const result = getMissingRequiredParameters(
+            ['amount', 'label', 'tags'],
+            { amount: 0, label: '', tags: [] },
+            {
+                amount: { label: 'Amount' },
+                label: { label: 'Label' },
+                tags: { label: 'Tags' },
+            },
+        );
+        expect(result).toEqual([]);
+    });
+
+    it('does not flag a parameter that has a default', () => {
+        const result = getMissingRequiredParameters(
+            ['region'],
+            {},
+            { region: { label: 'Region', default: 'EU' } },
+        );
+        expect(result).toEqual([]);
+    });
+
+    it('does not flag a parameter whose default is a falsy value (0 / empty string)', () => {
+        // A declared default counts as supplied (backend uses `default !== undefined`).
+        const result = getMissingRequiredParameters(
+            ['count', 'note'],
+            {},
+            {
+                count: { label: 'Count', type: 'number', default: 0 },
+                note: { label: 'Note', default: '' },
+            },
+        );
+        expect(result).toEqual([]);
+    });
+
+    it('still flags a parameter declared with no default key', () => {
+        const result = getMissingRequiredParameters(
+            ['region'],
+            {},
+            { region: { label: 'Region' } },
+        );
+        expect(result).toEqual(['region']);
+    });
+
+    it('never flags a reserved parameter as missing', () => {
+        // Reserved parameters are resolved server-side, so never user-required.
+        const result = getMissingRequiredParameters(['date_zoom'], {}, {});
+        expect(result).toEqual([]);
+    });
+});
+
+describe('validateParameterConfiguration', () => {
+    it('should pass for undefined parameters', () => {
+        const result = validateParameterConfiguration(undefined);
+        expect(result.isValid).toBe(true);
+        expect(result.error).toBeNull();
+    });
+
+    it('should pass for empty parameters object', () => {
+        const result = validateParameterConfiguration({});
+        expect(result.isValid).toBe(true);
+        expect(result.error).toBeNull();
+    });
+
+    it('should pass for parameter with options', () => {
+        const result = validateParameterConfiguration({
+            status: {
+                label: 'Status',
+                default: 'active',
+                options: ['active', 'inactive'],
+            },
+        });
+        expect(result.isValid).toBe(true);
+        expect(result.error).toBeNull();
+    });
+
+    it('should pass for parameter with allow_custom_values: true', () => {
+        const result = validateParameterConfiguration({
+            region: {
+                label: 'Region',
+                default: 'US',
+                allow_custom_values: true,
+            },
+        });
+        expect(result.isValid).toBe(true);
+        expect(result.error).toBeNull();
+    });
+
+    it('should pass for parameter with options_from_dimension', () => {
+        const result = validateParameterConfiguration({
+            customer: {
+                label: 'Customer',
+                default: 'Acme',
+                options_from_dimension: {
+                    model: 'customers',
+                    dimension: 'name',
+                },
+            },
+        });
+        expect(result.isValid).toBe(true);
+        expect(result.error).toBeNull();
+    });
+
+    it('should fail for parameter missing options, options_from_dimension, and allow_custom_values', () => {
+        const result = validateParameterConfiguration({
+            top_n: {
+                label: 'Top N',
+                description: 'Limit results to the top N records',
+                default: 10,
+                type: 'number',
+            },
+        });
+        expect(result.isValid).toBe(false);
+        expect(result.error).not.toBeNull();
+    });
+
+    it('should fail for parameter with allow_custom_values: false and no options', () => {
+        const result = validateParameterConfiguration({
+            region: {
+                label: 'Region',
+                default: 'US',
+                allow_custom_values: false,
+            },
+        });
+        expect(result.isValid).toBe(false);
+        expect(result.error).not.toBeNull();
+    });
+
+    it('should pass when mixing valid parameter configurations', () => {
+        const result = validateParameterConfiguration({
+            status: {
+                label: 'Status',
+                options: ['active', 'inactive'],
+                default: 'active',
+            },
+            region: {
+                label: 'Region',
+                allow_custom_values: true,
+                default: 'US',
+            },
+            customer: {
+                label: 'Customer',
+                options_from_dimension: {
+                    model: 'customers',
+                    dimension: 'name',
+                },
+            },
+        });
+        expect(result.isValid).toBe(true);
+        expect(result.error).toBeNull();
+    });
+});
+
+describe('getExploreParameterDefinitions', () => {
+    it('includes active explore parameter aliases so shadowed reserved names can be matched by reference', () => {
+        const definitions = getExploreParameterDefinitions({
+            name: 'orders',
+            label: 'Orders',
+            baseTable: 'orders',
+            joinedTables: [],
+            type: ExploreType.DEFAULT,
+            tables: {
+                orders: {
+                    name: 'orders',
+                    label: 'Orders',
+                    parameters: {
+                        date_zoom: {
+                            label: 'Table-scoped date zoom',
+                            options: ['week'],
+                        },
+                    },
+                    dimensions: {},
+                    metrics: {},
+                    lineageGraph: {},
+                },
+            },
+            parameters: {
+                date_zoom: {
+                    label: 'Shadowed date zoom',
+                    options: ['week'],
+                },
+            },
+        } as unknown as Explore);
+
+        expect(definitions['orders.date_zoom']?.label).toBe(
+            'Table-scoped date zoom',
+        );
+        expect(definitions.date_zoom?.label).toBe('Shadowed date zoom');
+    });
+});
+
+describe('getReferencedParameterDefinitions', () => {
+    const region: LightdashProjectParameter = { label: 'Region' };
+    const shadowedDateZoom: LightdashProjectParameter = {
+        label: 'Shadowed date zoom',
+    };
+
+    it('returns only definitions that are referenced', () => {
+        expect(
+            getReferencedParameterDefinitions({ region }, ['region']),
+        ).toEqual({ region });
+    });
+
+    it('excludes references that have no user definition (e.g. a reserved-only reference)', () => {
+        // date_zoom is referenced but not user-defined: it is reserved-only and must not show.
+        expect(
+            getReferencedParameterDefinitions({ region }, ['date_zoom']),
+        ).toEqual({});
+    });
+
+    it('includes a user-defined parameter that shadows a reserved name', () => {
+        expect(
+            getReferencedParameterDefinitions({ date_zoom: shadowedDateZoom }, [
+                'date_zoom',
+            ]),
+        ).toEqual({ date_zoom: shadowedDateZoom });
+    });
+
+    it('returns nothing when there are no references', () => {
+        expect(
+            getReferencedParameterDefinitions({ region }, undefined),
+        ).toEqual({});
+        expect(getReferencedParameterDefinitions({ region }, [])).toEqual({});
+    });
+});
+
+describe('getExploreParameterReferences', () => {
+    it('collects deduplicated references from joins, tables, and fields', () => {
+        const references = getExploreParameterReferences({
+            name: 'orders',
+            label: 'Orders',
+            baseTable: 'orders',
+            joinedTables: [
+                { table: 'customers', parameterReferences: ['region'] },
+            ],
+            tables: {
+                orders: {
+                    name: 'orders',
+                    label: 'Orders',
+                    parameterReferences: ['env'],
+                    dimensions: {
+                        selected_metric: {
+                            name: 'selected_metric',
+                            parameterReferences: ['orders.metric', 'region'],
+                        },
+                    },
+                    metrics: {
+                        total: {
+                            name: 'total',
+                            parameterReferences: ['orders.metric'],
+                        },
+                    },
+                    lineageGraph: {},
+                },
+                customers: {
+                    name: 'customers',
+                    label: 'Customers',
+                    dimensions: {},
+                    metrics: {},
+                    lineageGraph: {},
+                },
+            },
+        } as unknown as Explore);
+
+        expect(references.sort()).toEqual(['env', 'orders.metric', 'region']);
+    });
+
+    it('returns empty for an explore with no references', () => {
+        const references = getExploreParameterReferences({
+            name: 'orders',
+            label: 'Orders',
+            baseTable: 'orders',
+            joinedTables: [],
+            tables: {
+                orders: {
+                    name: 'orders',
+                    label: 'Orders',
+                    dimensions: {},
+                    metrics: {},
+                    lineageGraph: {},
+                },
+            },
+        } as unknown as Explore);
+
+        expect(references).toEqual([]);
     });
 });

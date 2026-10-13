@@ -5,9 +5,10 @@ import {
 } from '@lightdash/common';
 import { ActionIcon, Popover, Tooltip } from '@mantine/core';
 import { IconDownload } from '@tabler/icons-react';
-import { type FC, useMemo } from 'react';
+import { useMemo, type FC } from 'react';
 import MantineIcon from '../../../../components/common/MantineIcon';
 import ExportResults from '../../../../components/ExportResults';
+import { type Limit } from '../../../../components/ExportResults/types';
 
 type Props = {
     projectUuid: string;
@@ -16,7 +17,11 @@ type Props = {
     columnOrder: string[];
     totalResults: number;
     chartName: string | undefined;
-    getDownloadQueryUuid: (limit: number | null) => Promise<string>;
+    getDownloadQueryUuid: (
+        limit: number | null,
+        limitType?: Limit,
+        exportPivotedData?: boolean,
+    ) => Promise<string>;
 };
 
 const ResultsDownloadButton: FC<Props> = ({
@@ -37,8 +42,11 @@ const ResultsDownloadButton: FC<Props> = ({
     return (
         <Popover withArrow disabled={disabled}>
             <Popover.Target>
-                <Tooltip variant="xs" label="Download results">
-                    <ActionIcon variant="default" disabled={disabled}>
+                <Tooltip label="Download results" position="bottom">
+                    <ActionIcon
+                        aria-label="Download results"
+                        disabled={disabled}
+                    >
                         <MantineIcon icon={IconDownload} />
                     </ActionIcon>
                 </Tooltip>

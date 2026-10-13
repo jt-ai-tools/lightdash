@@ -8,12 +8,12 @@ export const SqlQueryBeforeSaveAlert: FC<{ withDescription?: boolean }> = ({
 }) => {
     return (
         <Alert
-            icon={<MantineIcon icon={IconAlertCircle} color="yellow" />}
-            color="yellow"
+            icon={<MantineIcon icon={IconAlertCircle} />}
+            color="orange"
             title="You haven't run your query yet"
         >
             {withDescription && (
-                <Text fw={500} size="xs">
+                <Text fw={500} fz="xs">
                     You can verify your query before saving or you can review it
                     later.
                 </Text>

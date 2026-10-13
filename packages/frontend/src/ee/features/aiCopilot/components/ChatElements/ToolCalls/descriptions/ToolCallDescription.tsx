@@ -1,11 +1,22 @@
 import type {
-    ToolTableVizArgs,
-    ToolTimeSeriesArgs,
-    ToolVerticalBarArgs,
+    DiscoverFieldsInput,
+    ReadContentType,
+    ToolGrepFieldsArgs,
+    ToolGetMetadataArgs,
 } from '@lightdash/common';
 import {
     assertUnreachable,
-    type ToolDashboardArgs,
+    getPatchedSql,
+    isRunQueryArgsV1,
+    migrateRunQueryArgsV1ToV2,
+    type AiAgentToolResult,
+    type ToolAnalyzeFieldImpactArgs,
+    type ToolComposerQueriesArgs,
+    type ToolCreateScheduledDeliveryOutput,
+    type ToolLoadSkillArgs,
+    type ToolLoadSkillOutput,
+    type ToolDashboardV2Args,
+    type ToolDescribeWarehouseTableArgs,
     type ToolFindChartsArgs,
     type ToolFindContentArgs,
     type ToolFindDashboardsArgs,
@@ -13,24 +24,89 @@ import {
     type ToolFindExploresArgsV2,
     type ToolFindExploresArgsV3,
     type ToolFindFieldsArgs,
+    type ToolGetDashboardChartsArgs,
+    type ToolGetKnowledgeDocumentContentArgs,
+    type ToolGetKnowledgeDocumentContentOutput,
+    type ToolListContentArgs,
+    type ToolListWarehouseTablesArgs,
     type ToolName,
-    type ToolRunQueryArgs,
+    type ToolRunContentQueryArgs,
+    type ToolRunQueryArgsV1,
+    type ToolRunQueryArgsV2,
+    type ToolRunSqlArgs,
     type ToolSearchFieldValuesArgs,
+    type ToolSearchSemanticLayerArgs,
 } from '@lightdash/common';
 import type { FC } from 'react';
+import { type SqlApprovalTarget } from '../SqlApprovalActions';
 import type { ToolCallSummary } from '../utils/types';
-import { AiChartGenerationToolCallDescription } from './AiChartGenerationToolCallDescription';
+import {
+    ComposerQueriesToolCallDescription,
+    type ComposerQueryNodeStatus,
+} from './ComposerQueriesToolCallDescription';
+import { ContentEditorToolCallDescription } from './ContentEditorToolCallDescription';
 import { ContentSearchToolCallDescription } from './ContentSearchToolCallDescription';
+import { DashboardChartsToolCallDescription } from './DashboardChartsToolCallDescription';
 import { DashboardToolCallDescription } from './DashboardToolCallDescription';
+import { DescribeWarehouseTableToolCallDescription } from './DescribeWarehouseTableToolCallDescription';
+import { DiscoverFieldsToolCallDescription } from './DiscoverFieldsToolCallDescription';
 import { ExploreToolCallDescription } from './ExploreToolCallDescription';
+import { FieldImpactToolCallDescription } from './FieldImpactToolCallDescription';
 import { FieldSearchToolCallDescription } from './FieldSearchToolCallDescription';
 import { FieldValuesSearchToolCallDescription } from './FieldValuesSearchToolCallDescription';
+import { GetMetadataToolCallDescription } from './GetMetadataToolCallDescription';
+import { GrepFieldsToolCallDescription } from './GrepFieldsToolCallDescription';
+import { KnowledgeDocumentToolCallDescription } from './KnowledgeDocumentToolCallDescription';
+import { ListContentToolCallDescription } from './ListContentToolCallDescription';
+import { ListWarehouseTablesToolCallDescription } from './ListWarehouseTablesToolCallDescription';
+import { LoadSkillToolCallDescription } from './LoadSkillToolCallDescription';
 import { QueryResultToolCallDescription } from './QueryResultToolCallDescription';
+import { RepoShellToolCallDescription } from './RepoShellToolCallDescription';
+import { RunContentQueryToolCallDescription } from './RunContentQueryToolCallDescription';
+import { ScheduledDeliveryToolCallDescription } from './ScheduledDeliveryToolCallDescription';
+import { SemanticLayerSearchToolCallDescription } from './SemanticLayerSearchToolCallDescription';
+import {
+    SqlChartToolCallDescription,
+    type SqlChartToolArgs,
+} from './SqlChartToolCallDescription';
+import { SqlRunToolCallDescription } from './SqlRunToolCallDescription';
+
+type ToolReadContentArgs = {
+    slug?: string;
+    documentUuid?: string;
+    type?: ReadContentType | 'document';
+};
+
+type ToolEditContentArgs = {
+    slug?: string;
+    type?: 'dashboard' | 'chart' | 'sql_chart' | 'document';
+    patch?: unknown;
+};
+
+type ToolCreateContentArgs = {
+    content?: { slug?: string } & SqlChartToolArgs;
+    type?: 'dashboard' | 'chart' | 'sql_chart' | 'document';
+};
 
 export const ToolCallDescription: FC<{
     toolName: ToolName;
     toolCall: ToolCallSummary;
-}> = ({ toolName, toolCall }) => {
+    toolResult?: AiAgentToolResult;
+    /**
+     * Live per-node execution statuses for a running composer pipeline,
+     * keyed by nodeId. Only meaningful for runComposerQueries; omitted for
+     * persisted views, which render the pipeline without indicators.
+     */
+    composerNodeStatuses?: Record<string, ComposerQueryNodeStatus>;
+    /** Approval target while this call's SQL awaits the user's decision. */
+    approval?: SqlApprovalTarget;
+}> = ({ toolName, toolCall, toolResult, composerNodeStatuses, approval }) => {
+    // Mid-stream the toolArgs payload can arrive before any input chunks have
+    // been parsed. Casting an undefined value and reading fields throws, so
+    // bail until args exist.
+    if (!toolCall.toolArgs || typeof toolCall.toolArgs !== 'object') {
+        return <> </>;
+    }
     switch (toolName) {
         case 'findExplores':
             const toolArgsFindExplores = toolCall.toolArgs as
@@ -56,6 +132,28 @@ export const ToolCallDescription: FC<{
             return (
                 <FieldSearchToolCallDescription
                     searchQueries={toolArgsFindFields.fieldSearchQueries}
+                />
+            );
+        case 'discoverFields':
+            const discoverFieldsArgs = toolCall.toolArgs as DiscoverFieldsInput;
+            return (
+                <DiscoverFieldsToolCallDescription
+                    userQuery={discoverFieldsArgs.userQuery}
+                />
+            );
+        case 'grepFields':
+            const grepFieldsArgs = toolCall.toolArgs as ToolGrepFieldsArgs;
+            return (
+                <GrepFieldsToolCallDescription
+                    patterns={grepFieldsArgs.patterns ?? []}
+                    exploreName={grepFieldsArgs.exploreName}
+                />
+            );
+        case 'getMetadata':
+            const getMetadataArgs = toolCall.toolArgs as ToolGetMetadataArgs;
+            return (
+                <GetMetadataToolCallDescription
+                    requests={getMetadataArgs.requests ?? []}
                 />
             );
         case 'searchFieldValues':
@@ -95,39 +193,264 @@ export const ToolCallDescription: FC<{
                     searchQueries={findChartsToolArgs.chartSearchQueries}
                 />
             );
+        case 'getDashboardCharts':
+            const getDashboardChartsArgs =
+                toolCall.toolArgs as ToolGetDashboardChartsArgs;
+            return (
+                <DashboardChartsToolCallDescription
+                    dashboardName={
+                        getDashboardChartsArgs.dashboardName ??
+                        getDashboardChartsArgs.dashboardUuid
+                    }
+                    page={getDashboardChartsArgs.page ?? null}
+                />
+            );
         case 'generateDashboard':
-            const dashboardToolArgs = toolCall.toolArgs as ToolDashboardArgs;
+            const dashboardToolArgs = toolCall.toolArgs as ToolDashboardV2Args;
             return (
                 <DashboardToolCallDescription
                     title={dashboardToolArgs.title}
                     description={dashboardToolArgs.description}
                 />
             );
+        case 'generateVisualization':
         case 'runQuery':
-            const queryToolArgs = toolCall.toolArgs as ToolRunQueryArgs;
+            // Persisted args may be V1 or V2; normalize to V2 so the
+            // description reads everything from queryConfig.
+            const rawQueryToolArgs = toolCall.toolArgs as
+                | ToolRunQueryArgsV1
+                | ToolRunQueryArgsV2;
+            const queryToolArgs = isRunQueryArgsV1(rawQueryToolArgs)
+                ? migrateRunQueryArgsV1ToV2(rawQueryToolArgs)
+                : rawQueryToolArgs;
             return (
                 <QueryResultToolCallDescription
                     title={queryToolArgs.title}
                     queryConfig={queryToolArgs.queryConfig}
                     chartConfig={queryToolArgs.chartConfig}
-                    customMetrics={queryToolArgs.customMetrics}
-                    tableCalculations={queryToolArgs.tableCalculations}
                 />
             );
-        case 'generateBarVizConfig':
-        case 'generateTableVizConfig':
-        case 'generateTimeSeriesVizConfig':
-            const chartToolArgs = toolCall.toolArgs as
-                | ToolTableVizArgs
-                | ToolTimeSeriesArgs
-                | ToolVerticalBarArgs;
+        case 'runSql':
+            const sqlToolArgs = toolCall.toolArgs as ToolRunSqlArgs;
             return (
-                <AiChartGenerationToolCallDescription
-                    title={chartToolArgs.title}
+                <SqlRunToolCallDescription
+                    sql={sqlToolArgs.sql}
+                    limit={sqlToolArgs.limit}
+                    approval={approval}
                 />
             );
-        case 'improveContext':
-        case 'proposeChange':
+        case 'runComposerQueries':
+            const composerToolArgs =
+                toolCall.toolArgs as ToolComposerQueriesArgs;
+            return (
+                <ComposerQueriesToolCallDescription
+                    queries={composerToolArgs.queries ?? []}
+                    nodeStatuses={composerNodeStatuses}
+                    approval={approval}
+                />
+            );
+        case 'readContent':
+            const readContentToolArgs =
+                toolCall.toolArgs as ToolReadContentArgs;
+            const readContentIdentifier =
+                readContentToolArgs.slug ?? readContentToolArgs.documentUuid;
+            return readContentIdentifier && readContentToolArgs.type ? (
+                <ContentEditorToolCallDescription
+                    action="read"
+                    slug={readContentIdentifier}
+                    type={readContentToolArgs.type}
+                />
+            ) : (
+                <> </>
+            );
+        case 'editContent':
+            const editContentToolArgs =
+                toolCall.toolArgs as ToolEditContentArgs;
+            if (
+                editContentToolArgs.type === 'sql_chart' &&
+                editContentToolArgs.slug
+            ) {
+                return (
+                    <SqlChartToolCallDescription
+                        action="edit"
+                        slug={editContentToolArgs.slug}
+                        chart={{
+                            sql:
+                                getPatchedSql(editContentToolArgs.patch) ??
+                                undefined,
+                        }}
+                        approval={approval ?? null}
+                    />
+                );
+            }
+            return editContentToolArgs.slug && editContentToolArgs.type ? (
+                <ContentEditorToolCallDescription
+                    action="edit"
+                    slug={editContentToolArgs.slug}
+                    type={editContentToolArgs.type}
+                />
+            ) : (
+                <> </>
+            );
+        case 'createContent':
+            const createContentToolArgs =
+                toolCall.toolArgs as ToolCreateContentArgs;
+            if (
+                createContentToolArgs.type === 'sql_chart' &&
+                createContentToolArgs.content?.slug
+            ) {
+                return (
+                    <SqlChartToolCallDescription
+                        action="create"
+                        slug={createContentToolArgs.content.slug}
+                        chart={createContentToolArgs.content}
+                        approval={approval ?? null}
+                    />
+                );
+            }
+            return createContentToolArgs.content?.slug &&
+                createContentToolArgs.type ? (
+                <ContentEditorToolCallDescription
+                    action="create"
+                    slug={createContentToolArgs.content.slug}
+                    type={createContentToolArgs.type}
+                />
+            ) : (
+                <> </>
+            );
+        case 'listWarehouseTables':
+            const listWarehouseTablesArgs =
+                toolCall.toolArgs as ToolListWarehouseTablesArgs;
+            return (
+                <ListWarehouseTablesToolCallDescription
+                    schema={listWarehouseTablesArgs.schema ?? null}
+                    search={listWarehouseTablesArgs.search ?? null}
+                />
+            );
+        case 'listContent':
+            const listContentArgs = toolCall.toolArgs as ToolListContentArgs;
+            return (
+                <ListContentToolCallDescription
+                    page={listContentArgs.page}
+                    spaceSlug={listContentArgs.spaceSlug}
+                />
+            );
+        case 'runContentQuery':
+            const runContentQueryArgs =
+                toolCall.toolArgs as ToolRunContentQueryArgs;
+            return (
+                <RunContentQueryToolCallDescription
+                    source={runContentQueryArgs.source}
+                />
+            );
+        case 'describeWarehouseTable':
+            const describeWarehouseTableArgs =
+                toolCall.toolArgs as ToolDescribeWarehouseTableArgs;
+            return (
+                <DescribeWarehouseTableToolCallDescription
+                    table={describeWarehouseTableArgs.table}
+                    schema={describeWarehouseTableArgs.schema ?? null}
+                />
+            );
+        case 'getKnowledgeDocumentContent':
+            const getKnowledgeDocumentContentArgs =
+                toolCall.toolArgs as ToolGetKnowledgeDocumentContentArgs;
+            const knowledgeDocumentOutput = toolCall.toolOutput as
+                | ToolGetKnowledgeDocumentContentOutput
+                | undefined;
+            return (
+                <KnowledgeDocumentToolCallDescription
+                    documentUuid={getKnowledgeDocumentContentArgs.documentUuid}
+                    toolOutput={knowledgeDocumentOutput}
+                />
+            );
+        case 'searchSemanticLayer':
+            const searchSemanticLayerArgs =
+                toolCall.toolArgs as ToolSearchSemanticLayerArgs;
+            return (
+                <SemanticLayerSearchToolCallDescription
+                    page={searchSemanticLayerArgs.page}
+                    searchQuery={searchSemanticLayerArgs.searchQuery}
+                    type={searchSemanticLayerArgs.type}
+                />
+            );
+        case 'analyzeFieldImpact':
+            const analyzeFieldImpactArgs =
+                toolCall.toolArgs as ToolAnalyzeFieldImpactArgs;
+            return (
+                <FieldImpactToolCallDescription
+                    fieldId={analyzeFieldImpactArgs.fieldId}
+                />
+            );
+        case 'listKnowledgeDocuments':
+        case 'listProjects':
+        case 'getProjectInfo':
+        case 'generateHashes':
+        case 'generateUuids':
+        case 'loadProjectContext':
+        case 'exploreRepo':
+            const toolArgsExploreRepo = toolCall.toolArgs as {
+                command?: string;
+            };
+            return (
+                <RepoShellToolCallDescription
+                    command={toolArgsExploreRepo.command ?? null}
+                />
+            );
+        case 'loadSkill': {
+            const args = toolCall.toolArgs as Partial<ToolLoadSkillArgs>;
+            const servedSkill =
+                toolResult &&
+                toolResult.toolName === 'loadSkill' &&
+                'metadata' in toolResult
+                    ? (toolResult.metadata as ToolLoadSkillOutput['metadata'])
+                          .skill
+                    : undefined;
+            return (
+                <LoadSkillToolCallDescription
+                    name={args.name ?? null}
+                    resourceName={args.resourceName ?? null}
+                    servedSkill={servedSkill ?? null}
+                />
+            );
+        }
+        case 'createScheduledDelivery': {
+            const args = toolCall.toolArgs as { name?: string };
+            const metadata =
+                toolResult &&
+                toolResult.toolName === 'createScheduledDelivery' &&
+                'metadata' in toolResult
+                    ? (toolResult.metadata as ToolCreateScheduledDeliveryOutput['metadata'])
+                    : undefined;
+            return (
+                <ScheduledDeliveryToolCallDescription
+                    name={args.name ?? null}
+                    href={metadata?.status === 'success' ? metadata.href : null}
+                />
+            );
+        }
+        case 'discoverRepos':
+        case 'listWorkstreams':
+        case 'closePullRequest':
+        case 'getPullRequestDiff':
+        case 'generateDataApp':
+        case 'iterateDataApp':
+        case 'listDataAppThemes':
+        case 'editDbtProject':
+        case 'editProjectContext':
+        case 'editRepo':
+        case 'updateUserName':
+        case 'syncDbtProject':
+        case 'setupPreviewDeploy':
+        case 'runSavedChart':
+        case 'readPinnedThread':
+        case 'readAttachments':
+        case 'submitResearchReport':
+        case 'delegateResearchTask':
+        case 'submitWorkerFindings':
+        case 'loadMcpTools':
+        case 'resolveUrl':
+        case 'findCustomChartTypes':
             return <> </>;
         default:
             return assertUnreachable(toolName, `Unknown tool name ${toolName}`);

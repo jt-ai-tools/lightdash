@@ -2,6 +2,7 @@ import * as core from '@actions/core';
 import {
     CreateProjectTableConfiguration,
     getErrorMessage,
+    PreviewExpiresAt,
     Project,
     ProjectType,
 } from '@lightdash/common';
@@ -13,15 +14,29 @@ import { URL } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 import { LightdashAnalytics } from '../analytics/analytics';
 import { getConfig, setPreviewProject, unsetPreviewProject } from '../config';
+import { refuseAgentConnection } from '../credentials';
 import { getDbtContext } from '../dbt/context';
 import GlobalState from '../globalState';
 import { CliProjectType, detectProjectType } from '../lightdash/projectType';
 import * as styles from '../styles';
-import { compile } from './compile';
-import { createProject } from './createProject';
+import { compileProject } from './compile';
+import {
+    createProject,
+    loadWarehouseCredentialsFromProfiles,
+} from './createProject';
 import { checkLightdashVersion, lightdashApi } from './dbt/apiClient';
 import { DbtCompileOptions } from './dbt/compile';
-import { deploy } from './deploy';
+import { getProject } from './dbt/refresh';
+import { deploy, getDeployTarget } from './deploy';
+import { resolveProjectSourceUuid } from './sourceSelection';
+import {
+    getDisableTimestampConversionFromProject,
+    getProjectDeploySettings,
+} from './timestampConversion';
+import {
+    getWarehouseCredentialsSource,
+    updateProjectWarehouseConnection,
+} from './warehouseConnection';
 
 type PreviewHandlerOptions = DbtCompileOptions & {
     projectDir: string;
@@ -34,10 +49,39 @@ type PreviewHandlerOptions = DbtCompileOptions & {
     ignoreErrors: boolean;
     tableConfiguration: CreateProjectTableConfiguration;
     skipCopyContent?: boolean;
+    asyncCopyContent?: boolean;
     organizationCredentials?: string;
     assumeYes?: boolean;
     warehouseCredentials?: boolean;
+    batchedDeploy?: boolean;
+    batchSize?: string;
+    parallelBatches?: string;
+    expiresIn?: string;
+    disableTimestampConversion?: boolean;
+    validateWarehouseColumns: boolean;
+    partialCompilation?: boolean;
+    combine?: boolean;
+    combineManifestProjectUuid?: string;
+    source?: string;
 };
+
+const previewDeployDestination = async (
+    project: Pick<Project, 'projectUuid' | 'connectionRoute'>,
+    options: PreviewHandlerOptions,
+    projectType: CliProjectType,
+    upstreamProjectUuid: string | undefined,
+) => ({
+    sourceUuid: await resolveProjectSourceUuid(
+        project.projectUuid,
+        options.source,
+        upstreamProjectUuid,
+    ),
+    deployTarget: await getDeployTarget(
+        options,
+        projectType,
+        project.connectionRoute,
+    ),
+});
 
 type StopPreviewHandlerOptions = {
     name: string;
@@ -84,7 +128,7 @@ const cleanupProject = async (
                 projectId: projectUuid,
                 durationMs: previewStartTime
                     ? Date.now() - previewStartTime
-                    : undefined,
+                    : 0,
             },
         });
         teardownSpinner.succeed(`  Cleaned up`);
@@ -108,6 +152,36 @@ const projectUrl = async (project: Project): Promise<URL> => {
     );
 };
 
+const updatePreviewExpiration = async (
+    projectUuid: string,
+    expiresIn: string | undefined,
+): Promise<void> => {
+    try {
+        const { expiresAt } = await lightdashApi<PreviewExpiresAt>({
+            method: 'PATCH',
+            url: `/api/v1/projects/${projectUuid}/preview-expiration`,
+            body: JSON.stringify({
+                expiresInHours: expiresIn ? parseInt(expiresIn, 10) : undefined,
+            }),
+        });
+        console.error(
+            `${styles.success(
+                '✔',
+            )}   Preview expiration extended until ${new Date(
+                expiresAt,
+            ).toLocaleString()}`,
+        );
+    } catch (e) {
+        // Non-critical: keep the preview update working against older servers
+        const message = `Could not update preview expiration: ${getErrorMessage(e)}`;
+        if (expiresIn) {
+            console.error(styles.warning(message));
+        } else {
+            GlobalState.debug(`> ${message}`);
+        }
+    }
+};
+
 const getPreviewProject = async (name: string) => {
     const projects = await lightdashApi<Project[]>({
         method: 'GET',
@@ -120,8 +194,10 @@ const getPreviewProject = async (name: string) => {
     );
 };
 export const previewHandler = async (
-    options: PreviewHandlerOptions,
+    originalOptions: PreviewHandlerOptions,
 ): Promise<void> => {
+    refuseAgentConnection();
+    const options = { ...originalOptions };
     GlobalState.setVerbose(options.verbose);
     const executionId = uuidv4();
     await checkLightdashVersion();
@@ -164,10 +240,11 @@ export const previewHandler = async (
     let contentCopySkipReason: string | undefined;
 
     const config = await getConfig();
+    options.combineManifestProjectUuid = config.context?.project;
 
-    // Validate upstream project before attempting to copy content
+    // Validate upstream project before attempting to copy permissions or content
     let upstreamProjectValid = false;
-    if (config.context?.project && !options.skipCopyContent) {
+    if (config.context?.project) {
         try {
             GlobalState.debug(
                 `> Validating upstream project: ${config.context.project}`,
@@ -235,11 +312,14 @@ export const previewHandler = async (
             name,
             type: ProjectType.PREVIEW,
             upstreamProjectUuid:
-                upstreamProjectValid && config.context?.project
+                config.context?.project && upstreamProjectValid
                     ? config.context.project
                     : undefined,
             copyContent: !options.skipCopyContent && upstreamProjectValid,
             warehouseCredentials: projectTypeConfig.warehouseCredentials,
+            expiresIn: options.expiresIn
+                ? parseInt(options.expiresIn, 10)
+                : undefined,
         });
 
         project = results?.project;
@@ -267,6 +347,18 @@ export const previewHandler = async (
         return;
     }
 
+    if (options.disableTimestampConversion === undefined) {
+        options.disableTimestampConversion =
+            getDisableTimestampConversionFromProject(
+                project.warehouseConnection,
+            );
+        GlobalState.debug(
+            `> Using disable-timestamp-conversion=${String(
+                options.disableTimestampConversion ?? false,
+            )} from preview project settings`,
+        );
+    }
+
     const previewStartTime = Date.now();
     await LightdashAnalytics.track({
         event: 'preview.started',
@@ -276,10 +368,17 @@ export const previewHandler = async (
         },
     });
     try {
-        const explores = await compile(options);
+        const { explores, isProjectComplete } = await compileProject(options);
         await deploy(explores, {
             ...options,
             projectUuid: project.projectUuid,
+            ...(await previewDeployDestination(
+                project,
+                options,
+                projectTypeConfig.type,
+                config.context?.project,
+            )),
+            complete: isProjectComplete,
         });
 
         await setPreviewProject(project.projectUuid, name);
@@ -349,9 +448,17 @@ export const previewHandler = async (
                     watcher!.unwatch(manifestFilePath);
                     // Deploying will change manifest.json too, so we need to stop watching the file until it is deployed
                     if (project) {
-                        await deploy(await compile(options), {
+                        const compileResult = await compileProject(options);
+                        await deploy(compileResult.explores, {
                             ...options,
                             projectUuid: project.projectUuid,
+                            ...(await previewDeployDestination(
+                                project,
+                                options,
+                                projectTypeConfig.type,
+                                config.context?.project,
+                            )),
+                            complete: compileResult.isProjectComplete,
                         });
                     }
 
@@ -398,9 +505,64 @@ export const previewHandler = async (
     await cleanupProject(executionId, project.projectUuid, previewStartTime);
 };
 
-export const startPreviewHandler = async (
+// Credentials resolved locally (AWS SSO, Snowflake SSO) expire, so a re-run
+// with the same name pushes freshly resolved ones into the existing preview.
+const refreshPreviewWarehouseCredentials = async (
+    projectUuid: string,
     options: PreviewHandlerOptions,
 ): Promise<void> => {
+    const source = getWarehouseCredentialsSource(options);
+    if (source.source === 'organization') {
+        GlobalState.debug(
+            `> Preview uses organization warehouse credentials "${source.name}", nothing to refresh`,
+        );
+        return;
+    }
+    if (source.source === 'none') {
+        GlobalState.debug(
+            '> Skipping warehouse credentials refresh (--no-warehouse-credentials)',
+        );
+        return;
+    }
+    const loaded = await loadWarehouseCredentialsFromProfiles({
+        projectDir: options.projectDir,
+        profilesDir: options.profilesDir,
+        target: options.target,
+        profile: options.profile,
+        startOfWeek: options.startOfWeek,
+        assumeYes: options.assumeYes,
+        targetPath: options.targetPath,
+    });
+    if (!loaded) {
+        console.error(
+            styles.warning(
+                'Keeping the warehouse credentials already stored on the preview.',
+            ),
+        );
+        return;
+    }
+    const spinner = GlobalState.startSpinner(
+        '  Refreshing warehouse credentials...',
+    );
+    try {
+        const project = await getProject(projectUuid);
+        await updateProjectWarehouseConnection(
+            project,
+            loaded.credentials,
+            'Refreshing warehouse credentials',
+        );
+        spinner.succeed('  Warehouse credentials refreshed');
+    } catch (e) {
+        spinner.fail();
+        throw e;
+    }
+};
+
+export const startPreviewHandler = async (
+    originalOptions: PreviewHandlerOptions,
+): Promise<void> => {
+    refuseAgentConnection();
+    const options = { ...originalOptions };
     GlobalState.setVerbose(options.verbose);
     await checkLightdashVersion();
     const executionId = uuidv4();
@@ -421,6 +583,7 @@ export const startPreviewHandler = async (
 
     const projectName = options.name;
     const config = await getConfig();
+    options.combineManifestProjectUuid = config.context?.project;
 
     // Log current source project info if copying content
     if (!options.skipCopyContent && config.context?.project) {
@@ -446,11 +609,40 @@ export const startPreviewHandler = async (
             },
         });
 
+        // Re-running start-preview confirms the preview is still in use,
+        // so refresh its expiration (uses the upstream default when
+        // --expires-in is not set)
+        await updatePreviewExpiration(
+            previewProject.projectUuid,
+            options.expiresIn,
+        );
+
+        await refreshPreviewWarehouseCredentials(previewProject.projectUuid, {
+            ...options,
+            warehouseCredentials: projectTypeConfig.warehouseCredentials,
+        });
+
         // Update
-        const explores = await compile(options);
+        const previewSettings = await getProjectDeploySettings(
+            options.disableTimestampConversion,
+            previewProject.projectUuid,
+        );
+        options.disableTimestampConversion =
+            previewSettings.disableTimestampConversion;
+        const { explores, isProjectComplete } = await compileProject(options);
         await deploy(explores, {
             ...options,
             projectUuid: previewProject.projectUuid,
+            ...(await previewDeployDestination(
+                {
+                    projectUuid: previewProject.projectUuid,
+                    connectionRoute: previewSettings.connectionRoute,
+                },
+                options,
+                projectTypeConfig.type,
+                config.context?.project,
+            )),
+            complete: isProjectComplete,
         });
         const url = await projectUrl(previewProject);
         console.error(`Project updated on ${url}`);
@@ -493,6 +685,9 @@ export const startPreviewHandler = async (
             upstreamProjectUuid: config.context?.project,
             copyContent: !options.skipCopyContent,
             warehouseCredentials: projectTypeConfig.warehouseCredentials,
+            expiresIn: options.expiresIn
+                ? parseInt(options.expiresIn, 10)
+                : undefined,
         });
 
         const project = results?.project;
@@ -523,19 +718,44 @@ export const startPreviewHandler = async (
                 name: options.name,
             },
         });
-        const explores = await compile(options);
+
+        if (options.disableTimestampConversion === undefined) {
+            options.disableTimestampConversion =
+                getDisableTimestampConversionFromProject(
+                    project.warehouseConnection,
+                );
+            GlobalState.debug(
+                `> Using disable-timestamp-conversion=${String(
+                    options.disableTimestampConversion ?? false,
+                )} from preview project settings`,
+            );
+        }
+
+        const { explores, isProjectComplete } = await compileProject(options);
         await deploy(explores, {
             ...options,
             projectUuid: project.projectUuid,
+            ...(await previewDeployDestination(
+                project,
+                options,
+                projectTypeConfig.type,
+                config.context?.project,
+            )),
+            complete: isProjectComplete,
         });
         const url = await projectUrl(project);
 
         if (!hasContentCopy) {
-            console.error(
-                styles.warning(
-                    `\n\nDeveloper preview deployed without any copied content!\n`,
-                ),
-            );
+            let errorMessage = `\n\nDeveloper preview deployed without any copied content!`;
+            if (results?.contentCopyError) {
+                errorMessage += `\nError: ${results.contentCopyError}`;
+            } else if (options.skipCopyContent) {
+                errorMessage += `\nReason: --skip-copy-content flag was used`;
+            } else if (!config.context?.project) {
+                errorMessage += `\nReason: No upstream project configured`;
+            }
+            errorMessage += '\n';
+            console.error(styles.warning(errorMessage));
         }
 
         console.error(`New project created on ${url}`);
@@ -549,6 +769,7 @@ export const startPreviewHandler = async (
 export const stopPreviewHandler = async (
     options: StopPreviewHandlerOptions,
 ): Promise<void> => {
+    refuseAgentConnection();
     GlobalState.setVerbose(options.verbose);
     await checkLightdashVersion();
     const executionId = uuidv4();

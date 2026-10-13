@@ -1,10 +1,25 @@
 import {
+    createConditionalFormattingConfigWithSingleColor,
     DimensionType,
     FieldType,
-    ItemsMap,
+    FilterOperator,
+    getExcelFormatExpression,
     getFormatExpression,
+    getItemId,
+    ItemsMap,
+    MetricType,
+    NumberSeparator,
+    SortByDirection,
+    TimeFrames,
+    VizAggregationOptions,
+    VizIndexType,
+    type Dimension,
 } from '@lightdash/common';
+import fs from 'fs';
 import moment from 'moment';
+import os from 'os';
+import path from 'path';
+import { Readable } from 'stream';
 import { ExcelService } from './ExcelService';
 
 // Mock data for testing
@@ -44,6 +59,28 @@ const mockItemMapWithFormats: ItemsMap = {
         label: 'Plain Number',
         sql: '${TABLE}.plain_number',
     },
+    count_metric_without_format: {
+        name: 'count_metric_without_format',
+        description: undefined,
+        table: 'table',
+        hidden: false,
+        fieldType: FieldType.METRIC,
+        type: MetricType.COUNT,
+        tableLabel: 'table',
+        label: 'Count',
+        sql: 'COUNT(${TABLE}.id)',
+    },
+    count_distinct_metric_without_format: {
+        name: 'count_distinct_metric_without_format',
+        description: undefined,
+        table: 'table',
+        hidden: false,
+        fieldType: FieldType.METRIC,
+        type: MetricType.COUNT_DISTINCT,
+        tableLabel: 'table',
+        label: 'Count distinct',
+        sql: 'COUNT(DISTINCT ${TABLE}.id)',
+    },
     string_column: {
         name: 'string_column',
         description: undefined,
@@ -77,6 +114,19 @@ const mockItemMapWithFormats: ItemsMap = {
         fieldType: FieldType.DIMENSION,
         sql: '${TABLE}.timestamp_column',
     },
+    date_base_ts_column: {
+        name: 'date_base_ts_column',
+        description: undefined,
+        type: DimensionType.DATE,
+        timeIntervalBaseDimensionType: DimensionType.TIMESTAMP,
+        timeInterval: TimeFrames.DAY,
+        hidden: false,
+        table: 'table',
+        tableLabel: 'table',
+        label: 'Date Base TS Column',
+        fieldType: FieldType.DIMENSION,
+        sql: '${TABLE}.date_base_ts_column',
+    } as Dimension,
     // Additional format test cases from Lightdash docs
     pounds_currency_rounded: {
         name: 'pounds_currency_rounded',
@@ -190,6 +240,26 @@ const mockItemMapWithFormats: ItemsMap = {
 
 describe('ExcelService', () => {
     describe('convertRowToExcel', () => {
+        it('accepts a timezone argument and forwards it to formatItemValue', () => {
+            const row = {
+                number_with_usd_format: '1234.56',
+                string_column: 'test string',
+            };
+
+            const sortedFieldIds = ['number_with_usd_format', 'string_column'];
+
+            const result = ExcelService.convertRowToExcel(
+                row,
+                mockItemMapWithFormats,
+                false,
+                sortedFieldIds,
+                'America/New_York',
+            );
+
+            expect(result[0]).toBe(1234.56);
+            expect(result[1]).toBe('test string');
+        });
+
         it('should convert numeric strings to numbers when format expression is present', () => {
             const row = {
                 number_with_usd_format: '1234.56',
@@ -249,6 +319,37 @@ describe('ExcelService', () => {
             expect(result[0]).toBe('1234.56');
             expect(result[1]).toBe('0.1234');
             expect(result[2]).toBe('test string');
+        });
+
+        it('GLITCH-503: raw mode emits bare YYYY-MM-DD for DATE fields when a display tz is resolved', () => {
+            const row = {
+                date_column: '2024-01-15T00:00:00.000Z',
+                date_base_ts_column: '2024-01-15T00:00:00.000Z',
+                timestamp_column: '2024-01-15T09:30:00.000Z',
+            };
+            const result = ExcelService.convertRowToExcel(
+                row,
+                mockItemMapWithFormats,
+                true,
+                ['date_column', 'date_base_ts_column', 'timestamp_column'],
+                'Asia/Tokyo',
+            );
+            // DATE (incl. DATE-base-TS, a real DATE post-452) → bare date, matching the API raw
+            expect(result[0]).toBe('2024-01-15');
+            expect(result[1]).toBe('2024-01-15');
+            // TIMESTAMP raw stays the ISO instant (unchanged)
+            expect(result[2]).toBe('2024-01-15T09:30:00.000Z');
+        });
+
+        it('GLITCH-503: raw mode is byte-identical passthrough when no tz is resolved (flag off)', () => {
+            const row = { date_column: '2024-01-15T00:00:00.000Z' };
+            const result = ExcelService.convertRowToExcel(
+                row,
+                mockItemMapWithFormats,
+                true,
+                ['date_column'],
+            );
+            expect(result[0]).toBe('2024-01-15T00:00:00.000Z');
         });
 
         it('should handle null and undefined values', () => {
@@ -325,6 +426,44 @@ describe('ExcelService', () => {
             expect(result[0]).toBe('not a number');
             expect(result[1]).toBe('');
             expect(result[2]).toBe('test');
+        });
+
+        it('keeps numeric-looking values of a string field as text', () => {
+            const values = ['00123', '12E3', '562.90310', '1250E473'];
+
+            values.forEach((value) => {
+                const result = ExcelService.convertRowToExcel(
+                    { string_column: value },
+                    mockItemMapWithFormats,
+                    false,
+                    ['string_column'],
+                );
+
+                expect(result[0]).toBe(value);
+            });
+        });
+
+        it('never writes a non-finite number for a numeric field', () => {
+            const result = ExcelService.convertRowToExcel(
+                { number_without_format: '1250E473' },
+                mockItemMapWithFormats,
+                false,
+                ['number_without_format'],
+            );
+
+            expect(result[0]).not.toBe(Infinity);
+            expect(typeof result[0]).toBe('string');
+        });
+
+        it('still converts numeric strings for a column with no field definition', () => {
+            const result = ExcelService.convertRowToExcel(
+                { unknown_column: '42.5' },
+                mockItemMapWithFormats,
+                false,
+                ['unknown_column'],
+            );
+
+            expect(result[0]).toBe(42.5);
         });
 
         it('should handle actual numbers (not strings) with format expressions', () => {
@@ -621,6 +760,135 @@ describe('ExcelService', () => {
             expect(result[0]).toEqual(moment('2020-07-05').toDate());
             expect(result[1]).toEqual(new Date('2023-12-25T10:30:00.000Z'));
         });
+
+        describe('timezone wall-clock shift', () => {
+            const TIMESTAMP_ROW = {
+                timestamp_column: '2024-01-16T05:30:45.000Z',
+            };
+            const SORTED = ['timestamp_column'];
+
+            it.each([
+                ['undefined', undefined],
+                ['UTC', 'UTC'],
+            ])(
+                'is a no-op when timezone is %s (silence guarantee)',
+                (_label, tz) => {
+                    const result = ExcelService.convertRowToExcel(
+                        TIMESTAMP_ROW,
+                        mockItemMapWithFormats,
+                        false,
+                        SORTED,
+                        tz,
+                    );
+
+                    expect(result[0]).toEqual(
+                        moment('2024-01-16T05:30:45.000Z').toDate(),
+                    );
+                },
+            );
+
+            it('shifts TIMESTAMP cells into project-tz wall-clock when tz is non-UTC', () => {
+                const result = ExcelService.convertRowToExcel(
+                    TIMESTAMP_ROW,
+                    mockItemMapWithFormats,
+                    false,
+                    SORTED,
+                    'America/New_York',
+                );
+
+                // 05:30:45 UTC == 00:30:45 NY (EST, -5).
+                const cell = result[0] as Date;
+                expect(cell).toBeInstanceOf(Date);
+                expect(cell.getUTCFullYear()).toBe(2024);
+                expect(cell.getUTCMonth()).toBe(0);
+                expect(cell.getUTCDate()).toBe(16);
+                expect(cell.getUTCHours()).toBe(0);
+                expect(cell.getUTCMinutes()).toBe(30);
+                expect(cell.getUTCSeconds()).toBe(45);
+            });
+
+            it('does not shift DATE cells (calendar values stay as-is)', () => {
+                const result = ExcelService.convertRowToExcel(
+                    { date_column: '2024-01-16' },
+                    mockItemMapWithFormats,
+                    false,
+                    ['date_column'],
+                    'America/New_York',
+                );
+
+                expect(result[0]).toEqual(moment('2024-01-16').toDate());
+            });
+
+            it('does not shift DATE cells whose base is TIMESTAMP (now a real DATE post-cast)', () => {
+                // GLITCH-452: a day-or-coarser TIMESTAMP-base trunc compiles to
+                // a real DATE, so the cell is a bare calendar value and must not
+                // be shifted — same as a native DATE column, even under a
+                // non-UTC project tz.
+                const result = ExcelService.convertRowToExcel(
+                    { date_base_ts_column: '2024-01-16' },
+                    mockItemMapWithFormats,
+                    false,
+                    ['date_base_ts_column'],
+                    'America/New_York',
+                );
+
+                expect(result[0]).toEqual(moment('2024-01-16').toDate());
+            });
+        });
+
+        describe('convertToExcelDate', () => {
+            it('returns the same Date as today when timezone is undefined or UTC', () => {
+                const iso = '2024-01-16T05:30:45.000Z';
+                const expected = moment(iso, moment.ISO_8601, true).toDate();
+
+                expect(ExcelService.convertToExcelDate(iso)).toEqual(expected);
+                expect(ExcelService.convertToExcelDate(iso, 'UTC')).toEqual(
+                    expected,
+                );
+            });
+
+            it('shifts ISO timestamp strings to project-tz wall-clock when tz is non-UTC', () => {
+                const cell = ExcelService.convertToExcelDate(
+                    '2024-01-16T05:30:45.000Z',
+                    'America/New_York',
+                ) as Date;
+
+                expect(cell).toBeInstanceOf(Date);
+                expect(cell.getUTCHours()).toBe(0);
+                expect(cell.getUTCMinutes()).toBe(30);
+            });
+
+            it('does not shift bare date strings (no time component)', () => {
+                const cell = ExcelService.convertToExcelDate(
+                    '2024-01-16',
+                    'America/New_York',
+                );
+
+                expect(cell).toEqual(
+                    moment('2024-01-16', moment.ISO_8601, true).toDate(),
+                );
+            });
+        });
+
+        it('should preserve numeric metric values that resemble YYYYMM dates (PROD-6683)', () => {
+            const row = {
+                number_without_format: '202811',
+                string_column: 'test',
+            };
+
+            const sortedFieldIds = ['number_without_format', 'string_column'];
+
+            const result = ExcelService.convertRowToExcel(
+                row,
+                mockItemMapWithFormats,
+                false,
+                sortedFieldIds,
+            );
+
+            expect(result[0]).toBe(202811);
+            expect(typeof result[0]).toBe('number');
+            expect(result[0]).not.toBeInstanceOf(Date);
+        });
     });
 
     describe('generateFileId', () => {
@@ -645,24 +913,1097 @@ describe('ExcelService', () => {
         });
     });
 
-    describe('convertToExcelDate', () => {
-        it('should convert date strings to Date objects', () => {
-            const dateString = '2023-12-25T10:30:00.000Z';
-            const result = ExcelService.convertToExcelDate(dateString);
+    // PROD-6683: pivoted XLSX export now only converts date/timestamp
+    // index columns to Excel Date objects — metric columns are never
+    // converted, even if values match ISO 8601 (e.g. "202811").
 
-            expect(result).toBeInstanceOf(Date);
+    describe('downloadPivotTableXlsx', () => {
+        it.each([false, true])(
+            'writes formatted pivoted metrics as numeric cells with Excel formats when improved dates is %s',
+            async (enableImprovedExcelDates) => {
+                const pivotDimension = 'orders_status';
+                const indexDimension = 'string_column';
+                const metric = 'number_with_usd_format';
+                const completedColumn = `${metric}_any_completed`;
+                const placedColumn = `${metric}_any_placed`;
+
+                const itemMap: ItemsMap = {
+                    ...mockItemMapWithFormats,
+                    [pivotDimension]: {
+                        ...mockItemMapWithFormats.string_column,
+                        name: 'orders_status',
+                        label: 'Status',
+                    },
+                    [metric]: {
+                        ...mockItemMapWithFormats.number_with_usd_format,
+                        round: 1,
+                        separator: NumberSeparator.PERIOD_COMMA,
+                    },
+                };
+                const valuesColumns = [
+                    ['completed', completedColumn],
+                    ['placed', placedColumn],
+                ].map(([value, pivotColumnName]) => ({
+                    aggregation: VizAggregationOptions.ANY,
+                    pivotValues: [
+                        {
+                            value,
+                            referenceField: pivotDimension,
+                        },
+                    ],
+                    referenceField: metric,
+                    pivotColumnName,
+                }));
+                const pivotDetails = {
+                    totalColumnCount: 2,
+                    valuesColumns,
+                    indexColumn: [
+                        {
+                            type: VizIndexType.CATEGORY,
+                            reference: indexDimension,
+                        },
+                    ],
+                    groupByColumns: [{ reference: pivotDimension }],
+                    sortBy: [
+                        {
+                            direction: SortByDirection.ASC,
+                            reference: indexDimension,
+                        },
+                    ],
+                    originalColumns: {},
+                };
+
+                const buffer = await ExcelService.downloadPivotTableXlsx({
+                    rows: [
+                        {
+                            [indexDimension]: '00123',
+                            [completedColumn]: 1234.56,
+                            [placedColumn]: 9876.54,
+                        },
+                    ],
+                    itemMap,
+                    pivotConfig: {
+                        pivotDimensions: [pivotDimension],
+                        metricsAsRows: false,
+                    },
+                    onlyRaw: false,
+                    customLabels: undefined,
+                    pivotDetails,
+                    enableImprovedExcelDates,
+                });
+
+                const workbook = new (await import('exceljs')).Workbook();
+                // @ts-ignore - Buffer type mismatch between exceljs and Node 20
+                await workbook.xlsx.load(buffer);
+                const worksheet = workbook.getWorksheet('Pivot Table');
+                expect(worksheet).toBeDefined();
+
+                const expectedFormat = getExcelFormatExpression(
+                    itemMap[metric],
+                );
+                const completedCell = worksheet!.getRow(3).getCell(2);
+                const placedCell = worksheet!.getRow(3).getCell(3);
+
+                expect(worksheet!.getRow(3).getCell(1).value).toBe('00123');
+                expect(completedCell.value).toBe(1234.56);
+                expect(placedCell.value).toBe(9876.54);
+                expect(completedCell.numFmt).toBe(expectedFormat);
+                expect(placedCell.numFmt).toBe(expectedFormat);
+            },
+        );
+
+        it('should not convert metric values that look like YYYYMM to dates (PROD-6683)', async () => {
+            const pivotDimension = 'payments_payment_method';
+            const indexDimension = 'customers_created_month';
+            const metric = 'payments_total_revenue';
+
+            const itemMap: ItemsMap = {
+                [pivotDimension]: {
+                    name: 'payment_method',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Payment method',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    hidden: false,
+                    sql: '${TABLE}.payment_method',
+                },
+                [indexDimension]: {
+                    name: 'created_month',
+                    table: 'customers',
+                    tableLabel: 'Customers',
+                    label: 'Created month',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.DATE,
+                    hidden: false,
+                    sql: '${TABLE}.created_month',
+                },
+                [metric]: {
+                    name: 'total_revenue',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Total revenue',
+                    fieldType: FieldType.METRIC,
+                    type: DimensionType.NUMBER,
+                    hidden: false,
+                    sql: 'SUM(${TABLE}.amount)',
+                },
+            };
+
+            const creditCardColumn = `${metric}_any_credit_card`;
+            const bankTransferColumn = `${metric}_any_bank_transfer`;
+
+            // SQL-pivoted rows: one row per unique index value, one column per
+            // pivot value keyed by pivotColumnName.
+            const rows = [
+                {
+                    [indexDimension]: '2023-01-01',
+                    [creditCardColumn]: 202811,
+                    [bankTransferColumn]: 2028,
+                },
+                {
+                    [indexDimension]: '2023-02-01',
+                    [creditCardColumn]: 20281101,
+                    [bankTransferColumn]: 141312,
+                },
+            ];
+
+            const pivotDetails = {
+                totalColumnCount: 2,
+                valuesColumns: [
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'credit_card',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: creditCardColumn,
+                    },
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'bank_transfer',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: bankTransferColumn,
+                    },
+                ],
+                indexColumn: [
+                    {
+                        type: VizIndexType.TIME,
+                        reference: indexDimension,
+                    },
+                ],
+                groupByColumns: [{ reference: pivotDimension }],
+                sortBy: [
+                    {
+                        direction: SortByDirection.ASC,
+                        reference: indexDimension,
+                    },
+                ],
+                originalColumns: {},
+            };
+
+            const pivotConfig = {
+                pivotDimensions: [pivotDimension],
+                metricsAsRows: false,
+            };
+
+            const buffer = await ExcelService.downloadPivotTableXlsx({
+                rows,
+                itemMap,
+                pivotConfig,
+                onlyRaw: false,
+                customLabels: undefined,
+                pivotDetails,
+                enableImprovedExcelDates: true,
+            });
+
+            const workbook = new (await import('exceljs')).Workbook();
+            // @ts-ignore - Buffer type mismatch between exceljs and Node 20
+            await workbook.xlsx.load(buffer);
+            const worksheet = workbook.getWorksheet('Pivot Table');
+            expect(worksheet).toBeDefined();
+
+            const dataValues: { row: number; col: number; value: unknown }[] =
+                [];
+            worksheet!.eachRow((row, rowNum) => {
+                row.eachCell({ includeEmpty: true }, (cell, colNum) => {
+                    dataValues.push({
+                        row: rowNum,
+                        col: colNum,
+                        value: cell.value,
+                    });
+                });
+            });
+
+            // Date index column (col 1) should have Date objects in data rows
+            const dateValues = dataValues.filter(
+                (v) => v.value instanceof Date,
+            );
+            expect(dateValues.length).toBeGreaterThanOrEqual(2);
+
+            // Metric value columns (col 2+) should NOT have Date objects
+            const metricDateValues = dataValues.filter(
+                (v) => v.col > 1 && v.value instanceof Date,
+            );
+            expect(metricDateValues).toHaveLength(0);
+
+            // YYYYMM-like metric values should be preserved as native numbers
+            const numericMetricValues = dataValues
+                .filter((v) => v.col > 1 && typeof v.value === 'number')
+                .map((v) => v.value);
+            expect(numericMetricValues).toEqual(
+                expect.arrayContaining([202811, 2028, 20281101, 141312]),
+            );
         });
 
-        it('should return non-date values unchanged', () => {
-            const nonDate = 'not a date';
-            const result = ExcelService.convertToExcelDate(nonDate);
+        it('TC1: should convert both DATE and TIMESTAMP index dimensions to Date objects', async () => {
+            const pivotDimension = 'payments_payment_method';
+            const dateIndex = 'customers_created_month';
+            const timestampIndex = 'orders_created_at';
+            const metric = 'payments_total_revenue';
 
-            expect(result).toBe('not a date');
+            const itemMap: ItemsMap = {
+                [pivotDimension]: {
+                    name: 'payment_method',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Payment method',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    hidden: false,
+                    sql: '${TABLE}.payment_method',
+                },
+                [dateIndex]: {
+                    name: 'created_month',
+                    table: 'customers',
+                    tableLabel: 'Customers',
+                    label: 'Created month',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.DATE,
+                    hidden: false,
+                    sql: '${TABLE}.created_month',
+                },
+                [timestampIndex]: {
+                    name: 'created_at',
+                    table: 'orders',
+                    tableLabel: 'Orders',
+                    label: 'Created at',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.TIMESTAMP,
+                    hidden: false,
+                    sql: '${TABLE}.created_at',
+                },
+                [metric]: {
+                    name: 'total_revenue',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Total revenue',
+                    fieldType: FieldType.METRIC,
+                    type: DimensionType.NUMBER,
+                    hidden: false,
+                    sql: 'SUM(${TABLE}.amount)',
+                },
+            };
+
+            const creditCardColumn = `${metric}_any_credit_card`;
+            const bankTransferColumn = `${metric}_any_bank_transfer`;
+
+            // Single SQL-pivoted row: both index dims share the same value,
+            // pivot values become columns.
+            const rows = [
+                {
+                    [dateIndex]: '2023-01-01',
+                    [timestampIndex]: '2023-01-15T14:30:00.000Z',
+                    [creditCardColumn]: 202811,
+                    [bankTransferColumn]: 5000,
+                },
+            ];
+
+            const pivotDetails = {
+                totalColumnCount: 2,
+                valuesColumns: [
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'credit_card',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: creditCardColumn,
+                    },
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'bank_transfer',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: bankTransferColumn,
+                    },
+                ],
+                indexColumn: [
+                    {
+                        type: VizIndexType.TIME,
+                        reference: dateIndex,
+                    },
+                    {
+                        type: VizIndexType.TIME,
+                        reference: timestampIndex,
+                    },
+                ],
+                groupByColumns: [{ reference: pivotDimension }],
+                sortBy: [
+                    {
+                        direction: SortByDirection.ASC,
+                        reference: dateIndex,
+                    },
+                ],
+                originalColumns: {},
+            };
+
+            const pivotConfig = {
+                pivotDimensions: [pivotDimension],
+                metricsAsRows: false,
+            };
+
+            const buffer = await ExcelService.downloadPivotTableXlsx({
+                rows,
+                itemMap,
+                pivotConfig,
+                onlyRaw: false,
+                customLabels: undefined,
+                pivotDetails,
+                enableImprovedExcelDates: true,
+            });
+
+            const workbook = new (await import('exceljs')).Workbook();
+            // @ts-ignore
+            await workbook.xlsx.load(buffer);
+            const worksheet = workbook.getWorksheet('Pivot Table');
+            expect(worksheet).toBeDefined();
+
+            const dataValues: { row: number; col: number; value: unknown }[] =
+                [];
+            worksheet!.eachRow((row, rowNum) => {
+                row.eachCell({ includeEmpty: true }, (cell, colNum) => {
+                    dataValues.push({
+                        row: rowNum,
+                        col: colNum,
+                        value: cell.value,
+                    });
+                });
+            });
+
+            // Col 1 = date index — should have Date objects in data rows
+            const col1Dates = dataValues.filter(
+                (v) => v.col === 1 && v.value instanceof Date,
+            );
+            expect(col1Dates.length).toBeGreaterThanOrEqual(1);
+
+            // Col 2 = timestamp index — now uses raw values directly,
+            // so timestamps are correctly converted to Date objects.
+            const col2Dates = dataValues.filter(
+                (v) => v.col === 2 && v.value instanceof Date,
+            );
+            expect(col2Dates.length).toBeGreaterThanOrEqual(1);
+
+            // Metric columns (col 3+) should NOT have Date objects
+            const metricDateValues = dataValues.filter(
+                (v) => v.col > 2 && v.value instanceof Date,
+            );
+            expect(metricDateValues).toHaveLength(0);
         });
 
-        it('should handle null and undefined', () => {
-            expect(ExcelService.convertToExcelDate(null)).toBeNull();
-            expect(ExcelService.convertToExcelDate(undefined)).toBeUndefined();
+        it('TC3: should not convert metric label or value columns with metricsAsRows: true', async () => {
+            const pivotDimension = 'payments_payment_method';
+            const dateIndex = 'customers_created_month';
+            const metric = 'payments_total_revenue';
+
+            const itemMap: ItemsMap = {
+                [pivotDimension]: {
+                    name: 'payment_method',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Payment method',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    hidden: false,
+                    sql: '${TABLE}.payment_method',
+                },
+                [dateIndex]: {
+                    name: 'created_month',
+                    table: 'customers',
+                    tableLabel: 'Customers',
+                    label: 'Created month',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.DATE,
+                    hidden: false,
+                    sql: '${TABLE}.created_month',
+                },
+                [metric]: {
+                    name: 'total_revenue',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Total revenue',
+                    fieldType: FieldType.METRIC,
+                    type: DimensionType.NUMBER,
+                    hidden: false,
+                    sql: 'SUM(${TABLE}.amount)',
+                },
+            };
+
+            const creditCardColumn = `${metric}_any_credit_card`;
+            const bankTransferColumn = `${metric}_any_bank_transfer`;
+
+            const rows = [
+                {
+                    [dateIndex]: '2023-01-01',
+                    [creditCardColumn]: 202811,
+                    [bankTransferColumn]: 5000,
+                },
+                {
+                    [dateIndex]: '2023-02-01',
+                    [creditCardColumn]: 141312,
+                    [bankTransferColumn]: 3000,
+                },
+            ];
+
+            const pivotDetails = {
+                totalColumnCount: 2,
+                valuesColumns: [
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'credit_card',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: creditCardColumn,
+                    },
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'bank_transfer',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: bankTransferColumn,
+                    },
+                ],
+                indexColumn: [
+                    {
+                        type: VizIndexType.TIME,
+                        reference: dateIndex,
+                    },
+                ],
+                groupByColumns: [{ reference: pivotDimension }],
+                sortBy: [
+                    {
+                        direction: SortByDirection.ASC,
+                        reference: dateIndex,
+                    },
+                ],
+                originalColumns: {},
+            };
+
+            const pivotConfig = {
+                pivotDimensions: [pivotDimension],
+                metricsAsRows: true,
+            };
+
+            const buffer = await ExcelService.downloadPivotTableXlsx({
+                rows,
+                itemMap,
+                pivotConfig,
+                onlyRaw: false,
+                customLabels: undefined,
+                pivotDetails,
+                enableImprovedExcelDates: true,
+            });
+
+            const workbook = new (await import('exceljs')).Workbook();
+            // @ts-ignore
+            await workbook.xlsx.load(buffer);
+            const worksheet = workbook.getWorksheet('Pivot Table');
+            expect(worksheet).toBeDefined();
+
+            const dataValues: { row: number; col: number; value: unknown }[] =
+                [];
+            worksheet!.eachRow((row, rowNum) => {
+                row.eachCell({ includeEmpty: true }, (cell, colNum) => {
+                    dataValues.push({
+                        row: rowNum,
+                        col: colNum,
+                        value: cell.value,
+                    });
+                });
+            });
+
+            // With metricsAsRows, layout is: [date index] [metric label] [value cols...]
+            // Only col 1 (date index) should have Date objects
+            const dateCells = dataValues.filter((v) => v.value instanceof Date);
+            dateCells.forEach((cell) => {
+                expect(cell.col).toBe(1);
+            });
+
+            // Metric value cells (col 2+) should NOT be Date objects
+            const nonCol1Dates = dataValues.filter(
+                (v) => v.col > 1 && v.value instanceof Date,
+            );
+            expect(nonCol1Dates).toHaveLength(0);
+        });
+
+        it('TC4: should preserve invalid date strings in date-typed index columns', async () => {
+            const pivotDimension = 'payments_payment_method';
+            const dateIndex = 'customers_created_month';
+            const metric = 'payments_total_revenue';
+
+            const itemMap: ItemsMap = {
+                [pivotDimension]: {
+                    name: 'payment_method',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Payment method',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    hidden: false,
+                    sql: '${TABLE}.payment_method',
+                },
+                [dateIndex]: {
+                    name: 'created_month',
+                    table: 'customers',
+                    tableLabel: 'Customers',
+                    label: 'Created month',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.DATE,
+                    hidden: false,
+                    sql: '${TABLE}.created_month',
+                },
+                [metric]: {
+                    name: 'total_revenue',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Total revenue',
+                    fieldType: FieldType.METRIC,
+                    type: DimensionType.NUMBER,
+                    hidden: false,
+                    sql: 'SUM(${TABLE}.amount)',
+                },
+            };
+
+            const creditCardColumn = `${metric}_any_credit_card`;
+            const bankTransferColumn = `${metric}_any_bank_transfer`;
+
+            const rows = [
+                {
+                    [dateIndex]: '2023-01-01',
+                    [creditCardColumn]: 100,
+                    [bankTransferColumn]: 300,
+                },
+                {
+                    [dateIndex]: 'N/A',
+                    [creditCardColumn]: 200,
+                    [bankTransferColumn]: 400,
+                },
+            ];
+
+            const pivotDetails = {
+                totalColumnCount: 2,
+                valuesColumns: [
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'credit_card',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: creditCardColumn,
+                    },
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'bank_transfer',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: bankTransferColumn,
+                    },
+                ],
+                indexColumn: [
+                    {
+                        type: VizIndexType.TIME,
+                        reference: dateIndex,
+                    },
+                ],
+                groupByColumns: [{ reference: pivotDimension }],
+                sortBy: [
+                    {
+                        direction: SortByDirection.ASC,
+                        reference: dateIndex,
+                    },
+                ],
+                originalColumns: {},
+            };
+
+            const pivotConfig = {
+                pivotDimensions: [pivotDimension],
+                metricsAsRows: false,
+            };
+
+            const buffer = await ExcelService.downloadPivotTableXlsx({
+                rows,
+                itemMap,
+                pivotConfig,
+                onlyRaw: false,
+                customLabels: undefined,
+                pivotDetails,
+                enableImprovedExcelDates: true,
+            });
+
+            const workbook = new (await import('exceljs')).Workbook();
+            // @ts-ignore
+            await workbook.xlsx.load(buffer);
+            const worksheet = workbook.getWorksheet('Pivot Table');
+            expect(worksheet).toBeDefined();
+
+            const dataValues: { row: number; col: number; value: unknown }[] =
+                [];
+            worksheet!.eachRow((row, rowNum) => {
+                row.eachCell({ includeEmpty: true }, (cell, colNum) => {
+                    dataValues.push({
+                        row: rowNum,
+                        col: colNum,
+                        value: cell.value,
+                    });
+                });
+            });
+
+            // Valid date should be converted
+            const dateCells = dataValues.filter((v) => v.value instanceof Date);
+            expect(dateCells.length).toBeGreaterThanOrEqual(1);
+
+            // "N/A" is formatted to "NaT" by formatDate() before the pivot
+            // runs. The strict ISO 8601 check correctly rejects "NaT", so
+            // the value stays as a string — no Invalid Date is created.
+            const natCells = dataValues.filter((v) => v.value === 'NaT');
+            expect(natCells.length).toBeGreaterThanOrEqual(1);
+            natCells.forEach((cell) => {
+                expect(cell.value).not.toBeInstanceOf(Date);
+            });
+        });
+
+        it('TC6: should not convert any values to Date when onlyRaw is true', async () => {
+            const pivotDimension = 'payments_payment_method';
+            const dateIndex = 'customers_created_month';
+            const metric = 'payments_total_revenue';
+
+            const itemMap: ItemsMap = {
+                [pivotDimension]: {
+                    name: 'payment_method',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Payment method',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    hidden: false,
+                    sql: '${TABLE}.payment_method',
+                },
+                [dateIndex]: {
+                    name: 'created_month',
+                    table: 'customers',
+                    tableLabel: 'Customers',
+                    label: 'Created month',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.DATE,
+                    timeInterval: TimeFrames.MONTH,
+                    hidden: false,
+                    sql: '${TABLE}.created_month',
+                } as Dimension,
+                [metric]: {
+                    name: 'total_revenue',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Total revenue',
+                    fieldType: FieldType.METRIC,
+                    type: DimensionType.NUMBER,
+                    hidden: false,
+                    sql: 'SUM(${TABLE}.amount)',
+                },
+            };
+
+            const creditCardColumn = `${metric}_any_credit_card`;
+            const bankTransferColumn = `${metric}_any_bank_transfer`;
+
+            const rows = [
+                {
+                    [dateIndex]: '2023-01-01',
+                    [creditCardColumn]: 100,
+                    [bankTransferColumn]: 200,
+                },
+            ];
+
+            const pivotDetails = {
+                totalColumnCount: 2,
+                valuesColumns: [
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'credit_card',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: creditCardColumn,
+                    },
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'bank_transfer',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: bankTransferColumn,
+                    },
+                ],
+                indexColumn: [
+                    {
+                        type: VizIndexType.TIME,
+                        reference: dateIndex,
+                    },
+                ],
+                groupByColumns: [{ reference: pivotDimension }],
+                sortBy: [
+                    {
+                        direction: SortByDirection.ASC,
+                        reference: dateIndex,
+                    },
+                ],
+                originalColumns: {},
+            };
+
+            const pivotConfig = {
+                pivotDimensions: [pivotDimension],
+                metricsAsRows: false,
+            };
+
+            const buffer = await ExcelService.downloadPivotTableXlsx({
+                rows,
+                itemMap,
+                pivotConfig,
+                onlyRaw: true,
+                customLabels: undefined,
+                pivotDetails,
+                enableImprovedExcelDates: true,
+            });
+
+            const workbook = new (await import('exceljs')).Workbook();
+            // @ts-ignore
+            await workbook.xlsx.load(buffer);
+            const worksheet = workbook.getWorksheet('Pivot Table');
+            expect(worksheet).toBeDefined();
+
+            const dateCells: unknown[] = [];
+            worksheet!.eachRow((row) => {
+                row.eachCell({ includeEmpty: true }, (cell) => {
+                    if (cell.value instanceof Date) {
+                        dateCells.push(cell.value);
+                    }
+                });
+            });
+
+            expect(dateCells).toHaveLength(0);
+        });
+
+        it('TC8: should not convert date columns with WEEK timeframe to Date objects', async () => {
+            const pivotDimension = 'payments_payment_method';
+            const weekIndex = 'customers_created_week';
+            const metric = 'payments_total_revenue';
+
+            const itemMap: ItemsMap = {
+                [pivotDimension]: {
+                    name: 'payment_method',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Payment method',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    hidden: false,
+                    sql: '${TABLE}.payment_method',
+                },
+                [weekIndex]: {
+                    name: 'created_week',
+                    table: 'customers',
+                    tableLabel: 'Customers',
+                    label: 'Created week',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.DATE,
+                    timeInterval: TimeFrames.WEEK,
+                    hidden: false,
+                    sql: '${TABLE}.created_week',
+                } as Dimension,
+                [metric]: {
+                    name: 'total_revenue',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Total revenue',
+                    fieldType: FieldType.METRIC,
+                    type: DimensionType.NUMBER,
+                    hidden: false,
+                    sql: 'SUM(${TABLE}.amount)',
+                },
+            };
+
+            const creditCardColumn = `${metric}_any_credit_card`;
+            const bankTransferColumn = `${metric}_any_bank_transfer`;
+
+            const rows = [
+                {
+                    [weekIndex]: '2023-01-02',
+                    [creditCardColumn]: 100,
+                    [bankTransferColumn]: 200,
+                },
+            ];
+
+            const pivotDetails = {
+                totalColumnCount: 2,
+                valuesColumns: [
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'credit_card',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: creditCardColumn,
+                    },
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'bank_transfer',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: bankTransferColumn,
+                    },
+                ],
+                indexColumn: [
+                    {
+                        type: VizIndexType.TIME,
+                        reference: weekIndex,
+                    },
+                ],
+                groupByColumns: [{ reference: pivotDimension }],
+                sortBy: [
+                    {
+                        direction: SortByDirection.ASC,
+                        reference: weekIndex,
+                    },
+                ],
+                originalColumns: {},
+            };
+
+            const pivotConfig = {
+                pivotDimensions: [pivotDimension],
+                metricsAsRows: false,
+            };
+
+            const buffer = await ExcelService.downloadPivotTableXlsx({
+                rows,
+                itemMap,
+                pivotConfig,
+                onlyRaw: false,
+                customLabels: undefined,
+                pivotDetails,
+                enableImprovedExcelDates: true,
+            });
+
+            const workbook = new (await import('exceljs')).Workbook();
+            // @ts-ignore
+            await workbook.xlsx.load(buffer);
+            const worksheet = workbook.getWorksheet('Pivot Table');
+            expect(worksheet).toBeDefined();
+
+            const dateCells: unknown[] = [];
+            worksheet!.eachRow((row) => {
+                row.eachCell({ includeEmpty: true }, (cell) => {
+                    if (cell.value instanceof Date) {
+                        dateCells.push(cell.value);
+                    }
+                });
+            });
+
+            // WEEK is a non-native timeframe, so timeIntervalToExcelNumFmt
+            // returns null → no date conversion should happen
+            expect(dateCells).toHaveLength(0);
+        });
+
+        it('omits a hidden row-index dimension from the XLSX pivot output (regression guard for hiddenDimensionFieldIds)', async () => {
+            // Regression guard: PivotConfig.hiddenDimensionFieldIds must cause the
+            // hidden dimension to be absent from the rendered headers and body cells.
+            // This mirrors the CSV regression guard in pivotResultsAsCsv.test.ts.
+            const pivotDimension = 'payments_payment_method';
+            const indexDimension = 'customers_created_month'; // will be hidden
+            const metric = 'payments_total_revenue';
+
+            const itemMap: ItemsMap = {
+                [pivotDimension]: {
+                    name: 'payment_method',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Payment method',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    hidden: false,
+                    sql: '${TABLE}.payment_method',
+                },
+                [indexDimension]: {
+                    name: 'created_month',
+                    table: 'customers',
+                    tableLabel: 'Customers',
+                    label: 'Created month',
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.STRING,
+                    hidden: false,
+                    sql: '${TABLE}.created_month',
+                },
+                [metric]: {
+                    name: 'total_revenue',
+                    table: 'payments',
+                    tableLabel: 'Payments',
+                    label: 'Total revenue',
+                    fieldType: FieldType.METRIC,
+                    type: DimensionType.NUMBER,
+                    hidden: false,
+                    sql: 'SUM(${TABLE}.amount)',
+                },
+            };
+
+            const creditCardColumn = `${metric}_any_credit_card`;
+            const bankTransferColumn = `${metric}_any_bank_transfer`;
+
+            // The hidden dimension still appears in the SQL-pivoted rows and
+            // pivotDetails.indexColumn — the converter must drop it from output.
+            const rows = [
+                {
+                    [indexDimension]: '2023-01',
+                    [creditCardColumn]: 100,
+                    [bankTransferColumn]: 200,
+                },
+                {
+                    [indexDimension]: '2023-02',
+                    [creditCardColumn]: 150,
+                    [bankTransferColumn]: 250,
+                },
+            ];
+
+            const pivotDetails = {
+                totalColumnCount: 2,
+                valuesColumns: [
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'credit_card',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: creditCardColumn,
+                    },
+                    {
+                        aggregation: VizAggregationOptions.ANY,
+                        pivotValues: [
+                            {
+                                value: 'bank_transfer',
+                                referenceField: pivotDimension,
+                            },
+                        ],
+                        referenceField: metric,
+                        pivotColumnName: bankTransferColumn,
+                    },
+                ],
+                indexColumn: [
+                    {
+                        type: VizIndexType.CATEGORY,
+                        reference: indexDimension,
+                    },
+                ],
+                groupByColumns: [{ reference: pivotDimension }],
+                sortBy: [
+                    {
+                        direction: SortByDirection.ASC,
+                        reference: indexDimension,
+                    },
+                ],
+                originalColumns: {},
+            };
+
+            // Hide the row-index dimension via hiddenDimensionFieldIds
+            const pivotConfig = {
+                pivotDimensions: [pivotDimension],
+                metricsAsRows: false,
+                hiddenDimensionFieldIds: [indexDimension],
+            };
+
+            const buffer = await ExcelService.downloadPivotTableXlsx({
+                rows,
+                itemMap,
+                pivotConfig,
+                onlyRaw: false,
+                customLabels: undefined,
+                pivotDetails,
+                enableImprovedExcelDates: true,
+            });
+
+            const workbook = new (await import('exceljs')).Workbook();
+            // @ts-ignore - Buffer type mismatch between exceljs and Node 20
+            await workbook.xlsx.load(buffer);
+            const worksheet = workbook.getWorksheet('Pivot Table');
+            expect(worksheet).toBeDefined();
+
+            const allCellValues: unknown[] = [];
+            worksheet!.eachRow((row) => {
+                row.eachCell({ includeEmpty: false }, (cell) => {
+                    allCellValues.push(cell.value);
+                });
+            });
+
+            // The hidden dimension's field values must not appear anywhere
+            expect(allCellValues).not.toContain('2023-01');
+            expect(allCellValues).not.toContain('2023-02');
+            // The hidden dimension's label must not appear in headers
+            expect(allCellValues).not.toContain('Created month');
+
+            // The pivot-column-header and metric values should still be present
+            expect(allCellValues).toContain('credit_card');
+            expect(allCellValues).toContain('bank_transfer');
         });
     });
 
@@ -694,6 +2035,19 @@ describe('ExcelService', () => {
 
             // Should return a default number format for fields without explicit format
             expect(formatExpression).toBe('#,##0.###');
+        });
+
+        it('should default unformatted Excel count metrics to whole numbers', () => {
+            expect(
+                getExcelFormatExpression(
+                    mockItemMapWithFormats.count_metric_without_format,
+                ),
+            ).toBe('#,##0');
+            expect(
+                getExcelFormatExpression(
+                    mockItemMapWithFormats.count_distinct_metric_without_format,
+                ),
+            ).toBe('#,##0');
         });
 
         it('should NOT return default format for date fields without explicit format', () => {
@@ -734,5 +2088,416 @@ describe('ExcelService', () => {
                 expect(formatExpression).toBe(expectedFormat);
             });
         });
+    });
+});
+
+describe('ExcelService conditional formatting in xlsx export (PROD-8199)', () => {
+    const numericField = {
+        fieldType: FieldType.METRIC,
+        type: MetricType.NUMBER,
+        name: 'count',
+        table: 'orders',
+        tableLabel: 'Orders',
+        label: 'Orders count',
+        sql: '',
+        hidden: false,
+        compiledSql: '',
+        tablesReferences: [],
+    } as ItemsMap[string];
+    const fieldId = getItemId(numericField);
+    const fields: ItemsMap = { [fieldId]: numericField };
+
+    // Private streaming writer, invoked directly so the test exercises the real
+    // row-rendering + colorToArgb path that produces the .xlsx fills.
+    const { streamJsonlToExcelFile } = ExcelService as unknown as {
+        streamJsonlToExcelFile: (
+            resultsStream: Readable,
+            tempFilePath: string,
+            headers: string[],
+            fields: ItemsMap,
+            onlyRaw: boolean,
+            sortedFieldIds: string[],
+            timezone?: string,
+            conditionalFormattings?: ReturnType<
+                typeof createConditionalFormattingConfigWithSingleColor
+            >[],
+            minMaxMap?: Record<string, { min: number; max: number }>,
+        ) => Promise<{ truncated: boolean }>;
+    };
+
+    const writeAndReadBack = async (
+        rows: Record<string, unknown>[],
+        conditionalFormattings: ReturnType<
+            typeof createConditionalFormattingConfigWithSingleColor
+        >[],
+        minMaxMap: Record<string, { min: number; max: number }> = {},
+    ) => {
+        const tempFilePath = path.join(
+            os.tmpdir(),
+            `excel-cf-test-${process.pid}-${rows.length}.xlsx`,
+        );
+        const jsonl = rows.map((row) => JSON.stringify(row)).join('\n');
+        await streamJsonlToExcelFile(
+            Readable.from([jsonl]),
+            tempFilePath,
+            ['Orders count'],
+            fields,
+            false,
+            [fieldId],
+            undefined,
+            conditionalFormattings,
+            minMaxMap,
+        );
+
+        const workbook = new (await import('exceljs')).Workbook();
+        await workbook.xlsx.readFile(tempFilePath);
+        const worksheet = workbook.getWorksheet('Sheet1');
+        fs.unlinkSync(tempFilePath);
+        return worksheet;
+    };
+
+    it('applies a solid background fill to cells matching a single-color rule', async () => {
+        const redConfig = createConditionalFormattingConfigWithSingleColor(
+            '#ff0000',
+            { fieldId },
+        );
+        redConfig.rules = [
+            {
+                id: 'gte-100',
+                operator: FilterOperator.GREATER_THAN_OR_EQUAL,
+                values: [100],
+            },
+        ];
+
+        const worksheet = await writeAndReadBack(
+            [{ [fieldId]: 150 }, { [fieldId]: 50 }],
+            [redConfig],
+        );
+
+        // Row 1 is the header; data rows start at 2.
+        const matchingCell = worksheet!.getRow(2).getCell(1);
+        const nonMatchingCell = worksheet!.getRow(3).getCell(1);
+
+        expect(matchingCell.fill).toMatchObject({
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFFF0000' },
+        });
+        const nonMatchingFill = nonMatchingCell.fill as
+            | { fgColor?: { argb?: string } }
+            | undefined;
+        expect(nonMatchingFill?.fgColor?.argb).toBeUndefined();
+    });
+
+    it('applies an interpolated fill for a color-range rule using the min/max map', async () => {
+        const rangeConfig = createConditionalFormattingConfigWithSingleColor(
+            '#ff0000',
+            { fieldId },
+        ) as ReturnType<
+            typeof createConditionalFormattingConfigWithSingleColor
+        >;
+        // Re-shape into a color-range config (start white -> end red).
+        const colorRangeConfig = {
+            target: { fieldId },
+            color: { start: '#ffffff', end: '#ff0000' },
+            rule: { min: 'auto' as const, max: 'auto' as const },
+        };
+
+        const worksheet = await writeAndReadBack(
+            [{ [fieldId]: 200 }],
+            [colorRangeConfig as unknown as typeof rangeConfig],
+            { [fieldId]: { min: 0, max: 200 } },
+        );
+
+        const cell = worksheet!.getRow(2).getCell(1);
+        // value at the top of the range resolves to the end colour (red).
+        expect(cell.fill).toMatchObject({
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFFF0000' },
+        });
+    });
+});
+
+describe('ExcelService column totals row in xlsx export (PROD-9169)', () => {
+    const dimension = {
+        fieldType: FieldType.DIMENSION,
+        type: DimensionType.STRING,
+        name: 'status',
+        table: 'orders',
+        tableLabel: 'Orders',
+        label: 'Status',
+        sql: '',
+        hidden: false,
+    } as ItemsMap[string];
+    const metric = {
+        fieldType: FieldType.METRIC,
+        type: MetricType.SUM,
+        name: 'revenue',
+        table: 'orders',
+        tableLabel: 'Orders',
+        label: 'Revenue',
+        sql: '',
+        hidden: false,
+        compiledSql: '',
+        tablesReferences: [],
+    } as ItemsMap[string];
+    const dimensionId = getItemId(dimension);
+    const metricId = getItemId(metric);
+
+    const { streamJsonlToExcelFile } = ExcelService as unknown as {
+        streamJsonlToExcelFile: (
+            resultsStream: Readable,
+            tempFilePath: string,
+            headers: string[],
+            fields: ItemsMap,
+            onlyRaw: boolean,
+            sortedFieldIds: string[],
+            timezone?: string,
+            conditionalFormattings?: undefined,
+            minMaxMap?: undefined,
+            columnTotals?: Record<string, number>,
+        ) => Promise<{ truncated: boolean }>;
+    };
+
+    const writeAndReadBack = async ({
+        fields,
+        sortedFieldIds,
+        rows,
+        columnTotals,
+    }: {
+        fields: ItemsMap;
+        sortedFieldIds: string[];
+        rows: Record<string, unknown>[];
+        columnTotals?: Record<string, number>;
+    }) => {
+        const tempFilePath = path.join(
+            os.tmpdir(),
+            `excel-totals-test-${process.pid}-${sortedFieldIds.length}-${
+                columnTotals ? 'totals' : 'none'
+            }.xlsx`,
+        );
+        const jsonl = rows.map((row) => JSON.stringify(row)).join('\n');
+        await streamJsonlToExcelFile(
+            Readable.from([jsonl]),
+            tempFilePath,
+            sortedFieldIds.map((id) => id),
+            fields,
+            false,
+            sortedFieldIds,
+            undefined,
+            undefined,
+            undefined,
+            columnTotals,
+        );
+
+        const workbook = new (await import('exceljs')).Workbook();
+        await workbook.xlsx.readFile(tempFilePath);
+        const worksheet = workbook.getWorksheet('Sheet1');
+        fs.unlinkSync(tempFilePath);
+        return worksheet;
+    };
+
+    it('appends a labelled totals row after the data rows', async () => {
+        const worksheet = await writeAndReadBack({
+            fields: { [dimensionId]: dimension, [metricId]: metric },
+            sortedFieldIds: [dimensionId, metricId],
+            rows: [
+                { [dimensionId]: 'placed', [metricId]: 10 },
+                { [dimensionId]: 'shipped', [metricId]: 32.5 },
+            ],
+            columnTotals: { [metricId]: 42.5 },
+        });
+
+        // Row 1 is the header, rows 2-3 the data, row 4 the totals.
+        expect(worksheet!.rowCount).toBe(4);
+        const totalsRow = worksheet!.getRow(4);
+        expect(totalsRow.getCell(1).value).toBe('Total');
+        expect(totalsRow.getCell(2).value).toBe(42.5);
+    });
+
+    it('keeps a first-column total instead of overwriting it with the label', async () => {
+        const worksheet = await writeAndReadBack({
+            fields: { [metricId]: metric },
+            sortedFieldIds: [metricId],
+            rows: [{ [metricId]: 10 }],
+            columnTotals: { [metricId]: 10 },
+        });
+
+        expect(worksheet!.getRow(2).getCell(1).value).toBe(10);
+    });
+
+    it('does not append a row when there are no totals', async () => {
+        const worksheet = await writeAndReadBack({
+            fields: { [dimensionId]: dimension, [metricId]: metric },
+            sortedFieldIds: [dimensionId, metricId],
+            rows: [{ [dimensionId]: 'placed', [metricId]: 10 }],
+        });
+
+        expect(worksheet!.rowCount).toBe(2);
+    });
+});
+
+describe('flat export of stored pivot results', () => {
+    const fields: ItemsMap = {
+        category: {
+            ...mockItemMapWithFormats.string_column,
+            name: 'category',
+            table: '',
+            label: 'Category',
+        },
+        period: {
+            ...mockItemMapWithFormats.string_column,
+            name: 'period',
+            table: '',
+            label: 'Period',
+        },
+        revenue: {
+            ...mockItemMapWithFormats.number_without_format,
+            name: 'revenue',
+            table: '',
+            label: 'Revenue',
+        },
+    };
+
+    const readWorkbook = async (
+        rows: Record<string, unknown>[],
+        pivotValuesColumns: Array<{
+            referenceField: string;
+            pivotColumnName: string;
+            aggregation: VizAggregationOptions;
+            pivotValues: Array<{
+                referenceField: string;
+                value: unknown;
+            }>;
+            columnIndex: number;
+        }>,
+        columnTotals?: Record<string, number>,
+    ) => {
+        const workbook = new (await import('exceljs')).Workbook();
+        await ExcelService.downloadAsyncExcelDirectly(
+            'pivot-results',
+            fields,
+            {
+                resultsStorageClient: {
+                    getDownloadStream: async () =>
+                        Readable.from([
+                            rows.map((row) => JSON.stringify(row)).join('\n'),
+                        ]),
+                } as unknown as import('../../clients/ResultsFileStorageClients/S3ResultsFileStorageClient').S3ResultsFileStorageClient,
+                exportsStorageClient: {
+                    uploadExcel: async (stream: Readable) => {
+                        await workbook.xlsx.read(stream);
+                        return 'export-url';
+                    },
+                } as unknown as import('../../clients/FileStorage/FileStorageClient').FileStorageClient,
+            },
+            {
+                columnOrder: ['category', 'period', 'revenue'],
+                pivotValuesColumns,
+                columnTotals,
+            },
+        );
+        return workbook.getWorksheet('Sheet1')!.getSheetValues();
+    };
+
+    it('expands sparse periods while preserving nulls and zeroes', async () => {
+        const sheetValues = await readWorkbook(
+            [
+                { category: 'A', revenue_sum_jan: 10, revenue_sum_feb: 20 },
+                { category: 'B', revenue_sum_feb: 0 },
+                { category: 'C', revenue_sum_jan: null },
+            ],
+            [
+                {
+                    referenceField: 'revenue',
+                    pivotColumnName: 'revenue_sum_jan',
+                    aggregation: VizAggregationOptions.SUM,
+                    pivotValues: [
+                        { referenceField: 'period', value: 'January' },
+                    ],
+                    columnIndex: 1,
+                },
+                {
+                    referenceField: 'revenue',
+                    pivotColumnName: 'revenue_sum_feb',
+                    aggregation: VizAggregationOptions.SUM,
+                    pivotValues: [
+                        { referenceField: 'period', value: 'February' },
+                    ],
+                    columnIndex: 2,
+                },
+            ],
+            { revenue: 30 },
+        );
+
+        expect(sheetValues).toEqual([
+            undefined,
+            [undefined, 'Category', 'Period', 'Revenue'],
+            [undefined, 'A', 'January', 10],
+            [undefined, 'A', 'February', 20],
+            [undefined, 'B', 'February', 0],
+            [undefined, 'C', 'January'],
+            [undefined, 'Total', undefined, 30],
+        ]);
+    });
+
+    it('keeps multiple aggregations of one SQL field distinct', async () => {
+        const sheetValues = await readWorkbook(
+            [
+                {
+                    category: 'A',
+                    revenue_sum_jan: 10,
+                    revenue_avg_jan: 5,
+                    revenue_sum_feb: 20,
+                    revenue_avg_feb: 8,
+                },
+            ],
+            [
+                {
+                    referenceField: 'revenue',
+                    pivotColumnName: 'revenue_sum_jan',
+                    aggregation: VizAggregationOptions.SUM,
+                    pivotValues: [
+                        { referenceField: 'period', value: 'January' },
+                    ],
+                    columnIndex: 1,
+                },
+                {
+                    referenceField: 'revenue',
+                    pivotColumnName: 'revenue_avg_jan',
+                    aggregation: VizAggregationOptions.AVERAGE,
+                    pivotValues: [
+                        { referenceField: 'period', value: 'January' },
+                    ],
+                    columnIndex: 1,
+                },
+                {
+                    referenceField: 'revenue',
+                    pivotColumnName: 'revenue_sum_feb',
+                    aggregation: VizAggregationOptions.SUM,
+                    pivotValues: [
+                        { referenceField: 'period', value: 'February' },
+                    ],
+                    columnIndex: 2,
+                },
+                {
+                    referenceField: 'revenue',
+                    pivotColumnName: 'revenue_avg_feb',
+                    aggregation: VizAggregationOptions.AVERAGE,
+                    pivotValues: [
+                        { referenceField: 'period', value: 'February' },
+                    ],
+                    columnIndex: 2,
+                },
+            ],
+        );
+
+        expect(sheetValues).toEqual([
+            undefined,
+            [undefined, 'Category', 'Period', 'Revenue (SUM)', 'Revenue (AVG)'],
+            [undefined, 'A', 'January', 10, 5],
+            [undefined, 'A', 'February', 20, 8],
+        ]);
     });
 });

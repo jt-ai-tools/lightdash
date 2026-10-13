@@ -31,13 +31,14 @@ export const TooltipSortConfig: FC = () => {
     };
 
     return (
-        <Group spacing="xs">
+        <Group gap="xs">
             <Config.Label>Sort by</Config.Label>
             <Select
                 data={TOOLTIP_SORT_OPTIONS}
                 value={tooltipSort ?? TooltipSortByOptions.DEFAULT}
                 onChange={handleChange}
                 w={160}
+                size="xs"
             />
         </Group>
     );

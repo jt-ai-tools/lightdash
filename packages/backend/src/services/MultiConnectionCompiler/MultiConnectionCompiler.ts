@@ -1,0 +1,599 @@
+import {
+    getErrorMessage,
+    getModelsFromManifest,
+    isExploreError,
+    NotFoundError,
+    ParameterError,
+    type CompilationHistoryReport,
+    type CreateWarehouseCredentials,
+    type DbtManifest,
+    type Explore,
+    type ExploreError,
+    type SupportedDbtVersions,
+    type WarehouseCatalog,
+} from '@lightdash/common';
+import { promisify } from 'node:util';
+import { gzip } from 'node:zlib';
+import { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
+import { DbtSourceError } from '../../dbt/DbtSourceError';
+import Logger from '../../logging/logger';
+import { type ProjectDbtSourcesModel } from '../../models/ProjectDbtSourcesModel';
+import {
+    type BoundExplore,
+    type MultiConnectionCarry,
+    type ProjectModel,
+} from '../../models/ProjectModel/ProjectModel';
+import { type WarehouseConnectionCompileModel } from '../../models/WarehouseConnectionCompileModel/WarehouseConnectionCompileModel';
+import {
+    ManifestCollisionError,
+    mergeCompileGroupManifests,
+    planCompileGroups,
+    type CompilableDbtSource,
+    type CompileGroupPlan,
+    type SourceManifest,
+} from '../../projectAdapters/CompileGroup';
+import { DbtManifestProjectAdapter } from '../../projectAdapters/dbtManifestProjectAdapter';
+import { type CachedWarehouse, type TrackingParams } from '../../types';
+import { projectMergedManifest } from '../ProjectService/projectMergedManifest';
+import { type ConnectionContext } from '../WarehouseClientFactory/ConnectionContext';
+import {
+    type ScopedWarehouseConnection,
+    type WarehouseClientFactory,
+} from '../WarehouseClientFactory/WarehouseClientFactory';
+
+const gzipAsync = promisify(gzip);
+
+export const withConnectionWarnings = (
+    report: CompilationHistoryReport,
+    warnings: string[],
+): CompilationHistoryReport =>
+    warnings.length === 0
+        ? report
+        : { ...report, connectionWarnings: warnings };
+
+export type FetchSourceManifest = (
+    source: CompilableDbtSource,
+    warehouseCredentials: CreateWarehouseCredentials,
+    connection: ScopedWarehouseConnection,
+) => Promise<{ manifest: DbtManifest; selectedModelIds?: string[] }>;
+
+export type LoadExtraConnectionCredentials = (
+    warehouseConnectionUuid: string,
+) => Promise<CreateWarehouseCredentials>;
+
+export type PrimaryCompileInput = {
+    connection: ScopedWarehouseConnection;
+    manifest: DbtManifest;
+    selectedModelIds?: string[];
+    dbtProjectDir: string | undefined;
+    warehouseCredentials: CreateWarehouseCredentials;
+    cachedWarehouse: CachedWarehouse;
+};
+
+export type MultiConnectionSave = {
+    exploreStream: AsyncIterable<Explore | ExploreError>;
+    bindingOf: (exploreName: string) => string | null;
+    carry: MultiConnectionCarry;
+    persistArtifacts: () => Promise<void>;
+};
+
+export type MultiConnectionCompilation = MultiConnectionSave & {
+    originalAdapter: DbtManifestProjectAdapter;
+    warnings: string[];
+};
+
+type CompiledExtraGroup = {
+    plan: CompileGroupPlan & { warehouseConnectionUuid: string };
+    explores: (Explore | ExploreError)[];
+    manifest: Buffer;
+    catalog: WarehouseCatalog | null;
+};
+
+type MultiConnectionCompilerArguments = {
+    warehouseClientFactory: WarehouseClientFactory;
+    projectModel: ProjectModel;
+    projectDbtSourcesModel: ProjectDbtSourcesModel;
+    warehouseConnectionCompileModel: WarehouseConnectionCompileModel;
+};
+
+const stampedError = (
+    explore: Explore | ExploreError,
+    dbtSourceUuid: string,
+): Explore | ExploreError => {
+    const stamped: (Explore | ExploreError) & { dbtSourceUuid: string } = {
+        ...explore,
+        dbtSourceUuid,
+    };
+    return stamped;
+};
+
+const modelSources = (manifest: DbtManifest): ReadonlyMap<string, string> =>
+    new Map(
+        getModelsFromManifest(manifest).flatMap((model) =>
+            model.lightdash_source_uuid
+                ? [[model.name, model.lightdash_source_uuid] as const]
+                : [],
+        ),
+    );
+
+const withErrorSource = (
+    explore: Explore | ExploreError,
+    sources: ReadonlyMap<string, string>,
+): Explore | ExploreError => {
+    const dbtSourceUuid = sources.get(explore.name);
+    return isExploreError(explore) && dbtSourceUuid !== undefined
+        ? stampedError(explore, dbtSourceUuid)
+        : explore;
+};
+
+export class MultiConnectionCompiler {
+    private readonly projectModel: ProjectModel;
+
+    private readonly projectDbtSourcesModel: ProjectDbtSourcesModel;
+
+    private readonly warehouseConnectionCompileModel: WarehouseConnectionCompileModel;
+
+    private readonly warehouseClientFactory: WarehouseClientFactory;
+
+    constructor(args: MultiConnectionCompilerArguments) {
+        this.projectModel = args.projectModel;
+        this.warehouseClientFactory = args.warehouseClientFactory;
+        this.projectDbtSourcesModel = args.projectDbtSourcesModel;
+        this.warehouseConnectionCompileModel =
+            args.warehouseConnectionCompileModel;
+    }
+
+    async planGroups(
+        projectUuid: string,
+        includeUnboundSources: boolean,
+    ): Promise<CompileGroupPlan[]> {
+        const [connections, sources] = await Promise.all([
+            this.warehouseConnectionCompileModel.getCompileConnections(
+                projectUuid,
+            ),
+            this.projectDbtSourcesModel.getSourcesWithBindings(projectUuid),
+        ]);
+        return planCompileGroups({
+            connections,
+            sources,
+            includeUnboundSources,
+        });
+    }
+
+    private static async fetchSourceManifests(
+        sources: CompilableDbtSource[],
+        warehouseCredentials: CreateWarehouseCredentials,
+        connection: ScopedWarehouseConnection,
+        fetchSourceManifest: FetchSourceManifest,
+    ): Promise<SourceManifest[]> {
+        return Promise.all(
+            sources.map(async (source) => {
+                const repoSuffix =
+                    'repository' in source.dbtConnection &&
+                    source.dbtConnection.repository
+                        ? ` (${source.dbtConnection.repository})`
+                        : '';
+                try {
+                    const { manifest, selectedModelIds } =
+                        await fetchSourceManifest(
+                            source,
+                            warehouseCredentials,
+                            connection,
+                        );
+                    return {
+                        name: source.name,
+                        precedence: source.precedence,
+                        dbtSourceUuid: source.projectDbtSourceUuid,
+                        manifest,
+                        selectedModelIds,
+                    };
+                } catch (error) {
+                    throw new DbtSourceError(
+                        `Failed to load dbt source "${source.name}"${repoSuffix}: ${getErrorMessage(
+                            error,
+                        )}`,
+                        error,
+                    );
+                }
+            }),
+        );
+    }
+
+    private async compileExtraGroup({
+        projectUuid,
+        context,
+        plan,
+        dbtVersion,
+        fetchSourceManifest,
+        loadExtraCredentials,
+        trackingParams,
+        warnings,
+    }: {
+        projectUuid: string;
+        context: ConnectionContext;
+        plan: CompileGroupPlan & { warehouseConnectionUuid: string };
+        dbtVersion: SupportedDbtVersions;
+        fetchSourceManifest: FetchSourceManifest;
+        loadExtraCredentials: LoadExtraConnectionCredentials;
+        trackingParams: TrackingParams | undefined;
+        warnings: string[];
+    }): Promise<CompiledExtraGroup> {
+        const credentials = await loadExtraCredentials(
+            plan.warehouseConnectionUuid,
+        );
+        return this.warehouseClientFactory.withWarehouseClient(
+            {
+                kind: 'compile',
+                projectUuid,
+                credentials,
+                compileGroup: {
+                    listedDatabases: plan.listedDatabases,
+                    onSkippedDatabase: (database) => {
+                        const warning = `Connection "${plan.connectionName}" skipped listed database "${database}": it does not exist.`;
+                        if (!warnings.includes(warning)) warnings.push(warning);
+                    },
+                },
+            },
+            context,
+            async (connection) => {
+                const { warehouseClient } = connection;
+                const warehouseCredentials = connection.connectionCredentials;
+                await warehouseClient.test();
+                const sourceManifests =
+                    await MultiConnectionCompiler.fetchSourceManifests(
+                        plan.sources,
+                        warehouseCredentials,
+                        connection,
+                        fetchSourceManifest,
+                    );
+                const { manifest, selectedModelIds } =
+                    mergeCompileGroupManifests(sourceManifests);
+                let catalog: WarehouseCatalog | null = null;
+                const adapter = new DbtManifestProjectAdapter({
+                    parsedManifest: manifest,
+                    warehouseClient,
+                    cachedWarehouse: {
+                        warehouseCatalog:
+                            await this.warehouseConnectionCompileModel.getCatalogCache(
+                                projectUuid,
+                                plan.warehouseConnectionUuid,
+                            ),
+                        onWarehouseCatalogChange: async (changed) => {
+                            catalog = changed;
+                        },
+                    },
+                    dbtVersion,
+                    selectedModelIds,
+                });
+                const sources = modelSources(manifest);
+                const explores = (
+                    await adapter.compileAllExplores(
+                        trackingParams,
+                        false,
+                        true,
+                    )
+                ).map((explore) => withErrorSource(explore, sources));
+                return {
+                    plan,
+                    explores,
+                    manifest: await gzipAsync(
+                        JSON.stringify(projectMergedManifest(manifest)),
+                    ),
+                    catalog,
+                };
+            },
+        );
+    }
+
+    private static async *groupExplores(
+        original: AsyncIterable<Explore | ExploreError>,
+        originalSources: ReadonlyMap<string, string>,
+        originalConnectionName: string,
+        extraGroups: CompiledExtraGroup[],
+    ): AsyncIterable<Explore | ExploreError> {
+        const producers = new Map<string, string>();
+        const claim = (name: string, connectionName: string) => {
+            const producer = producers.get(name);
+            if (producer !== undefined && producer !== connectionName) {
+                throw new ParameterError(
+                    `Explore "${name}" is produced by both connection "${producer}" and connection "${connectionName}". Explore names must be unique across connections.`,
+                );
+            }
+            producers.set(name, connectionName);
+        };
+        extraGroups.forEach((group) =>
+            group.explores.forEach((explore) =>
+                claim(explore.name, group.plan.connectionName),
+            ),
+        );
+        for await (const explore of original) {
+            claim(explore.name, originalConnectionName);
+            yield withErrorSource(explore, originalSources);
+        }
+        for (const group of extraGroups) {
+            yield* group.explores;
+        }
+    }
+
+    async compile({
+        projectUuid,
+        context,
+        primary,
+        dbtVersion,
+        includeUnboundSources,
+        fetchSourceManifest,
+        loadExtraCredentials,
+        trackingParams,
+        analytics,
+    }: {
+        projectUuid: string;
+        context: ConnectionContext;
+        primary: PrimaryCompileInput;
+        dbtVersion: SupportedDbtVersions;
+        includeUnboundSources: boolean;
+        fetchSourceManifest: FetchSourceManifest;
+        loadExtraCredentials: LoadExtraConnectionCredentials;
+        trackingParams?: TrackingParams;
+        analytics?: LightdashAnalytics;
+    }): Promise<MultiConnectionCompilation> {
+        const [originalPlan, ...extraPlans] = await this.planGroups(
+            projectUuid,
+            includeUnboundSources,
+        );
+        const identity =
+            await this.projectModel.getDbtSourceIdentity(projectUuid);
+        const warnings: string[] = [];
+
+        const originalSources = [
+            {
+                name: identity.dbtSourceName,
+                precedence: 0,
+                dbtSourceUuid: identity.dbtSourceUuid,
+                manifest: primary.manifest,
+                selectedModelIds: primary.selectedModelIds,
+            },
+            ...(await MultiConnectionCompiler.fetchSourceManifests(
+                originalPlan.sources,
+                primary.warehouseCredentials,
+                primary.connection,
+                fetchSourceManifest,
+            )),
+        ];
+        const originalMerged = mergeCompileGroupManifests(originalSources);
+        const originalAdapter = new DbtManifestProjectAdapter({
+            parsedManifest: originalMerged.manifest,
+            warehouseClient: primary.connection.deriveClient(
+                primary.warehouseCredentials,
+                {
+                    compileGroup: {
+                        listedDatabases: originalPlan.listedDatabases,
+                        onSkippedDatabase: (database) => {
+                            warnings.push(
+                                `Connection "${originalPlan.connectionName}" skipped listed database "${database}": it does not exist.`,
+                            );
+                        },
+                    },
+                },
+            ),
+            cachedWarehouse: primary.cachedWarehouse,
+            dbtVersion,
+            analytics,
+            dbtProjectDir: primary.dbtProjectDir,
+            selectedModelIds: originalMerged.selectedModelIds,
+        });
+        const originalStream = await originalAdapter.prepareExploreStream(
+            trackingParams,
+            false,
+            true,
+        );
+
+        const compiledExtraGroups: CompiledExtraGroup[] = [];
+        const failedConnectionUuids: string[] = [];
+        await extraPlans.reduce(async (previous, plan) => {
+            await previous;
+            const extraPlan = plan as CompileGroupPlan & {
+                warehouseConnectionUuid: string;
+            };
+            try {
+                compiledExtraGroups.push(
+                    await this.compileExtraGroup({
+                        projectUuid,
+                        context,
+                        plan: extraPlan,
+                        dbtVersion,
+                        fetchSourceManifest,
+                        loadExtraCredentials,
+                        trackingParams,
+                        warnings,
+                    }),
+                );
+            } catch (error) {
+                if (error instanceof ManifestCollisionError) throw error;
+                failedConnectionUuids.push(extraPlan.warehouseConnectionUuid);
+                if (analytics) {
+                    try {
+                        const organizationId =
+                            trackingParams?.organizationUuid ??
+                            (await this.projectModel.getSummary(projectUuid))
+                                .organizationUuid;
+                        analytics.track({
+                            event: 'warehouse_connection.compile_warning',
+                            ...(trackingParams?.userUuid
+                                ? { userId: trackingParams.userUuid }
+                                : {
+                                      anonymousId:
+                                          LightdashAnalytics.anonymousId,
+                                  }),
+                            properties: {
+                                organizationId,
+                                projectId: projectUuid,
+                                warehouseConnectionId:
+                                    extraPlan.warehouseConnectionUuid,
+                                connectionKind: 'extra',
+                                warehouseType:
+                                    primary.warehouseCredentials.type,
+                                connectionCount: 1 + extraPlans.length,
+                                credentialSource: null,
+                                reason: 'extra_connection_failed',
+                                outcome: 'previous_explores_kept',
+                            },
+                        });
+                    } catch {
+                        Logger.warn(
+                            'Failed to track extra connection compile warning',
+                        );
+                    }
+                }
+                const warning = `Connection "${
+                    extraPlan.connectionName
+                }" failed to compile, so its previous explores are kept: ${getErrorMessage(
+                    error,
+                )}`;
+                warnings.push(warning);
+                Logger.warn(
+                    `dbt.compile.connectionCarriedForward projectUuid=${projectUuid} warehouseConnectionUuid=${extraPlan.warehouseConnectionUuid}: ${warning}`,
+                );
+            }
+        }, Promise.resolve());
+
+        const extraBindings = new Map(
+            compiledExtraGroups.flatMap((group) =>
+                group.explores.map(
+                    (explore) =>
+                        [
+                            explore.name,
+                            group.plan.warehouseConnectionUuid,
+                        ] as const,
+                ),
+            ),
+        );
+        const originalManifest =
+            originalPlan.sources.length > 0
+                ? await gzipAsync(
+                      JSON.stringify(
+                          projectMergedManifest(originalMerged.manifest),
+                      ),
+                  )
+                : null;
+
+        return {
+            originalAdapter,
+            exploreStream: MultiConnectionCompiler.groupExplores(
+                originalStream,
+                modelSources(originalMerged.manifest),
+                originalPlan.connectionName,
+                compiledExtraGroups,
+            ),
+            bindingOf: (exploreName) => extraBindings.get(exploreName) ?? null,
+            carry: {
+                kind: 'connections',
+                warehouseConnectionUuids: failedConnectionUuids,
+            },
+            warnings,
+            persistArtifacts: async () => {
+                if (originalManifest === null) {
+                    await this.projectModel.deleteMergedManifest(projectUuid);
+                } else {
+                    await this.projectModel.upsertMergedManifest(
+                        projectUuid,
+                        originalManifest,
+                    );
+                }
+                await Promise.all(
+                    compiledExtraGroups.map((group) =>
+                        this.warehouseConnectionCompileModel.saveCompileArtifacts(
+                            projectUuid,
+                            group.plan.warehouseConnectionUuid,
+                            {
+                                manifest: group.manifest,
+                                catalog: group.catalog,
+                            },
+                        ),
+                    ),
+                );
+            },
+        };
+    }
+
+    async save(
+        projectUuid: string,
+        compilation: MultiConnectionSave,
+    ): Promise<{ cachedExploreUuids: string[] }> {
+        const saved = await this.projectModel.saveMultiConnectionExplores(
+            projectUuid,
+            (async function* boundExplores(): AsyncIterable<BoundExplore> {
+                for await (const explore of compilation.exploreStream) {
+                    yield {
+                        explore,
+                        warehouseConnectionUuid: compilation.bindingOf(
+                            explore.name,
+                        ),
+                    };
+                }
+            })(),
+            compilation.carry,
+        );
+        await compilation.persistArtifacts();
+        return saved;
+    }
+
+    async prepareSourceDeploy({
+        projectUuid,
+        projectDbtSourceUuid,
+        explores,
+    }: {
+        projectUuid: string;
+        projectDbtSourceUuid: string | null;
+        explores: (Explore | ExploreError)[];
+    }): Promise<MultiConnectionSave> {
+        const identity =
+            await this.projectModel.getDbtSourceIdentity(projectUuid);
+        const dbtSourceUuid = projectDbtSourceUuid ?? identity.dbtSourceUuid;
+        let warehouseConnectionUuid: string | null = null;
+        if (dbtSourceUuid !== identity.dbtSourceUuid) {
+            const source = (
+                await this.projectDbtSourcesModel.getSourcesWithBindings(
+                    projectUuid,
+                )
+            ).find(
+                (candidate) => candidate.projectDbtSourceUuid === dbtSourceUuid,
+            );
+            if (!source) {
+                throw new NotFoundError(
+                    `Cannot find dbt source with id: ${dbtSourceUuid}`,
+                );
+            }
+            warehouseConnectionUuid = source.warehouseConnectionUuid;
+        }
+        const withSourceIdentity = (
+            explore: Explore | ExploreError,
+        ): Explore | ExploreError =>
+            explore.tables
+                ? {
+                      ...explore,
+                      tables: Object.fromEntries(
+                          Object.entries(explore.tables).map(
+                              ([name, table]) => [
+                                  name,
+                                  { ...table, dbtSourceUuid },
+                              ],
+                          ),
+                      ),
+                  }
+                : stampedError(explore, dbtSourceUuid);
+        return {
+            exploreStream: (async function* deployedExplores() {
+                for (const explore of explores) {
+                    yield withSourceIdentity(explore);
+                }
+            })(),
+            bindingOf: () => warehouseConnectionUuid,
+            carry: {
+                kind: 'otherDbtSources',
+                dbtSourceUuid,
+                warehouseConnectionUuid,
+            },
+            persistArtifacts: async () => {},
+        };
+    }
+}

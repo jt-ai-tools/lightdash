@@ -3,10 +3,15 @@ import {
     isNumericItem,
     MapChartLocation,
     MapChartType,
+    MapHexbinAggregation,
+    MapHexbinSizingMode,
+    MapHexbinValueBasis,
     MapTileBackground,
+    type ItemsMap,
     type MapFieldConfig,
+    type ResultRow,
 } from '@lightdash/common';
-import { useMantineTheme } from '@mantine/core';
+import { useComputedColorScheme, useMantineTheme } from '@mantine/core';
 import { useMemo } from 'react';
 import { isMapVisualizationConfig } from '../../components/LightdashVisualization/types';
 import { useVisualizationContext } from '../../components/LightdashVisualization/useVisualizationContext';
@@ -43,6 +48,7 @@ export type TooltipFieldInfo = {
 export type TileConfig = {
     url: string | null;
     attribution: string;
+    isProxied?: boolean;
 };
 
 export type LeafletMapConfig = {
@@ -76,7 +82,19 @@ export type LeafletMapConfig = {
         blur: number;
         opacity: number;
     };
+    hexbinConfig: {
+        opacity: number;
+        sizingMode: MapHexbinSizingMode;
+        /** Resolution to use when sizingMode === FIXED. */
+        fixedResolution: number;
+        valueBasis: MapHexbinValueBasis;
+        aggregation: MapHexbinAggregation;
+        showEmptyBins: boolean;
+        /** Hex6 or hex8 color string for empty-bin fill, or null = outline only. */
+        emptyBinColor: string | null;
+    };
     tile: TileConfig;
+    tileBackground: MapTileBackground;
     backgroundColor: string | null;
     // Color for regions with no matching data (area maps)
     noDataColor: string;
@@ -152,12 +170,14 @@ const getMapZoom = (mapType: MapChartLocation): number => {
     }
 };
 
-const getTileConfig = (
+const CARTO_ATTRIBUTION =
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
+
+export const getTileConfig = (
     background: MapTileBackground | undefined,
 ): TileConfig => {
     switch (background) {
         case MapTileBackground.NONE:
-            // No base map tiles. Useful for overlays-only views or custom rendering.
             return {
                 url: null,
                 attribution: '',
@@ -173,11 +193,28 @@ const getTileConfig = (
             };
 
         case MapTileBackground.LIGHT:
-        default:
+            return {
+                url: '/map-tiles/light/{z}/{x}/{y}.png',
+                isProxied: true,
+                attribution: CARTO_ATTRIBUTION,
+            };
+
+        case MapTileBackground.DARK:
+            return {
+                url: '/map-tiles/dark/{z}/{x}/{y}.png',
+                isProxied: true,
+                attribution: CARTO_ATTRIBUTION,
+            };
+
+        case MapTileBackground.VOYAGER:
+            return {
+                url: '/map-tiles/voyager/{z}/{x}/{y}.png',
+                isProxied: true,
+                attribution: CARTO_ATTRIBUTION,
+            };
+
         case MapTileBackground.OPENSTREETMAP:
-            // OpenStreetMap standard tiles.
-            // Community-run, attribution-only, fair-use. Suitable for low–moderate traffic.
-            // Not intended for heavy commercial usage or guaranteed SLA.
+        default:
             return {
                 url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
                 attribution:
@@ -186,12 +223,268 @@ const getTileConfig = (
     }
 };
 
+type LeafletSeriesAndLegendArgs = {
+    isLatLong: boolean;
+    resultsData: { rows?: ResultRow[] } | null | undefined;
+    itemsMap: ItemsMap | undefined;
+    latitudeFieldId: string | undefined;
+    longitudeFieldId: string | undefined;
+    locationFieldId: string | undefined;
+    valueFieldId: string | undefined;
+    sizeFieldId: string | undefined;
+    fieldConfig: Record<string, MapFieldConfig> | undefined;
+};
+
+type LeafletSeriesAndLegend = {
+    scatterData: ScatterPoint[] | null;
+    regionData: RegionData[] | null;
+    valueRange: LeafletMapConfig['valueRange'];
+    sizeRange: LeafletMapConfig['sizeRange'];
+    valueFieldLabel: string | null;
+    sizeFieldLabel: string | null;
+    isCategoricalColor: boolean;
+    uniqueStringValues: string[] | null;
+};
+
+const computeLeafletSeriesAndLegend = ({
+    isLatLong,
+    resultsData,
+    itemsMap,
+    latitudeFieldId,
+    longitudeFieldId,
+    locationFieldId,
+    valueFieldId,
+    sizeFieldId,
+    fieldConfig,
+}: LeafletSeriesAndLegendArgs): LeafletSeriesAndLegend => {
+    let scatterData: ScatterPoint[] | null = null;
+    let regionData: RegionData[] | null = null;
+
+    if (resultsData?.rows && resultsData.rows.length > 0) {
+        if (isLatLong) {
+            // Scatter plot mode
+            const mappedData = resultsData.rows
+                .map((row) => {
+                    if (!latitudeFieldId || !longitudeFieldId) return null;
+
+                    const lat = Number(row[latitudeFieldId]?.value.raw);
+                    const lon = Number(row[longitudeFieldId]?.value.raw);
+
+                    // Handle value field - support both numeric and non-numeric values
+                    const rawValue = valueFieldId
+                        ? row[valueFieldId]?.value.raw
+                        : 1;
+                    const numericValue = Number(rawValue);
+                    // Check for null/undefined/empty explicitly since Number(null) = 0, Number('') = 0
+                    const isNumeric =
+                        rawValue !== null &&
+                        rawValue !== undefined &&
+                        rawValue !== '' &&
+                        !isNaN(numericValue);
+                    const value = isNumeric ? numericValue : null;
+                    const displayValue = valueFieldId
+                        ? (row[valueFieldId]?.value.formatted ??
+                          row[valueFieldId]?.value.raw ??
+                          rawValue)
+                        : 1;
+
+                    // Use sizeFieldId if set, otherwise use constant size
+                    const sizeValue = sizeFieldId
+                        ? Number(row[sizeFieldId]?.value.raw)
+                        : 1;
+
+                    if (isNaN(lat) || isNaN(lon)) return null;
+
+                    return {
+                        lat,
+                        lon,
+                        value,
+                        stringValue:
+                            !isNumeric &&
+                            rawValue !== null &&
+                            rawValue !== undefined &&
+                            rawValue !== ''
+                                ? String(rawValue)
+                                : null,
+                        displayValue,
+                        sizeValue: isNaN(sizeValue) ? 1 : sizeValue,
+                        rowData: row as Record<string, any>,
+                    };
+                })
+                .filter((d): d is NonNullable<typeof d> => d !== null);
+            scatterData = mappedData;
+        } else {
+            // Choropleth mode
+            regionData = resultsData.rows
+                .map((row) => {
+                    if (!locationFieldId) return null;
+
+                    const locationName = String(
+                        row[locationFieldId]?.value.raw || '',
+                    );
+                    const rawRegionValue = valueFieldId
+                        ? row[valueFieldId]?.value.raw
+                        : 1;
+                    const numericRegionValue = Number(rawRegionValue);
+                    const isRegionValueNumeric =
+                        rawRegionValue !== null &&
+                        rawRegionValue !== undefined &&
+                        rawRegionValue !== '' &&
+                        !isNaN(numericRegionValue);
+
+                    if (!locationName) return null;
+
+                    return {
+                        name: locationName,
+                        value: isRegionValueNumeric ? numericRegionValue : 0,
+                        stringValue:
+                            !isRegionValueNumeric &&
+                            rawRegionValue !== null &&
+                            rawRegionValue !== undefined &&
+                            rawRegionValue !== ''
+                                ? String(rawRegionValue)
+                                : null,
+                        rowData: row as Record<string, any>,
+                    };
+                })
+                .filter((d): d is RegionData => d !== null);
+        }
+    }
+
+    // Calculate value range for legend (includes both raw and formatted values)
+    let valueRange: LeafletMapConfig['valueRange'] = null;
+    let sizeRange: LeafletMapConfig['sizeRange'] = null;
+    if (scatterData && scatterData.length > 0) {
+        // Single pass to find min/max for both value and size
+        let minPoint: (ScatterPoint & { value: number }) | null = null;
+        let maxPoint: (ScatterPoint & { value: number }) | null = null;
+        let minSizePoint = scatterData[0];
+        let maxSizePoint = scatterData[0];
+
+        for (const point of scatterData) {
+            // Track size range (keep the point reference for formatted values)
+            if (point.sizeValue < minSizePoint.sizeValue) minSizePoint = point;
+            if (point.sizeValue > maxSizePoint.sizeValue) maxSizePoint = point;
+
+            // Track value range (only for numeric values)
+            if (point.value !== null) {
+                if (!minPoint || point.value < minPoint.value) {
+                    minPoint = point as ScatterPoint & { value: number };
+                }
+                if (!maxPoint || point.value > maxPoint.value) {
+                    maxPoint = point as ScatterPoint & { value: number };
+                }
+            }
+        }
+
+        // Only set valueRange when valueFieldId is set, otherwise all points
+        // have displayValue: 1 and the legend would show a meaningless "1 - 1" range
+        if (minPoint && maxPoint && valueFieldId) {
+            valueRange = {
+                min: Math.min(minPoint.value, 0),
+                max: Math.max(maxPoint.value, 1),
+                formattedMin: String(minPoint.displayValue),
+                formattedMax: String(maxPoint.displayValue),
+            };
+        }
+
+        // Only set sizeRange when sizeFieldId is set
+        if (sizeFieldId) {
+            const formattedMinSize =
+                minSizePoint.rowData[sizeFieldId]?.value?.formatted ??
+                String(minSizePoint.sizeValue);
+            const formattedMaxSize =
+                maxSizePoint.rowData[sizeFieldId]?.value?.formatted ??
+                String(maxSizePoint.sizeValue);
+            sizeRange = {
+                min: Math.min(minSizePoint.sizeValue, 0),
+                max: Math.max(maxSizePoint.sizeValue, 1),
+                formattedMin: formattedMinSize,
+                formattedMax: formattedMaxSize,
+            };
+        }
+    } else if (regionData && regionData.length > 0 && valueFieldId) {
+        // Single pass to find min/max values and their regions
+        let minRegion = regionData[0];
+        let maxRegion = regionData[0];
+        for (const region of regionData) {
+            if (region.value < minRegion.value) minRegion = region;
+            if (region.value > maxRegion.value) maxRegion = region;
+        }
+        valueRange = {
+            min: minRegion.value,
+            max: maxRegion.value,
+            formattedMin:
+                minRegion.rowData[valueFieldId]?.value?.formatted ??
+                String(minRegion.value),
+            formattedMax:
+                maxRegion.rowData[valueFieldId]?.value?.formatted ??
+                String(maxRegion.value),
+        };
+    }
+
+    // Get value field label for legend (use custom label from fieldConfig if set)
+    let valueFieldLabel: string | null = null;
+    if (valueFieldId && itemsMap?.[valueFieldId]) {
+        const customLabel = fieldConfig?.[valueFieldId]?.label;
+        if (customLabel) {
+            valueFieldLabel = customLabel;
+        } else {
+            valueFieldLabel = getItemLabelWithoutTableName(
+                itemsMap[valueFieldId],
+            );
+        }
+    }
+
+    // Get size field label for legend (use custom label from fieldConfig if set)
+    let sizeFieldLabel: string | null = null;
+    if (sizeFieldId && itemsMap?.[sizeFieldId]) {
+        const customLabel = fieldConfig?.[sizeFieldId]?.label;
+        if (customLabel) {
+            sizeFieldLabel = customLabel;
+        } else {
+            sizeFieldLabel = getItemLabelWithoutTableName(
+                itemsMap[sizeFieldId],
+            );
+        }
+    }
+
+    // Determine if color field is categorical (non-numeric)
+    const valueItem = valueFieldId ? itemsMap?.[valueFieldId] : undefined;
+    const isCategoricalColor = !!valueItem && !isNumericItem(valueItem);
+
+    // Compute all unique string values for categorical coloring
+    let uniqueStringValues: string[] | null = null;
+    if (isCategoricalColor) {
+        const seen = new Set<string>();
+        const data = scatterData ?? regionData ?? [];
+        for (const point of data) {
+            if (point.stringValue && !seen.has(point.stringValue)) {
+                seen.add(point.stringValue);
+            }
+        }
+        uniqueStringValues = Array.from(seen).sort();
+    }
+
+    return {
+        scatterData,
+        regionData,
+        valueRange,
+        sizeRange,
+        valueFieldLabel,
+        sizeFieldLabel,
+        isCategoricalColor,
+        uniqueStringValues,
+    };
+};
+
 const useLeafletMapConfig = ({
     isInDashboard: _isInDashboard,
 }: Args): LeafletMapConfig | null => {
     const { visualizationConfig, resultsData, itemsMap } =
         useVisualizationContext();
     const theme = useMantineTheme();
+    const colorScheme = useComputedColorScheme();
 
     const chartConfig = useMemo(() => {
         if (!isMapVisualizationConfig(visualizationConfig)) return null;
@@ -218,7 +511,9 @@ const useLeafletMapConfig = ({
             maxBubbleSize,
             sizeFieldId,
             heatmapConfig,
+            hexbinConfig,
             tileBackground,
+            darkModeTileBackground,
             backgroundColor,
             noDataColor,
             dataLayerOpacity,
@@ -266,103 +561,29 @@ const useLeafletMapConfig = ({
         const isLatLong =
             !locationType ||
             locationType === MapChartType.SCATTER ||
-            locationType === MapChartType.HEATMAP;
+            locationType === MapChartType.HEATMAP ||
+            locationType === MapChartType.HEXBIN;
 
-        let scatterData: ScatterPoint[] | null = null;
-        let regionData: RegionData[] | null = null;
-
-        if (resultsData?.rows && resultsData.rows.length > 0) {
-            if (isLatLong) {
-                // Scatter plot mode
-                const mappedData = resultsData.rows
-                    .map((row) => {
-                        if (!latitudeFieldId || !longitudeFieldId) return null;
-
-                        const lat = Number(row[latitudeFieldId]?.value.raw);
-                        const lon = Number(row[longitudeFieldId]?.value.raw);
-
-                        // Handle value field - support both numeric and non-numeric values
-                        const rawValue = valueFieldId
-                            ? row[valueFieldId]?.value.raw
-                            : 1;
-                        const numericValue = Number(rawValue);
-                        // Check for null/undefined/empty explicitly since Number(null) = 0, Number('') = 0
-                        const isNumeric =
-                            rawValue !== null &&
-                            rawValue !== undefined &&
-                            rawValue !== '' &&
-                            !isNaN(numericValue);
-                        const value = isNumeric ? numericValue : null;
-                        const displayValue = valueFieldId
-                            ? (row[valueFieldId]?.value.formatted ??
-                              row[valueFieldId]?.value.raw ??
-                              rawValue)
-                            : 1;
-
-                        // Use sizeFieldId if set, otherwise use constant size
-                        const sizeValue = sizeFieldId
-                            ? Number(row[sizeFieldId]?.value.raw)
-                            : 1;
-
-                        if (isNaN(lat) || isNaN(lon)) return null;
-
-                        return {
-                            lat,
-                            lon,
-                            value,
-                            stringValue:
-                                !isNumeric &&
-                                rawValue !== null &&
-                                rawValue !== undefined &&
-                                rawValue !== ''
-                                    ? String(rawValue)
-                                    : null,
-                            displayValue,
-                            sizeValue: isNaN(sizeValue) ? 1 : sizeValue,
-                            rowData: row as Record<string, any>,
-                        };
-                    })
-                    .filter((d): d is NonNullable<typeof d> => d !== null);
-                scatterData = mappedData;
-            } else {
-                // Choropleth mode
-                regionData = resultsData.rows
-                    .map((row) => {
-                        if (!locationFieldId) return null;
-
-                        const locationName = String(
-                            row[locationFieldId]?.value.raw || '',
-                        );
-                        const rawRegionValue = valueFieldId
-                            ? row[valueFieldId]?.value.raw
-                            : 1;
-                        const numericRegionValue = Number(rawRegionValue);
-                        const isRegionValueNumeric =
-                            rawRegionValue !== null &&
-                            rawRegionValue !== undefined &&
-                            rawRegionValue !== '' &&
-                            !isNaN(numericRegionValue);
-
-                        if (!locationName) return null;
-
-                        return {
-                            name: locationName,
-                            value: isRegionValueNumeric
-                                ? numericRegionValue
-                                : 0,
-                            stringValue:
-                                !isRegionValueNumeric &&
-                                rawRegionValue !== null &&
-                                rawRegionValue !== undefined &&
-                                rawRegionValue !== ''
-                                    ? String(rawRegionValue)
-                                    : null,
-                            rowData: row as Record<string, any>,
-                        };
-                    })
-                    .filter((d): d is RegionData => d !== null);
-            }
-        }
+        const {
+            scatterData,
+            regionData,
+            valueRange,
+            sizeRange,
+            valueFieldLabel,
+            sizeFieldLabel,
+            isCategoricalColor,
+            uniqueStringValues,
+        } = computeLeafletSeriesAndLegend({
+            isLatLong,
+            resultsData,
+            itemsMap,
+            latitudeFieldId,
+            longitudeFieldId,
+            locationFieldId,
+            valueFieldId,
+            sizeFieldId,
+            fieldConfig,
+        });
 
         // Calculate extent - use saved values if provided, otherwise defaults based on map type
         const hasSavedExtent =
@@ -373,133 +594,6 @@ const useLeafletMapConfig = ({
             lng: hasSavedExtent ? defaultCenterLon : defaultCenter[1],
             zoom: defaultZoom ?? getMapZoom(mapType),
         };
-
-        // Calculate value range for legend (includes both raw and formatted values)
-        let valueRange: {
-            min: number;
-            max: number;
-            formattedMin: string;
-            formattedMax: string;
-        } | null = null;
-        let sizeRange: {
-            min: number;
-            max: number;
-            formattedMin: string;
-            formattedMax: string;
-        } | null = null;
-        if (scatterData && scatterData.length > 0) {
-            // Single pass to find min/max for both value and size
-            let minPoint: (ScatterPoint & { value: number }) | null = null;
-            let maxPoint: (ScatterPoint & { value: number }) | null = null;
-            let minSizePoint = scatterData[0];
-            let maxSizePoint = scatterData[0];
-
-            for (const point of scatterData) {
-                // Track size range (keep the point reference for formatted values)
-                if (point.sizeValue < minSizePoint.sizeValue)
-                    minSizePoint = point;
-                if (point.sizeValue > maxSizePoint.sizeValue)
-                    maxSizePoint = point;
-
-                // Track value range (only for numeric values)
-                if (point.value !== null) {
-                    if (!minPoint || point.value < minPoint.value) {
-                        minPoint = point as ScatterPoint & { value: number };
-                    }
-                    if (!maxPoint || point.value > maxPoint.value) {
-                        maxPoint = point as ScatterPoint & { value: number };
-                    }
-                }
-            }
-
-            // Only set valueRange when valueFieldId is set, otherwise all points
-            // have displayValue: 1 and the legend would show a meaningless "1 - 1" range
-            if (minPoint && maxPoint && valueFieldId) {
-                valueRange = {
-                    min: Math.min(minPoint.value, 0),
-                    max: Math.max(maxPoint.value, 1),
-                    formattedMin: String(minPoint.displayValue),
-                    formattedMax: String(maxPoint.displayValue),
-                };
-            }
-
-            // Only set sizeRange when sizeFieldId is set
-            if (sizeFieldId) {
-                const formattedMinSize =
-                    minSizePoint.rowData[sizeFieldId]?.value?.formatted ??
-                    String(minSizePoint.sizeValue);
-                const formattedMaxSize =
-                    maxSizePoint.rowData[sizeFieldId]?.value?.formatted ??
-                    String(maxSizePoint.sizeValue);
-                sizeRange = {
-                    min: Math.min(minSizePoint.sizeValue, 0),
-                    max: Math.max(maxSizePoint.sizeValue, 1),
-                    formattedMin: formattedMinSize,
-                    formattedMax: formattedMaxSize,
-                };
-            }
-        } else if (regionData && regionData.length > 0 && valueFieldId) {
-            // Single pass to find min/max values and their regions
-            let minRegion = regionData[0];
-            let maxRegion = regionData[0];
-            for (const region of regionData) {
-                if (region.value < minRegion.value) minRegion = region;
-                if (region.value > maxRegion.value) maxRegion = region;
-            }
-            valueRange = {
-                min: minRegion.value,
-                max: maxRegion.value,
-                formattedMin:
-                    minRegion.rowData[valueFieldId]?.value?.formatted ??
-                    String(minRegion.value),
-                formattedMax:
-                    maxRegion.rowData[valueFieldId]?.value?.formatted ??
-                    String(maxRegion.value),
-            };
-        }
-
-        // Get value field label for legend (use custom label from fieldConfig if set)
-        let valueFieldLabel: string | null = null;
-        if (valueFieldId && itemsMap?.[valueFieldId]) {
-            const customLabel = fieldConfig?.[valueFieldId]?.label;
-            if (customLabel) {
-                valueFieldLabel = customLabel;
-            } else {
-                valueFieldLabel = getItemLabelWithoutTableName(
-                    itemsMap[valueFieldId],
-                );
-            }
-        }
-
-        // Get size field label for legend (use custom label from fieldConfig if set)
-        let sizeFieldLabel: string | null = null;
-        if (sizeFieldId && itemsMap?.[sizeFieldId]) {
-            const customLabel = fieldConfig?.[sizeFieldId]?.label;
-            if (customLabel) {
-                sizeFieldLabel = customLabel;
-            } else {
-                sizeFieldLabel = getItemLabelWithoutTableName(
-                    itemsMap[sizeFieldId],
-                );
-            }
-        }
-
-        // Determine if color field is categorical (non-numeric)
-        const valueItem = valueFieldId ? itemsMap?.[valueFieldId] : undefined;
-        const isCategoricalColor = !!valueItem && !isNumericItem(valueItem);
-
-        // Compute all unique string values for categorical coloring
-        let uniqueStringValues: string[] | null = null;
-        if (isCategoricalColor) {
-            const seen = new Set<string>();
-            const data = scatterData ?? regionData ?? [];
-            for (const point of data) {
-                if (point.stringValue && !seen.has(point.stringValue)) {
-                    seen.add(point.stringValue);
-                }
-            }
-            uniqueStringValues = Array.from(seen).sort();
-        }
 
         const colorOverrides = configColorOverrides ?? {};
 
@@ -566,7 +660,27 @@ const useLeafletMapConfig = ({
                 blur: heatmapConfig?.blur ?? 15,
                 opacity: heatmapConfig?.opacity ?? 0.6,
             },
-            tile: getTileConfig(tileBackground),
+            hexbinConfig: {
+                opacity: hexbinConfig?.opacity ?? 0.7,
+                sizingMode:
+                    hexbinConfig?.sizingMode ?? MapHexbinSizingMode.DYNAMIC,
+                fixedResolution: hexbinConfig?.fixedResolution ?? 4,
+                valueBasis:
+                    hexbinConfig?.valueBasis ?? MapHexbinValueBasis.COUNT,
+                aggregation:
+                    hexbinConfig?.aggregation ?? MapHexbinAggregation.SUM,
+                showEmptyBins: hexbinConfig?.showEmptyBins ?? false,
+                emptyBinColor: hexbinConfig?.emptyBinColor ?? null,
+            },
+            tile: getTileConfig(
+                colorScheme === 'dark'
+                    ? (darkModeTileBackground ?? MapTileBackground.DARK)
+                    : tileBackground,
+            ),
+            tileBackground:
+                colorScheme === 'dark'
+                    ? (darkModeTileBackground ?? MapTileBackground.DARK)
+                    : (tileBackground ?? MapTileBackground.OPENSTREETMAP),
             backgroundColor: backgroundColor ?? null,
             noDataColor: noDataColor ?? '#f3f3f3',
             dataLayerOpacity: dataLayerOpacity ?? 0.7,
@@ -579,7 +693,7 @@ const useLeafletMapConfig = ({
             uniqueStringValues,
             colorOverrides,
         };
-    }, [chartConfig, resultsData, theme, itemsMap]);
+    }, [chartConfig, resultsData, theme, itemsMap, colorScheme]);
 };
 
 export default useLeafletMapConfig;

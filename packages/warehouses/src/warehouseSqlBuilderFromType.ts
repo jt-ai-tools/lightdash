@@ -1,11 +1,12 @@
 import {
-    SupportedDbtAdapter,
     isSupportedDbtAdapterType,
+    SupportedDbtAdapter,
 } from '@lightdash/common';
 import { AthenaSqlBuilder } from './warehouseClients/AthenaWarehouseClient';
 import { BigquerySqlBuilder } from './warehouseClients/BigqueryWarehouseClient';
 import { ClickhouseSqlBuilder } from './warehouseClients/ClickhouseWarehouseClient';
 import { DatabricksSqlBuilder } from './warehouseClients/DatabricksWarehouseClient';
+import { DuckdbSqlBuilder } from './warehouseClients/DuckdbWarehouseClient';
 import { PostgresSqlBuilder } from './warehouseClients/PostgresWarehouseClient';
 import { RedshiftSqlBuilder } from './warehouseClients/RedshiftWarehouseClient';
 import { SnowflakeSqlBuilder } from './warehouseClients/SnowflakeWarehouseClient';
@@ -31,6 +32,8 @@ export const warehouseSqlBuilderFromType = (
             return new ClickhouseSqlBuilder(...args);
         case SupportedDbtAdapter.DATABRICKS:
             return new DatabricksSqlBuilder(...args);
+        case SupportedDbtAdapter.DUCKDB:
+            return new DuckdbSqlBuilder(...args);
         case SupportedDbtAdapter.POSTGRES:
             return new PostgresSqlBuilder(...args);
         case SupportedDbtAdapter.REDSHIFT:
@@ -41,6 +44,8 @@ export const warehouseSqlBuilderFromType = (
             return new TrinoSqlBuilder(...args);
         case SupportedDbtAdapter.ATHENA:
             return new AthenaSqlBuilder(...args);
+        case SupportedDbtAdapter.SPARK:
+            return new DatabricksSqlBuilder(...args);
         default:
             const never: never = adapterType;
             throw new Error(`Unsupported adapter type: ${adapterType}`);

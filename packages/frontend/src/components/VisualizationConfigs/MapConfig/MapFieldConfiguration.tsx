@@ -1,11 +1,11 @@
 import { getItemLabelWithoutTableName } from '@lightdash/common';
-import { ActionIcon, Box, Group, TextInput, Tooltip } from '@mantine/core';
+import { TextInput, Box, Group, ActionIcon, Tooltip } from '@mantine/core';
 import { useDebouncedState } from '@mantine/hooks';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
 import { useEffect, useState, type FC } from 'react';
+import MantineIcon from '../../common/MantineIcon';
 import { isMapVisualizationConfig } from '../../LightdashVisualization/types';
 import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
-import MantineIcon from '../../common/MantineIcon';
 
 type MapFieldConfigurationInputProps = {
     fieldId: string;
@@ -46,6 +46,7 @@ const MapFieldConfigurationInput: FC<MapFieldConfigurationInputProps> = ({
 
     return (
         <TextInput
+            size="xs"
             disabled={!isVisible}
             placeholder={defaultLabel}
             defaultValue={initialValue}
@@ -77,8 +78,8 @@ const MapFieldConfiguration: FC<MapFieldConfigurationProps> = ({ fieldId }) => {
     const isVisible = isFieldVisible(fieldId);
 
     return (
-        <Group spacing="xs" noWrap style={{ flexGrow: 1 }}>
-            <Box style={{ flexGrow: 1 }}>
+        <Group gap="xs" wrap="nowrap" flex={1}>
+            <Box flex={1}>
                 <MapFieldConfigurationInput
                     fieldId={fieldId}
                     defaultLabel={defaultLabel}
@@ -91,7 +92,6 @@ const MapFieldConfiguration: FC<MapFieldConfigurationProps> = ({ fieldId }) => {
             <Tooltip
                 position="top"
                 opened={isTooltipVisible}
-                withinPortal
                 label={isVisible ? 'Hide in tooltip' : 'Show in tooltip'}
             >
                 <Box
@@ -99,6 +99,7 @@ const MapFieldConfiguration: FC<MapFieldConfigurationProps> = ({ fieldId }) => {
                     onMouseLeave={() => setTooltipVisible(false)}
                 >
                     <ActionIcon
+                        color="gray"
                         variant="light"
                         onClick={() => {
                             setTooltipVisible(false);

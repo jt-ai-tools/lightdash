@@ -1,0 +1,483 @@
+import { getAppDisplayName, type ApiAppSummary } from '@lightdash/common';
+import {
+    ActionIcon,
+    Anchor,
+    Badge,
+    Divider,
+    Group,
+    Menu,
+    SegmentedControl,
+    Text,
+} from '@mantine/core';
+import { useDebouncedValue } from '@mantine/hooks';
+import {
+    IconCode,
+    IconDots,
+    IconEdit,
+    IconExternalLink,
+    IconFolderPlus,
+    IconFolderSymlink,
+    IconTrash,
+} from '@tabler/icons-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useCallback, useMemo, useState, type FC } from 'react';
+import { Link } from 'react-router';
+import { AskAiAgentMenuItem } from '../../../ee/features/aiCopilot/components/AskAiAgentMenuItem/AskAiAgentMenuItem';
+import AppThumbnailHoverCard from '../../../features/apps/components/AppThumbnailHoverCard';
+import { MoveAppToSpaceModal as SharedMoveAppToSpaceModal } from '../../../features/apps/components/MoveAppToSpaceModal';
+import { useMyApps } from '../../../features/apps/hooks/useMyApps';
+import { useInfiniteScroll } from '../../../hooks/useInfiniteScroll';
+import { useProjects } from '../../../hooks/useProjects';
+import {
+    ContentTable,
+    ContentTableSearchInput,
+    useContentTable,
+    type ContentTableColumnDef,
+} from '../../common/ContentTable';
+import FilterFacet, { type FilterFacetOption } from '../../common/FilterFacet';
+import MantineIcon from '../../common/MantineIcon';
+import AppDeleteModal from '../../common/modal/AppDeleteModal';
+import AppUpdateModal from '../../common/modal/AppUpdateModal';
+import { SettingsPage } from '../../common/Settings/SettingsPage';
+import classes from './MyAppsPanel.module.css';
+
+const hasReadyVersion = (app: ApiAppSummary) =>
+    app.lastVersionStatus === 'ready' && !!app.lastVersionNumber;
+
+const PROJECT_SCOPE_OPTIONS = [
+    { label: 'Production', value: 'production' },
+    { label: 'All projects', value: 'all' },
+];
+
+const MoveAppToSpaceModal: FC<{
+    app: ApiAppSummary;
+    onClose: () => void;
+}> = ({ app, onClose }) => {
+    const queryClient = useQueryClient();
+    return (
+        <SharedMoveAppToSpaceModal
+            projectUuid={app.projectUuid}
+            opened
+            onClose={onClose}
+            app={{
+                uuid: app.appUuid,
+                name: app.name,
+                description: app.description || undefined,
+                spaceUuid: app.spaceUuid,
+                createdByUserUuid: null,
+                latestVersionNumber: app.lastVersionNumber,
+                latestVersionStatus: app.lastVersionStatus,
+            }}
+            previewVersion={null}
+            onMoved={() =>
+                queryClient.invalidateQueries({ queryKey: ['myApps'] })
+            }
+        />
+    );
+};
+
+const statusColor = (status: string | null) => {
+    switch (status) {
+        case 'ready':
+            return 'green';
+        case 'building':
+            return 'blue';
+        case 'error':
+            return 'red';
+        default:
+            return 'gray';
+    }
+};
+
+const AppNameCell: FC<{ app: ApiAppSummary }> = ({ app }) => {
+    const displayName = getAppDisplayName(app.name, app.appUuid);
+
+    return (
+        <AppThumbnailHoverCard
+            projectUuid={app.projectUuid}
+            appUuid={app.appUuid}
+            appName={displayName}
+            hasReadyVersion={hasReadyVersion(app)}
+        >
+            <Anchor
+                component={Link}
+                to={`/projects/${app.projectUuid}/apps/${app.appUuid}`}
+                fz="sm"
+                fw={500}
+                c="inherit"
+                underline="hover"
+                truncate="end"
+                display="block"
+            >
+                {displayName}
+            </Anchor>
+        </AppThumbnailHoverCard>
+    );
+};
+
+type MyAppsPanelProps = {
+    includePreviewAppsByDefault?: boolean;
+};
+
+const MyAppsPanel: FC<MyAppsPanelProps> = ({
+    includePreviewAppsByDefault = false,
+}) => {
+    const [includePreviewApps, setIncludePreviewApps] = useState(
+        includePreviewAppsByDefault,
+    );
+    const [selectedProjectUuids, setSelectedProjectUuids] = useState<string[]>(
+        [],
+    );
+    const [search, setSearch] = useState('');
+    const [debouncedSearch] = useDebouncedValue(search.trim(), 300);
+    const { data: projects = [], isLoading: isLoadingProjects } = useProjects();
+    const { data, fetchNextPage, isFetching, isLoading, isError } = useMyApps({
+        excludePreviewProjects: !includePreviewApps,
+        projectUuids: selectedProjectUuids,
+        search: debouncedSearch || undefined,
+    });
+    const [appToDelete, setAppToDelete] = useState<ApiAppSummary | null>(null);
+    const [appToMove, setAppToMove] = useState<ApiAppSummary | null>(null);
+    const [appToRename, setAppToRename] = useState<ApiAppSummary | null>(null);
+
+    const flatData = useMemo<ApiAppSummary[]>(
+        () => data?.pages.flatMap((page) => page.data) ?? [],
+        [data],
+    );
+
+    const totalDBRowCount = data?.pages?.[0]?.pagination?.totalResults ?? 0;
+    const totalFetched = flatData.length;
+
+    const { containerRef: tableContainerRef, onScroll } = useInfiniteScroll({
+        fetchNextPage,
+        isFetching,
+        hasMore: totalFetched < totalDBRowCount,
+        threshold: 400,
+    });
+
+    const resetFilters = useCallback(() => {
+        setSearch('');
+        setIncludePreviewApps(false);
+        setSelectedProjectUuids([]);
+    }, []);
+
+    const projectOptions = useMemo<FilterFacetOption[]>(
+        () =>
+            projects
+                .map((project) => ({
+                    label: project.name,
+                    value: project.projectUuid,
+                }))
+                .sort((a, b) => a.label.localeCompare(b.label)),
+        [projects],
+    );
+
+    const columns: ContentTableColumnDef<ApiAppSummary>[] = useMemo(
+        () => [
+            {
+                accessorKey: 'name',
+                header: 'Name',
+                enableSorting: false,
+                size: 300,
+                Cell: ({ row }) => {
+                    const app = row.original;
+                    return <AppNameCell app={app} />;
+                },
+            },
+            {
+                accessorKey: 'projectName',
+                header: 'Project',
+                enableSorting: false,
+                size: 150,
+                Cell: ({ row }) => (
+                    <Text fz="sm" c="ldGray.7">
+                        {row.original.projectName}
+                    </Text>
+                ),
+            },
+            {
+                accessorKey: 'spaceName',
+                header: 'Space',
+                enableSorting: false,
+                size: 150,
+                Cell: ({ row }) => {
+                    const { spaceUuid, spaceName, projectUuid } = row.original;
+                    if (!spaceUuid || !spaceName) {
+                        return (
+                            <Text fz="sm" c="dimmed">
+                                -
+                            </Text>
+                        );
+                    }
+                    return (
+                        <Anchor
+                            component={Link}
+                            to={`/projects/${projectUuid}/spaces/${spaceUuid}`}
+                            fz="sm"
+                            c="inherit"
+                            underline="hover"
+                            truncate="end"
+                            display="block"
+                        >
+                            {spaceName}
+                        </Anchor>
+                    );
+                },
+            },
+            {
+                accessorKey: 'lastVersionStatus',
+                header: 'Status',
+                enableSorting: false,
+                size: 100,
+                Cell: ({ row }) => {
+                    const { lastVersionStatus, lastVersionNumber } =
+                        row.original;
+                    return (
+                        <Group gap="xs">
+                            <Badge
+                                color={statusColor(lastVersionStatus)}
+                                size="sm"
+                            >
+                                {lastVersionStatus ?? 'no versions'}
+                            </Badge>
+                            {lastVersionNumber && (
+                                <Text fz="xs" c="dimmed">
+                                    v{lastVersionNumber}
+                                </Text>
+                            )}
+                        </Group>
+                    );
+                },
+            },
+            {
+                accessorKey: 'createdAt',
+                header: 'Created',
+                enableSorting: false,
+                size: 120,
+                Cell: ({ row }) => (
+                    <Text fz="sm" c="ldGray.7">
+                        {new Date(row.original.createdAt).toLocaleDateString()}
+                    </Text>
+                ),
+            },
+            {
+                id: 'actions',
+                header: '',
+                enableSorting: false,
+                size: 60,
+                mantineTableHeadCellProps: { align: 'right' },
+                mantineTableBodyCellProps: { align: 'right' },
+                Cell: ({ row }) => {
+                    const app = row.original;
+
+                    return (
+                        <Menu position="bottom-end">
+                            <Menu.Target>
+                                <ActionIcon variant="transparent" size="sm">
+                                    <MantineIcon icon={IconDots} size={16} />
+                                </ActionIcon>
+                            </Menu.Target>
+                            <Menu.Dropdown>
+                                <AskAiAgentMenuItem
+                                    projectUuid={app.projectUuid}
+                                    dataAppUuid={app.appUuid}
+                                    clickedFrom="data_app_my_apps_menu"
+                                    mode="navigate"
+                                    withDivider
+                                />
+                                {hasReadyVersion(app) && (
+                                    <Menu.Item
+                                        component={Link}
+                                        to={`/projects/${app.projectUuid}/apps/${app.appUuid}/view`}
+                                        target="_blank"
+                                        leftSection={
+                                            <MantineIcon
+                                                icon={IconExternalLink}
+                                                size={14}
+                                            />
+                                        }
+                                    >
+                                        Preview latest
+                                    </Menu.Item>
+                                )}
+                                <Menu.Item
+                                    component={Link}
+                                    to={`/projects/${app.projectUuid}/apps/${app.appUuid}`}
+                                    leftSection={
+                                        <MantineIcon
+                                            icon={IconCode}
+                                            size={14}
+                                        />
+                                    }
+                                >
+                                    Continue building
+                                </Menu.Item>
+                                <Menu.Divider />
+                                <Menu.Item
+                                    leftSection={
+                                        <MantineIcon
+                                            icon={IconEdit}
+                                            size={14}
+                                        />
+                                    }
+                                    onClick={() => setAppToRename(app)}
+                                >
+                                    Rename
+                                </Menu.Item>
+                                <Menu.Item
+                                    leftSection={
+                                        app.spaceUuid ? (
+                                            <MantineIcon
+                                                icon={IconFolderSymlink}
+                                                size={14}
+                                            />
+                                        ) : (
+                                            <MantineIcon
+                                                icon={IconFolderPlus}
+                                                size={14}
+                                            />
+                                        )
+                                    }
+                                    onClick={() => setAppToMove(app)}
+                                >
+                                    {app.spaceUuid
+                                        ? 'Move to space'
+                                        : 'Add to space'}
+                                </Menu.Item>
+                                <Menu.Divider />
+                                <Menu.Item
+                                    color="red"
+                                    leftSection={
+                                        <MantineIcon
+                                            icon={IconTrash}
+                                            size={14}
+                                        />
+                                    }
+                                    onClick={() => setAppToDelete(app)}
+                                >
+                                    Delete
+                                </Menu.Item>
+                            </Menu.Dropdown>
+                        </Menu>
+                    );
+                },
+            },
+        ],
+        [],
+    );
+
+    const table = useContentTable({
+        columns,
+        data: flatData,
+        enableColumnResizing: false,
+        enablePagination: false,
+        enableSorting: false,
+        enableTopToolbar: true,
+        enableBottomToolbar: false,
+        enableStickyHeader: true,
+        mantineTableHeadCellProps: {
+            px: 'lg',
+            py: 'sm',
+        },
+        mantineTableBodyCellProps: {
+            px: 'lg',
+            py: 'sm',
+        },
+        mantineTableContainerProps: {
+            ref: tableContainerRef,
+            style: { maxHeight: 'calc(100dvh - 420px)' },
+            onScroll,
+        },
+        mantineTableProps: {
+            highlightOnHover: true,
+        },
+        emptyState: {
+            title: includePreviewApps
+                ? "You haven't created any apps yet"
+                : 'No apps in production projects',
+            description: includePreviewApps
+                ? undefined
+                : 'Switch to All projects to include apps from preview projects.',
+            entityName: 'apps',
+            hasActiveFilters: selectedProjectUuids.length > 0,
+            onClearFilters: resetFilters,
+            search,
+        },
+        renderTopToolbar: () => (
+            <Group px="md" py="sm" gap="xs" wrap="nowrap">
+                <ContentTableSearchInput
+                    placeholder="Search apps..."
+                    tooltipLabel="Search by app, project, or space"
+                    value={search}
+                    onChange={setSearch}
+                />
+                <Divider orientation="vertical" h={20} />
+                <SegmentedControl
+                    size="xs"
+                    aria-label="App project scope"
+                    value={includePreviewApps ? 'all' : 'production'}
+                    onChange={(value) => setIncludePreviewApps(value === 'all')}
+                    data={PROJECT_SCOPE_OPTIONS}
+                    classNames={{
+                        root: classes.segmentedControl,
+                        indicator: classes.segmentedIndicator,
+                        label: classes.segmentedLabel,
+                    }}
+                />
+                <Divider orientation="vertical" h={20} />
+                <FilterFacet
+                    label="Project"
+                    options={projectOptions}
+                    selected={selectedProjectUuids}
+                    onChange={setSelectedProjectUuids}
+                    tooltipLabel="Filter apps by project"
+                    loading={isLoadingProjects}
+                />
+            </Group>
+        ),
+        state: {
+            isLoading,
+            showProgressBars: isFetching,
+            showAlertBanner: isError,
+        },
+    });
+
+    return (
+        <SettingsPage
+            title="My apps"
+            description="Manage the data apps you can access and edit."
+        >
+            <ContentTable table={table} />
+            {appToDelete && (
+                <AppDeleteModal
+                    opened
+                    projectUuid={appToDelete.projectUuid}
+                    uuid={appToDelete.appUuid}
+                    name={appToDelete.name}
+                    onClose={() => setAppToDelete(null)}
+                    onConfirm={() => setAppToDelete(null)}
+                />
+            )}
+            {appToMove && (
+                <MoveAppToSpaceModal
+                    app={appToMove}
+                    onClose={() => setAppToMove(null)}
+                />
+            )}
+            {appToRename && (
+                <AppUpdateModal
+                    opened
+                    projectUuid={appToRename.projectUuid}
+                    uuid={appToRename.appUuid}
+                    initialName={appToRename.name}
+                    initialDescription={appToRename.description}
+                    iconPicker={null}
+                    onClose={() => setAppToRename(null)}
+                    onConfirm={() => setAppToRename(null)}
+                />
+            )}
+        </SettingsPage>
+    );
+};
+
+export default MyAppsPanel;

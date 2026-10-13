@@ -1,80 +1,31 @@
-import { type ApiErrorDetail } from '@lightdash/common';
-import { Anchor, createStyles, keyframes, Loader, Text } from '@mantine/core';
+import {
+    isPreviewWarehouseSignInExpiredMessage,
+    type ApiErrorDetail,
+    type QueryHistoryStatus,
+} from '@lightdash/common';
+import { Anchor, Text } from '@mantine/core';
 import { IconTableOff } from '@tabler/icons-react';
 import { Fragment, type FC } from 'react';
-import { LD_FIELD_COLORS } from '../../../mantineTheme';
+import { Link } from 'react-router';
+import useIsEmbedded from '../../../ee/providers/Embed/useIsEmbedded';
+import { useProject } from '../../../hooks/useProject';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
 import { TrackSection } from '../../../providers/Tracking/TrackingProvider';
 import NoTableIcon from '../../../svgs/emptystate-no-table.svg?react';
+import { LD_FIELD_COLORS } from '../../../theme';
 import { SectionName } from '../../../types/Events';
 import { EmptyState } from '../../common/EmptyState';
+import EmptyStateLoader from '../../common/EmptyStateLoader';
 import MantineIcon from '../../common/MantineIcon';
 import DocumentationHelpButton from '../../DocumentationHelpButton';
 import { RefreshButton } from '../../RefreshButton';
-
-const animationKeyframes = keyframes`
-    0% {
-        opacity: 0;
-    }
-    5% {
-        opacity: 0;
-        transform: translateY(-10px);
-    }
-    10% {
-        opacity: 1;
-        transform: translateY(0px);
-    }
-    25% {
-        opacity: 1;
-        transform: translateY(0px);
-    }
-    30% {
-        opacity: 0;
-        transform: translateY(10px);
-    }
-    80% {
-        opacity: 0;
-    }
-    100% {
-        opacity: 0;
-    }
-`;
-
-const useAnimatedTextStyles = createStyles((theme) => ({
-    root: {
-        position: 'relative',
-        height: theme.spacing.lg,
-        textAlign: 'center',
-        width: '100%',
-
-        '& > span': {
-            animation: `${animationKeyframes} 16s linear infinite 0s`,
-            opacity: 0,
-            overflow: 'hidden',
-            position: 'absolute',
-            width: '100%',
-            left: 0,
-        },
-
-        '& span:nth-of-type(2)': {
-            animationDelay: '4s',
-        },
-
-        '& span:nth-of-type(3)': {
-            animationDelay: '8s',
-        },
-
-        '& span:nth-of-type(4)': {
-            animationDelay: '12s',
-        },
-    },
-}));
+import classes from './ExplorerResultsNonIdealStates.module.css';
+import { getQueryLoadingStateCopy } from './queryLoadingState';
 
 const ExploreDocumentationUrl =
     'https://docs.lightdash.com/get-started/exploring-data/using-explores/';
 
 export const EmptyStateNoColumns = () => {
-    const { classes } = useAnimatedTextStyles();
-
     return (
         <EmptyState
             title={
@@ -90,26 +41,26 @@ export const EmptyStateNoColumns = () => {
             }
             description={
                 <>
-                    What’s your data question? Select the{' '}
-                    <Text span color={LD_FIELD_COLORS.metric.color}>
+                    What's your data question? Select the{' '}
+                    <Text span c={LD_FIELD_COLORS.metric.color}>
                         metric
                     </Text>{' '}
                     you want to calculate and the{' '}
-                    <Text span color={LD_FIELD_COLORS.dimension.color}>
+                    <Text span c={LD_FIELD_COLORS.dimension.color}>
                         dimension(s)
                     </Text>{' '}
                     you want to split it by.
                 </>
             }
         >
-            <Text className={classes.root} color="dimmed">
+            <Text className={classes.animatedTextRoot} c="dimmed">
                 <Text span>
                     eg. How many{' '}
-                    <Text span color={LD_FIELD_COLORS.metric.color}>
+                    <Text span c={LD_FIELD_COLORS.metric.color}>
                         total signups
                     </Text>{' '}
                     per{' '}
-                    <Text span color={LD_FIELD_COLORS.dimension.color}>
+                    <Text span c={LD_FIELD_COLORS.dimension.color}>
                         day
                     </Text>
                     ?
@@ -117,11 +68,11 @@ export const EmptyStateNoColumns = () => {
 
                 <Text span>
                     eg. What is the{' '}
-                    <Text span color={LD_FIELD_COLORS.metric.color}>
+                    <Text span c={LD_FIELD_COLORS.metric.color}>
                         total order count
                     </Text>{' '}
                     by{' '}
-                    <Text span color={LD_FIELD_COLORS.dimension.color}>
+                    <Text span c={LD_FIELD_COLORS.dimension.color}>
                         location
                     </Text>
                     ?
@@ -129,11 +80,11 @@ export const EmptyStateNoColumns = () => {
 
                 <Text span>
                     eg. How many{' '}
-                    <Text span color={LD_FIELD_COLORS.metric.color}>
+                    <Text span c={LD_FIELD_COLORS.metric.color}>
                         new followers
                     </Text>{' '}
                     every{' '}
-                    <Text span color={LD_FIELD_COLORS.dimension.color}>
+                    <Text span c={LD_FIELD_COLORS.dimension.color}>
                         week
                     </Text>
                     ?
@@ -141,11 +92,11 @@ export const EmptyStateNoColumns = () => {
 
                 <Text span>
                     eg. What is the{' '}
-                    <Text span color={LD_FIELD_COLORS.metric.color}>
+                    <Text span c={LD_FIELD_COLORS.metric.color}>
                         total order count
                     </Text>{' '}
                     split by{' '}
-                    <Text span color={LD_FIELD_COLORS.dimension.color}>
+                    <Text span c={LD_FIELD_COLORS.dimension.color}>
                         status
                     </Text>
                     ?
@@ -197,9 +148,7 @@ export const NoTableSelected = () => (
 );
 
 export const EmptyStateExploreLoading = () => (
-    <EmptyState title="Loading tables...">
-        <Loader color="gray" />
-    </EmptyState>
+    <EmptyStateLoader title="Loading tables..." />
 );
 
 export const ExploreIdleState = () => (
@@ -213,42 +162,78 @@ export const ExploreEmptyQueryState = () => (
     />
 );
 
-export const ExploreLoadingState = () => (
-    <EmptyState title="Loading results">
-        <Loader color="gray" data-testid="results-table-loading" />
-    </EmptyState>
-);
+export const ExploreLoadingState = ({
+    queryStatus,
+}: {
+    queryStatus?: QueryHistoryStatus;
+}) => {
+    const { title, description } = getQueryLoadingStateCopy(queryStatus);
+
+    return (
+        <EmptyStateLoader
+            title={title}
+            description={description}
+            data-testid="results-table-loading"
+        />
+    );
+};
+
+const PreviewSignInExpiredLink: FC = () => {
+    const { data: project } = useProject(useProjectUuid());
+    const upstreamProjectUuid = project?.upstreamProjectUuid;
+    if (!upstreamProjectUuid) return null;
+    return (
+        <Fragment>
+            <br />
+            <Anchor
+                component={Link}
+                to={`/generalSettings/projectManagement/${upstreamProjectUuid}/settings`}
+            >
+                Open the connection settings
+            </Anchor>
+        </Fragment>
+    );
+};
 
 export const ExploreErrorState = ({
     errorDetail,
 }: {
     errorDetail?: ApiErrorDetail | null;
-}) => (
-    <EmptyState
-        icon={<MantineIcon icon={IconTableOff} />}
-        title="Error loading results"
-        description={
-            <Fragment>
-                <Text style={{ whiteSpace: 'pre-wrap' }}>
-                    {errorDetail?.message ||
-                        'There was an error loading the results'}
-                </Text>
-                {errorDetail?.data.documentationUrl && (
-                    <Fragment>
-                        <br />
-                        <Anchor
-                            href={errorDetail.data.documentationUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                        >
-                            Learn how to resolve this in our documentation →
-                        </Anchor>
-                    </Fragment>
-                )}
-            </Fragment>
-        }
-    />
-);
+}) => {
+    const isEmbedded = useIsEmbedded();
+
+    return (
+        <EmptyState
+            icon={<MantineIcon icon={IconTableOff} />}
+            title="Error loading results"
+            description={
+                <Fragment>
+                    <Text className={classes.errorMessage}>
+                        {errorDetail?.message ||
+                            'There was an error loading the results'}
+                    </Text>
+                    {errorDetail?.message &&
+                        isPreviewWarehouseSignInExpiredMessage(
+                            errorDetail.message,
+                        ) &&
+                        !isEmbedded && <PreviewSignInExpiredLink />}
+                    {errorDetail?.data.documentationUrl && !isEmbedded && (
+                        <Fragment>
+                            <br />
+                            <Anchor
+                                href={errorDetail.data.documentationUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                            >
+                                Learn how to resolve this in our documentation
+                            </Anchor>
+                        </Fragment>
+                    )}
+                </Fragment>
+            }
+        />
+    );
+};
 
 export const MissingRequiredParameters = ({
     missingRequiredParameters,

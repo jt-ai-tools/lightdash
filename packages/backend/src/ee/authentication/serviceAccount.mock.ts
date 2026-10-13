@@ -1,7 +1,14 @@
-/* 
+/*
 Service accounts
 */
-import { ServiceAccount, ServiceAccountScope } from '@lightdash/common';
+import { Ability } from '@casl/ability';
+import {
+    OrganizationMemberRole,
+    PossibleAbilities,
+    ServiceAccount,
+    ServiceAccountScope,
+    SessionUser,
+} from '@lightdash/common';
 import express from 'express';
 
 // Mock service account data
@@ -15,6 +22,9 @@ export const mockServiceAccount: ServiceAccount = {
     lastUsedAt: null,
     rotatedAt: null,
     scopes: [ServiceAccountScope.ORG_ADMIN],
+    userUuid: 'sa-dedicated-user-uuid',
+    roleUuid: null,
+    createdBy: null,
 };
 
 export const mockExpiredServiceAccount: ServiceAccount = {
@@ -27,10 +37,27 @@ export const mockOrganization = {
     organizationUuid: 'test-org-uuid',
 };
 
-export const mockAdminUser = {
-    userUuid: 'test-user-uuid',
-    userId: 1,
-};
+export const mockSaSessionUser = {
+    userUuid: 'sa-dedicated-user-uuid',
+    userId: 42,
+    email: undefined,
+    firstName: 'Test service account',
+    lastName: '',
+    organizationUuid: 'test-org-uuid',
+    organizationName: 'Test Organization',
+    organizationCreatedAt: new Date('2024-01-01'),
+    isTrackingAnonymized: false,
+    isMarketingOptedIn: false,
+    timezone: null,
+    isSetupComplete: true,
+    role: OrganizationMemberRole.ADMIN,
+    isActive: false,
+    isPending: false,
+    createdAt: new Date('2024-01-01'),
+    updatedAt: new Date('2024-01-01'),
+    ability: new Ability<PossibleAbilities>([]),
+    abilityRules: [],
+} as unknown as SessionUser;
 
 // Mock requests for different scenarios
 export const mockRequestWithValidToken = {
@@ -38,18 +65,15 @@ export const mockRequestWithValidToken = {
         authorization: 'Bearer valid_service_account_token',
     },
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateServiceAccount: jest
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateServiceAccount: vi
                 .fn()
                 .mockResolvedValue(mockServiceAccount),
         }),
-        getOrganizationService: jest.fn().mockReturnValue({
-            getOrganizationByUuid: jest
+        getUserService: vi.fn().mockReturnValue({
+            getSessionUserForServiceAccount: vi
                 .fn()
-                .mockResolvedValue(mockOrganization),
-        }),
-        getUserService: jest.fn().mockReturnValue({
-            getAdminUser: jest.fn().mockResolvedValue(mockAdminUser),
+                .mockResolvedValue(mockSaSessionUser),
         }),
     },
 } as unknown as express.Request;
@@ -60,8 +84,8 @@ export const mockRequestWithInvalidToken = {
         authorization: 'Bearer invalid_token',
     },
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateServiceAccount: jest.fn().mockResolvedValue(null),
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateServiceAccount: vi.fn().mockResolvedValue(null),
         }),
     },
 } as unknown as express.Request;
@@ -72,8 +96,8 @@ export const mockRequestWithExpiredToken = {
         authorization: 'Bearer expired_token',
     },
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateServiceAccount: jest
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateServiceAccount: vi
                 .fn()
                 .mockResolvedValue(mockExpiredServiceAccount),
         }),
@@ -83,8 +107,8 @@ export const mockRequestWithExpiredToken = {
 export const mockRequestWithNoToken = {
     headers: {},
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateServiceAccount: jest.fn().mockResolvedValue(null),
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateServiceAccount: vi.fn().mockResolvedValue(null),
         }),
     },
 } as unknown as express.Request;
@@ -94,8 +118,8 @@ export const mockRequestWithEmptyToken = {
         authorization: '',
     },
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateServiceAccount: jest.fn().mockResolvedValue(null),
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateServiceAccount: vi.fn().mockResolvedValue(null),
         }),
     },
 } as unknown as express.Request;
@@ -105,8 +129,8 @@ export const mockRequestWithMalformedToken = {
         authorization: 'Bearer',
     },
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateServiceAccount: jest.fn().mockResolvedValue(null),
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateServiceAccount: vi.fn().mockResolvedValue(null),
         }),
     },
 } as unknown as express.Request;
@@ -116,8 +140,8 @@ export const mockRequestWithNonBearerToken = {
         authorization: 'ApiKey some_api_key',
     },
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateServiceAccount: jest.fn().mockResolvedValue(null),
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateServiceAccount: vi.fn().mockResolvedValue(null),
         }),
     },
 } as unknown as express.Request;

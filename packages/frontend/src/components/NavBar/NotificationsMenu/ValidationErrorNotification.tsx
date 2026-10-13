@@ -13,7 +13,7 @@ const ValidationErrorNotificationDescription: FC<{
     const validationTimeAgo = useTimeAgo(lastValidatedAt);
 
     return (
-        <Text>
+        <Text fz="sm">
             New validation completed {validationTimeAgo} with {numberOfErrors}{' '}
             errors
         </Text>
@@ -35,6 +35,6 @@ export const ValidationErrorNotification: FC<{
             />
         }
         icon={IconAlertCircle}
-        iconProps={{ color: 'red' }}
+        iconProps={{ color: 'white' }}
     />
 );

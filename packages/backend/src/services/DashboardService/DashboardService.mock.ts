@@ -6,6 +6,7 @@ import {
     Dashboard,
     DashboardBasicDetails,
     DashboardTileTypes,
+    getDefaultResolvedColorPalette,
     OrganizationMemberRole,
     PossibleAbilities,
     SavedChart,
@@ -25,6 +26,9 @@ export const user: SessionUser = {
     organizationCreatedAt: new Date(),
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
+    timezone: null,
     isSetupComplete: true,
     userId: 0,
     role: OrganizationMemberRole.ADMIN,
@@ -32,6 +36,10 @@ export const user: SessionUser = {
         {
             subject: 'Dashboard',
             action: ['view', 'update', 'delete', 'create'],
+        },
+        {
+            subject: 'SavedChart',
+            action: ['view'],
         },
         {
             subject: 'Project',
@@ -49,7 +57,6 @@ export const space: SpaceTable['base'] = {
     space_uuid: '123',
     name: 'space name',
     slug: 'space-name',
-    is_private: true,
     created_at: new Date(),
     project_id: 0,
     organization_uuid: user.organizationUuid!,
@@ -57,14 +64,17 @@ export const space: SpaceTable['base'] = {
     parent_space_uuid: null,
     path: 'space-name',
     inherit_parent_permissions: false,
+    project_member_access_role: null,
     is_default_user_space: false,
+    color_palette_uuid: null,
     deleted_at: null,
     deleted_by_user_uuid: null,
 };
 
 export const publicSpace: Space = {
-    isPrivate: false,
+    inheritsFromOrgOrProject: true,
     inheritParentPermissions: true,
+    projectMemberAccessRole: null,
     organizationUuid: 'organizationUuid',
     uuid: 'spaceUuid',
     slug: 'public-space',
@@ -79,11 +89,12 @@ export const publicSpace: Space = {
     pinnedListOrder: null,
     parentSpaceUuid: null,
     path: 'public-space',
+    colorPaletteUuid: null,
 };
 export const privateSpace: Space = {
     ...publicSpace,
     uuid: 'private-space-uuid',
-    isPrivate: true,
+    inheritParentPermissions: false,
 };
 
 export const dashboard: Dashboard = {
@@ -92,6 +103,8 @@ export const dashboard: Dashboard = {
     uuid: 'uuid',
     name: 'name',
     slug: 'name',
+    verification: null,
+    owner: null,
 
     dashboardVersionId: 1,
     versionUuid: 'dashboard-version-uuid',
@@ -124,9 +137,10 @@ export const dashboard: Dashboard = {
     pinnedListOrder: null,
     views: 1,
     firstViewedAt: new Date(1),
-    isPrivate: false,
+    inheritsFromOrgOrProject: true,
     access: [],
     tabs: [],
+    colorPaletteUuid: null,
 };
 
 export const chart: SavedChart = {
@@ -134,6 +148,7 @@ export const chart: SavedChart = {
     projectUuid: dashboard.projectUuid,
     name: 'chart name',
     slug: 'chart-name',
+    verification: null,
 
     tableName: 'table_name',
     metricQuery: {
@@ -160,7 +175,9 @@ export const chart: SavedChart = {
     dashboardUuid: dashboard.uuid,
     dashboardName: dashboard.name,
     colorPalette: [],
-    isPrivate: false,
+    colorPaletteUuid: null,
+    resolvedColorPalette: getDefaultResolvedColorPalette(),
+    inheritsFromOrgOrProject: true,
     access: [],
 };
 
@@ -169,6 +186,7 @@ export const dashboardsDetails: DashboardBasicDetails[] = [
         organizationUuid: user.organizationUuid!,
         projectUuid: dashboard.projectUuid,
         uuid: dashboard.uuid,
+        slug: dashboard.slug,
         name: dashboard.name,
         description: dashboard.description,
         updatedAt: dashboard.updatedAt,
@@ -177,6 +195,7 @@ export const dashboardsDetails: DashboardBasicDetails[] = [
         pinnedListOrder: null,
         views: 1,
         firstViewedAt: new Date(1),
+        verification: null,
     },
 ];
 

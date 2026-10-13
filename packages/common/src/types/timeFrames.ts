@@ -27,6 +27,9 @@ export enum TimeFrames {
 }
 
 export enum DateGranularity {
+    SECOND = 'Second',
+    MINUTE = 'Minute',
+    HOUR = 'Hour',
     DAY = 'Day',
     WEEK = 'Week',
     MONTH = 'Month',
@@ -34,10 +37,18 @@ export enum DateGranularity {
     YEAR = 'Year',
 }
 
+export const isStandardDateGranularity = (
+    value: string,
+): value is DateGranularity =>
+    Object.values<string>(DateGranularity).includes(value);
+
 export const dateGranularityToTimeFrameMap: Record<
     DateGranularity,
     TimeFrames
 > = {
+    [DateGranularity.SECOND]: TimeFrames.SECOND,
+    [DateGranularity.MINUTE]: TimeFrames.MINUTE,
+    [DateGranularity.HOUR]: TimeFrames.HOUR,
     [DateGranularity.DAY]: TimeFrames.DAY,
     [DateGranularity.WEEK]: TimeFrames.WEEK,
     [DateGranularity.MONTH]: TimeFrames.MONTH,
@@ -45,7 +56,43 @@ export const dateGranularityToTimeFrameMap: Record<
     [DateGranularity.YEAR]: TimeFrames.YEAR,
 };
 
+export const timeFrameToDateGranularityMap: Partial<
+    Record<TimeFrames, DateGranularity>
+> = {
+    [TimeFrames.SECOND]: DateGranularity.SECOND,
+    [TimeFrames.MINUTE]: DateGranularity.MINUTE,
+    [TimeFrames.HOUR]: DateGranularity.HOUR,
+    [TimeFrames.DAY]: DateGranularity.DAY,
+    [TimeFrames.WEEK]: DateGranularity.WEEK,
+    [TimeFrames.MONTH]: DateGranularity.MONTH,
+    [TimeFrames.QUARTER]: DateGranularity.QUARTER,
+    [TimeFrames.YEAR]: DateGranularity.YEAR,
+};
+
+export const DEFAULT_TIME_DIMENSION_INTERVALS = [
+    TimeFrames.DAY,
+    TimeFrames.WEEK,
+    TimeFrames.MONTH,
+    TimeFrames.YEAR,
+] as const;
+
+export type DefaultTimeDimensionInterval =
+    (typeof DEFAULT_TIME_DIMENSION_INTERVALS)[number];
+
+export const isDefaultTimeDimensionInterval = (
+    value: unknown,
+): value is DefaultTimeDimensionInterval =>
+    DEFAULT_TIME_DIMENSION_INTERVALS.some((interval) => interval === value);
+
 export type DefaultTimeDimension = {
     field: string;
     interval: TimeFrames;
 };
+
+/**
+ * Single source of truth for the value used to reference a date zoom granularity across
+ * surfaces (custom SQL parameters, chart labels). Lowercased so it reads the same everywhere.
+ */
+export const getGranularityReferenceValue = (
+    granularity: DateGranularity | string,
+): string => granularity.toLowerCase();

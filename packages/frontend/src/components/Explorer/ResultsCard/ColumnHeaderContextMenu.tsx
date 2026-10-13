@@ -3,7 +3,9 @@ import {
     getItemId,
     getItemLabelWithoutTableName,
     getItemMap,
+    isAggregateMetricType,
     isCustomDimension,
+    isCustomSqlDimension,
     isDimension,
     isField,
     isFilterableField,
@@ -13,13 +15,16 @@ import {
     isPeriodOverPeriodAdditionalMetric,
     isTableCalculation,
     isTimeBasedDimension,
+    type SortField,
     type TableCalculation,
+    type MergeTableCalculation,
 } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
-import { ActionIcon, Box, Group, Text } from '@mantine/core';
+import { ActionIcon, Box, Group, Menu, Text } from '@mantine/core';
 import {
-    IconChevronDown,
+    IconCopy,
+    IconDots,
     IconFilter,
+    IconMinus,
     IconPencil,
     IconTimelineEvent,
     IconTrash,
@@ -28,19 +33,28 @@ import { useMemo, useState, type FC } from 'react';
 import {
     explorerActions,
     selectAdditionalMetrics,
+    selectSavedChart,
     selectTableCalculations,
     selectTableName,
     useExplorerDispatch,
     useExplorerSelector,
 } from '../../../features/explorer/store';
 import {
+    DeleteMergeTableCalculationModal,
+    MergeTableCalculationModal,
+} from '../../../features/mergeQuery/components/MergeTableCalculationModal';
+import { useMergeSafe } from '../../../features/mergeQuery/context/useMerge';
+import {
     DeleteTableCalculationModal,
     UpdateTableCalculationModal,
 } from '../../../features/tableCalculation';
 import { useExplore } from '../../../hooks/useExplore';
 import { useFilters } from '../../../hooks/useFilters';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import { useCannotAuthorCustomSql } from '../../../hooks/user/useCannotAuthorCustomSql';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { EventName } from '../../../types/Events';
+import { SortDirection } from '../../../utils/sortUtils';
 import { BetaBadge } from '../../common/BetaBadge';
 import MantineIcon from '../../common/MantineIcon';
 import { type HeaderProps, type TableColumn } from '../../common/Table/types';
@@ -52,6 +66,7 @@ interface ContextMenuProps extends HeaderProps {
     onToggleCalculationEditModal: (value: boolean) => void;
     onToggleCalculationDeleteModal: (value: boolean) => void;
     onQuickCalculationCreated: (tableCalculation: TableCalculation) => void;
+    mergeTableCalculation?: MergeTableCalculation;
 }
 
 const ContextMenu: FC<ContextMenuProps> = ({
@@ -59,6 +74,7 @@ const ContextMenu: FC<ContextMenuProps> = ({
     onToggleCalculationEditModal,
     onToggleCalculationDeleteModal,
     onQuickCalculationCreated,
+    mergeTableCalculation,
 }) => {
     const { addFilter } = useFilters();
     const { track } = useTracking();
@@ -71,6 +87,9 @@ const ContextMenu: FC<ContextMenuProps> = ({
     const tableCalculations = useExplorerSelector(selectTableCalculations);
     const tableName = useExplorerSelector(selectTableName);
     const dispatch = useExplorerDispatch();
+    const projectUuid = useProjectUuid();
+    const cannotAuthorCustomSql = useCannotAuthorCustomSql(projectUuid);
+    const savedChart = useExplorerSelector(selectSavedChart);
 
     // Get explore data to check if metrics return date values
     const { data: exploreData } = useExplore(tableName, {
@@ -99,6 +118,47 @@ const ContextMenu: FC<ContextMenuProps> = ({
     const isItemAdditionalMetric = !!additionalMetric;
     const isPopAdditionalMetric =
         isPeriodOverPeriodAdditionalMetric(additionalMetric);
+
+    const sortSelectedDirection = sort
+        ? sort.descending
+            ? SortDirection.DESC
+            : SortDirection.ASC
+        : undefined;
+    const onSortSelect = (direction: SortDirection) => {
+        if (!item) return;
+        const newSort: SortField = {
+            fieldId: getItemId(item),
+            descending: direction === SortDirection.DESC,
+        };
+        dispatch(explorerActions.setSortFields([newSort]));
+    };
+
+    if (item && mergeTableCalculation) {
+        return (
+            <>
+                <Menu.Item
+                    leftSection={<MantineIcon icon={IconPencil} />}
+                    onClick={() => onToggleCalculationEditModal(true)}
+                >
+                    Edit calculation
+                </Menu.Item>
+                <Menu.Divider />
+                <ColumnHeaderSortMenuOptions
+                    item={item}
+                    selectedDirection={sortSelectedDirection}
+                    onSelect={onSortSelect}
+                />
+                <Menu.Divider />
+                <Menu.Item
+                    leftSection={<MantineIcon icon={IconTrash} />}
+                    color="red"
+                    onClick={() => onToggleCalculationDeleteModal(true)}
+                >
+                    Remove
+                </Menu.Item>
+            </>
+        );
+    }
 
     if (item && isField(item)) {
         const itemFieldId = getItemId(item);
@@ -129,6 +189,29 @@ const ContextMenu: FC<ContextMenuProps> = ({
                             Add period comparison
                         </Menu.Item>
 
+                        {!isItemAdditionalMetric &&
+                        isAggregateMetricType(item.type) ? (
+                            <Menu.Item
+                                leftSection={<MantineIcon icon={IconCopy} />}
+                                onClick={() => {
+                                    track({
+                                        name: EventName.ADD_CUSTOM_METRIC_CLICKED,
+                                    });
+                                    dispatch(
+                                        explorerActions.toggleAdditionalMetricModal(
+                                            {
+                                                type: item.type,
+                                                item,
+                                                isEditing: false,
+                                            },
+                                        ),
+                                    );
+                                }}
+                            >
+                                Create custom metric
+                            </Menu.Item>
+                        ) : null}
+
                         <Menu.Divider />
                     </>
                 ) : null}
@@ -143,8 +226,8 @@ const ContextMenu: FC<ContextMenuProps> = ({
                             }}
                         >
                             Filter by{' '}
-                            <Text span fw={500}>
-                                {getItemLabelWithoutTableName(item)}
+                            <Text span>
+                                "{getItemLabelWithoutTableName(item)}"
                             </Text>
                         </Menu.Item>
 
@@ -154,7 +237,11 @@ const ContextMenu: FC<ContextMenuProps> = ({
 
                 {!isPopAdditionalMetric && (
                     <>
-                        <ColumnHeaderSortMenuOptions item={item} sort={sort} />
+                        <ColumnHeaderSortMenuOptions
+                            item={item}
+                            selectedDirection={sortSelectedDirection}
+                            onSelect={onSortSelect}
+                        />
                         <Menu.Divider />
                     </>
                 )}
@@ -203,15 +290,44 @@ const ContextMenu: FC<ContextMenuProps> = ({
                     </Menu.Item>
                 ) : null}
 
-                <Menu.Item
-                    leftSection={<MantineIcon icon={IconTrash} />}
-                    color="red"
-                    onClick={() => {
-                        dispatch(explorerActions.removeField(itemFieldId));
-                    }}
-                >
-                    Remove
-                </Menu.Item>
+                {isItemAdditionalMetric && !isPopAdditionalMetric ? (
+                    <>
+                        <Menu.Item
+                            leftSection={<MantineIcon icon={IconMinus} />}
+                            onClick={() => {
+                                dispatch(
+                                    explorerActions.toggleMetric(itemFieldId),
+                                );
+                            }}
+                        >
+                            Remove
+                        </Menu.Item>
+
+                        <Menu.Item
+                            leftSection={<MantineIcon icon={IconTrash} />}
+                            color="red"
+                            onClick={() => {
+                                dispatch(
+                                    explorerActions.removeAdditionalMetric(
+                                        itemFieldId,
+                                    ),
+                                );
+                            }}
+                        >
+                            Delete custom metric
+                        </Menu.Item>
+                    </>
+                ) : (
+                    <Menu.Item
+                        leftSection={<MantineIcon icon={IconTrash} />}
+                        color="red"
+                        onClick={() => {
+                            dispatch(explorerActions.removeField(itemFieldId));
+                        }}
+                    >
+                        Remove
+                    </Menu.Item>
+                )}
             </>
         );
     } else if (meta?.isInvalidItem) {
@@ -229,6 +345,9 @@ const ContextMenu: FC<ContextMenuProps> = ({
             </>
         );
     } else if (item && isCustomDimension(item)) {
+        const hideSqlAuthoringActions =
+            isCustomSqlDimension(item) && cannotAuthorCustomSql;
+        const hideRemove = hideSqlAuthoringActions && !!savedChart;
         return (
             <>
                 {isFilterableField(item) && (
@@ -250,34 +369,63 @@ const ContextMenu: FC<ContextMenuProps> = ({
                     </>
                 )}
 
-                <Menu.Item
-                    leftSection={<MantineIcon icon={IconPencil} />}
-                    onClick={() => {
-                        dispatch(
-                            explorerActions.toggleCustomDimensionModal({
-                                item,
-                                isEditing: true,
-                            }),
-                        );
-                    }}
-                >
-                    Edit custom dimension
-                </Menu.Item>
-                <Menu.Divider />
+                {!hideSqlAuthoringActions && (
+                    <>
+                        <Menu.Item
+                            leftSection={<MantineIcon icon={IconPencil} />}
+                            onClick={() => {
+                                dispatch(
+                                    explorerActions.toggleCustomDimensionModal({
+                                        item,
+                                        isEditing: true,
+                                    }),
+                                );
+                            }}
+                        >
+                            Edit custom dimension
+                        </Menu.Item>
+                        <Menu.Divider />
+                    </>
+                )}
 
-                <ColumnHeaderSortMenuOptions item={item} sort={sort} />
+                <ColumnHeaderSortMenuOptions
+                    item={item}
+                    selectedDirection={sortSelectedDirection}
+                    onSelect={onSortSelect}
+                />
 
-                <Menu.Divider />
+                {!hideRemove && (
+                    <>
+                        <Menu.Divider />
 
-                <Menu.Item
-                    leftSection={<MantineIcon icon={IconTrash} />}
-                    color="red"
-                    onClick={() => {
-                        dispatch(explorerActions.removeField(getItemId(item)));
-                    }}
-                >
-                    Remove
-                </Menu.Item>
+                        <Menu.Item
+                            leftSection={<MantineIcon icon={IconMinus} />}
+                            onClick={() => {
+                                dispatch(
+                                    explorerActions.toggleDimension(
+                                        getItemId(item),
+                                    ),
+                                );
+                            }}
+                        >
+                            Remove
+                        </Menu.Item>
+
+                        <Menu.Item
+                            leftSection={<MantineIcon icon={IconTrash} />}
+                            color="red"
+                            onClick={() => {
+                                dispatch(
+                                    explorerActions.removeCustomDimension(
+                                        getItemId(item),
+                                    ),
+                                );
+                            }}
+                        >
+                            Delete custom dimension
+                        </Menu.Item>
+                    </>
+                )}
             </>
         );
     } else if (item && isTableCalculation(item)) {
@@ -291,7 +439,7 @@ const ContextMenu: FC<ContextMenuProps> = ({
                     }}
                 >
                     Filter by{' '}
-                    <Text span fw={500}>
+                    <Text span fw="semibold">
                         {getItemLabelWithoutTableName(item)}
                     </Text>
                 </Menu.Item>
@@ -313,7 +461,11 @@ const ContextMenu: FC<ContextMenuProps> = ({
 
                 <Menu.Divider />
 
-                <ColumnHeaderSortMenuOptions item={item} sort={sort} />
+                <ColumnHeaderSortMenuOptions
+                    item={item}
+                    selectedDirection={sortSelectedDirection}
+                    onSelect={onSortSelect}
+                />
 
                 <Menu.Divider />
 
@@ -345,6 +497,15 @@ const ColumnHeaderContextMenu: FC<HeaderProps> = ({ header }) => {
 
     const meta = header.column.columnDef.meta as TableColumn['meta'];
     const item = meta?.item;
+    const merge = useMergeSafe();
+    const mergeTableCalculation = useMemo(() => {
+        if (!item || !merge?.mergeResults) return undefined;
+        const origin = merge.mergeResults.fieldOrigins[getItemId(item)];
+        if (origin?.kind !== 'tableCalculation') return undefined;
+        return merge.tableCalculations.find(
+            (calculation) => calculation.name === item.name,
+        );
+    }, [item, merge]);
 
     if (meta && (meta.item || meta.isInvalidItem === true)) {
         return (
@@ -353,15 +514,16 @@ const ColumnHeaderContextMenu: FC<HeaderProps> = ({ header }) => {
                     e.stopPropagation();
                 }}
             >
-                <Group spacing="two" noWrap>
-                    <Menu withinPortal withArrow shadow="md">
+                <Group gap="two" wrap="nowrap">
+                    <Menu withArrow>
                         <Menu.Target>
                             <ActionIcon
                                 size="xs"
                                 variant="light"
                                 bg="transparent"
+                                aria-label="Context menu"
                             >
-                                <MantineIcon icon={IconChevronDown} />
+                                <MantineIcon icon={IconDots} />
                             </ActionIcon>
                         </Menu.Target>
 
@@ -371,25 +533,39 @@ const ColumnHeaderContextMenu: FC<HeaderProps> = ({ header }) => {
                                 onToggleCalculationEditModal={setShowUpdate}
                                 onToggleCalculationDeleteModal={setShowDelete}
                                 onQuickCalculationCreated={setQuickCalcToEdit}
+                                mergeTableCalculation={mergeTableCalculation}
                             />
                         </Menu.Dropdown>
                     </Menu>
                 </Group>
 
-                {showUpdate && (
-                    <UpdateTableCalculationModal
-                        opened
-                        tableCalculation={item as TableCalculation}
-                        onClose={() => setShowUpdate(false)}
-                    />
-                )}
+                {showUpdate &&
+                    (mergeTableCalculation ? (
+                        <MergeTableCalculationModal
+                            opened
+                            tableCalculation={mergeTableCalculation}
+                            onClose={() => setShowUpdate(false)}
+                        />
+                    ) : (
+                        <UpdateTableCalculationModal
+                            opened
+                            tableCalculation={item as TableCalculation}
+                            onClose={() => setShowUpdate(false)}
+                        />
+                    ))}
 
-                {showDelete && (
-                    <DeleteTableCalculationModal
-                        tableCalculation={item as TableCalculation}
-                        onClose={() => setShowDelete(false)}
-                    />
-                )}
+                {showDelete &&
+                    (mergeTableCalculation ? (
+                        <DeleteMergeTableCalculationModal
+                            tableCalculation={mergeTableCalculation}
+                            onClose={() => setShowDelete(false)}
+                        />
+                    ) : (
+                        <DeleteTableCalculationModal
+                            tableCalculation={item as TableCalculation}
+                            onClose={() => setShowDelete(false)}
+                        />
+                    ))}
 
                 {quickCalcToEdit && (
                     <UpdateTableCalculationModal

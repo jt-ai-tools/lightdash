@@ -128,7 +128,6 @@ export const spaceEntry: SpaceTable['base'] = {
     slug: 'space-name',
 
     name: 'space name',
-    is_private: false,
     created_at: new Date(),
     project_id: 0,
     organization_uuid: 'organizationUuid',
@@ -136,7 +135,9 @@ export const spaceEntry: SpaceTable['base'] = {
     parent_space_uuid: null,
     path: 'space-name',
     inherit_parent_permissions: true,
+    project_member_access_role: null,
     is_default_user_space: false,
+    color_palette_uuid: null,
 
     deleted_at: null,
     deleted_by_user_uuid: null,
@@ -144,6 +145,7 @@ export const spaceEntry: SpaceTable['base'] = {
 export const savedChartEntry: SavedChartTable['base'] = {
     saved_query_id: 0,
     saved_query_uuid: '123',
+    project_uuid: 'project_uuid',
     space_id: 0,
     name: 'chart name',
     slug: 'chart-name',
@@ -159,11 +161,13 @@ export const savedChartEntry: SavedChartTable['base'] = {
     first_viewed_at: null,
     deleted_at: null,
     deleted_by_user_uuid: null,
+    color_palette_uuid: null,
 };
 
 export const dashboardEntry: DashboardTable['base'] = {
     dashboard_id: 0,
     dashboard_uuid: 'my_dashboard_uuid',
+    project_uuid: projectEntry.project_uuid,
     name: 'name',
     slug: 'name',
 
@@ -176,9 +180,12 @@ export const dashboardEntry: DashboardTable['base'] = {
 
     deleted_at: null,
     deleted_by_user_uuid: null,
+    color_palette_uuid: null,
+    owner_user_uuid: null,
 };
 
 export const dashboardVersionEntry: DashboardVersionTable['base'] = {
+    agent_identity: null,
     dashboard_version_id: 0,
     dashboard_version_uuid: 'dashboard-version-uuid',
     dashboard_id: 0,
@@ -220,6 +227,10 @@ export const dashboardWithVersionEntry: GetDashboardQuery = {
     views_count: 1,
     first_viewed_at: new Date(1),
     config: undefined,
+    owner_user_uuid: null,
+    owner_first_name: null,
+    owner_last_name: null,
+    owner_email: null,
 };
 
 export const dashboardTileEntry: DashboardTileTable['base'] = {
@@ -268,6 +279,8 @@ export const expectedDashboard: DashboardDAO = {
     uuid: dashboardEntry.dashboard_uuid,
     name: dashboardEntry.name,
     slug: `name`,
+    verification: null,
+    owner: null,
 
     description: dashboardEntry.description,
     updatedAt: dashboardVersionEntry.created_at,
@@ -332,6 +345,7 @@ export const expectedDashboard: DashboardDAO = {
     views: 1,
     firstViewedAt: new Date(1),
     tabs: [],
+    colorPaletteUuid: null,
 };
 
 export const expectedAllDashboards: DashboardBasicDetailsWithTileTypes[] = [
@@ -339,6 +353,7 @@ export const expectedAllDashboards: DashboardBasicDetailsWithTileTypes[] = [
         organizationUuid: 'organizationUuid',
         projectUuid: projectEntry.project_uuid,
         uuid: dashboardEntry.dashboard_uuid,
+        slug: dashboardEntry.slug,
         name: dashboardEntry.name,
         description: dashboardEntry.description,
         updatedAt: dashboardVersionEntry.created_at,
@@ -353,6 +368,7 @@ export const expectedAllDashboards: DashboardBasicDetailsWithTileTypes[] = [
         views: 1,
         firstViewedAt: new Date(1),
         validationErrors: [],
+        verification: null,
         tileTypes: [DashboardTileTypes.SAVED_CHART],
     },
 ];
@@ -367,6 +383,9 @@ export const user: SessionUser = {
     organizationCreatedAt: new Date(),
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
+    timezone: null,
     isSetupComplete: true,
     userId: 0,
     role: OrganizationMemberRole.ADMIN,

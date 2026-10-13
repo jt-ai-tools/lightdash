@@ -1,15 +1,20 @@
-import { ActionIcon, Group, Highlight, Paper, rem } from '@mantine-8/core';
+import {
+    ActionIcon,
+    Group,
+    Highlight,
+    Paper,
+    rem,
+    Tooltip,
+} from '@mantine/core';
 import {
     IconCheck,
-    IconChevronDown,
-    IconChevronRight,
     IconFolder,
+    IconFolderOpen,
+    IconFolders,
 } from '@tabler/icons-react';
+import { clsx } from 'clsx';
 import React, { useMemo } from 'react';
-
 import MantineIcon from '../MantineIcon';
-
-import { clsx } from '@mantine/core';
 import classes from './TreeItem.module.css';
 
 type Props = {
@@ -19,6 +24,7 @@ type Props = {
     selected?: boolean;
     hasChildren?: boolean;
     isRoot?: boolean;
+    restricted?: boolean;
     className?: string;
     withPadding?: boolean;
     withRootSelectable?: boolean;
@@ -35,6 +41,7 @@ const TreeItem: React.FC<Props> = ({
     withPadding = true,
     withRootSelectable = true,
     isRoot = false,
+    restricted = false,
     className,
     onClick,
     onClickExpand,
@@ -48,31 +55,57 @@ const TreeItem: React.FC<Props> = ({
         );
     }, [label]);
 
-    return (
+    const folderIcon = (
+        <MantineIcon
+            icon={
+                isRoot || (hasChildren && expanded)
+                    ? IconFolderOpen
+                    : IconFolder
+            }
+            color="ldGray.7"
+            size="lg"
+            stroke={1.5}
+            className={classes.itemIcon}
+        />
+    );
+
+    const content = (
         <Paper
             component={Group}
             data-selected={selected}
-            data-is-selectable={!isRoot || withRootSelectable}
+            data-is-selectable={!restricted && (!isRoot || withRootSelectable)}
+            data-restricted={restricted}
             className={clsx(classes.paper, className)}
-            miw={rem(200)}
+            miw={0}
             w="100%"
             gap={rem(4)}
             h={rem(32)}
-            // This component isn't optimized for the top-level root item,
-            // so we apply a negative left margin when the chevron isn't needed.
-            // (Root spaces are always expanded and don’t require a chevron.)
             ml={isRoot ? rem(-4) : undefined}
             pl={withPadding ? rem(4) : undefined}
             pr={withPadding ? 'xs' : undefined}
             radius="sm"
             withBorder={false}
-            shadow="none"
             wrap="nowrap"
-            onClick={onClick}
+            onClick={restricted ? undefined : onClick}
+            role={isRoot && withRootSelectable ? 'button' : undefined}
+            tabIndex={
+                isRoot && withRootSelectable && !restricted ? 0 : undefined
+            }
+            onKeyDown={
+                isRoot && withRootSelectable && !restricted
+                    ? (event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              onClick?.();
+                          }
+                      }
+                    : undefined
+            }
         >
-            {isRoot ? null : (
+            {!isRoot && hasChildren ? (
                 <ActionIcon
-                    data-has-children={hasChildren}
+                    aria-label={`${expanded ? 'Collapse' : 'Expand'} ${stringLabel}`}
+                    aria-expanded={expanded}
                     className={classes.actionIcon}
                     onClick={(e) => {
                         e.stopPropagation();
@@ -81,27 +114,38 @@ const TreeItem: React.FC<Props> = ({
                     size="xs"
                     variant="transparent"
                 >
-                    <MantineIcon
-                        icon={expanded ? IconChevronDown : IconChevronRight}
-                        size="lg"
-                        color="ldGray.6"
-                    />
+                    <span
+                        className={classes.folderToggle}
+                        data-expanded={expanded}
+                        aria-hidden
+                    >
+                        <span className={classes.folderClosed}>
+                            <MantineIcon
+                                icon={IconFolders}
+                                color="ldGray.7"
+                                size="lg"
+                                stroke={1.5}
+                            />
+                        </span>
+                        <span className={classes.folderOpen}>
+                            <MantineIcon
+                                icon={IconFolderOpen}
+                                color="ldGray.7"
+                                size="lg"
+                                stroke={1.5}
+                            />
+                        </span>
+                    </span>
                 </ActionIcon>
+            ) : (
+                folderIcon
             )}
-
-            <MantineIcon
-                icon={IconFolder}
-                color="ldGray.7"
-                size="lg"
-                stroke={1.5}
-                style={{ flexShrink: 0 }}
-            />
 
             <Highlight
                 truncate="end"
                 fz={rem(13)}
                 fw={500}
-                style={{ flexGrow: 1 }}
+                flex={1}
                 highlight={matchHighlights}
                 highlightStyles={{
                     backgroundColor: 'transparent',
@@ -116,11 +160,24 @@ const TreeItem: React.FC<Props> = ({
                     icon={IconCheck}
                     size="lg"
                     color="blue.6"
-                    style={{ flexShrink: 0 }}
+                    className={classes.itemIcon}
                 />
             )}
         </Paper>
     );
+
+    if (restricted) {
+        return (
+            <Tooltip
+                label="You do not have access to this space"
+                position="top-start"
+            >
+                {content}
+            </Tooltip>
+        );
+    }
+
+    return content;
 };
 
 export default TreeItem;

@@ -1,3 +1,7 @@
-.downloadButton {
-    align-self: end;
+.popover {
+    overflow-y: auto;
+
+    > * {
+        flex-shrink: 0;
+    }
 }

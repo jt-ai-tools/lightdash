@@ -1,73 +1,97 @@
 import {
+    agentToolDefinitionsByName,
     isToolName,
-    toolDashboardV2ArgsSchema,
-    toolFindChartsArgsSchema,
-    toolFindContentArgsSchema,
-    toolFindDashboardsArgsSchema,
-    toolFindExploresArgsSchemaV3,
-    toolFindFieldsArgsSchema,
-    toolImproveContextArgsSchema,
     type ToolName,
-    toolProposeChangeArgsSchema,
-    toolRunQueryArgsSchema,
-    toolSearchFieldValuesArgsSchema,
-    toolTableVizArgsSchema,
-    toolTimeSeriesArgsSchema,
-    toolVerticalBarArgsSchema,
 } from '@lightdash/common';
-import { generateObject } from 'ai';
+import { generateText, Output } from 'ai';
 import { JSONDiff } from 'autoevals';
 import { compact, differenceWith } from 'lodash';
 import { z } from 'zod';
+import {
+    emitAiUsage,
+    languageModelUsageToTokens,
+    type AiKeyManagement,
+} from '../../../../analytics/aiUsage';
 import { DbAiAgentToolCall } from '../../../database/entities/ai';
 import { defaultAgentOptions } from '../agents/agentV2';
 import { getOpenaiGptmodel } from '../models/openai-gpt';
+import {
+    getAiCallTelemetry,
+    getLanguageModelAttribution,
+} from './aiCallTelemetry';
 
 const TOOL_NAME_TO_DB_TOOL_NAME = {
     findExplores: 'find_explores',
+    findCustomChartTypes: 'find_custom_chart_types',
     findFields: 'find_fields',
+    searchSemanticLayer: 'search_semantic_layer',
+    analyzeFieldImpact: 'analyze_field_impact',
+    discoverFields: 'discover_fields',
+    grepFields: 'grep_fields',
+    getMetadata: 'get_metadata',
     searchFieldValues: 'search_field_values',
     findContent: 'find_content',
+    listContent: 'list_content',
     findDashboards: 'find_dashboards',
     findCharts: 'find_charts',
-    generateTableVizConfig: 'table',
-    generateTimeSeriesVizConfig: 'time_series_chart',
-    generateBarVizConfig: 'vertical_bar_chart',
+    getDashboardCharts: 'get_dashboard_charts',
+    readContent: 'read_content',
+    resolveUrl: 'resolve_url',
+    editContent: 'edit_content',
+    createContent: 'create_content',
+    createScheduledDelivery: 'create_scheduled_delivery',
+    updateUserName: 'update_user_name',
+    loadSkill: 'load_skill',
+    generateHashes: 'generate_hashes',
+    loadProjectContext: 'load_project_context',
+    loadMcpTools: 'load_mcp_tools',
+    generateUuids: 'generate_uuids',
+    generateVisualization: 'query_result',
     runQuery: 'query_result',
+    runContentQuery: 'run_content_query',
+    runSavedChart: 'run_saved_chart',
+    runSql: 'run_sql',
+    runComposerQueries: 'run_composer_queries',
+    listWarehouseTables: 'list_warehouse_tables',
+    describeWarehouseTable: 'describe_warehouse_table',
+    listKnowledgeDocuments: 'list_knowledge_documents',
+    getKnowledgeDocumentContent: 'get_knowledge_document_content',
+    readPinnedThread: 'read_pinned_thread',
+    readAttachments: 'read_attachments',
     generateDashboard: 'generate_dashboard',
-    improveContext: 'improve_context',
-    proposeChange: 'propose_change',
+    listProjects: 'list_projects',
+    getProjectInfo: 'get_project_info',
+    generateDataApp: 'generate_data_app',
+    iterateDataApp: 'iterate_data_app',
+    listDataAppThemes: 'list_data_app_themes',
+    editDbtProject: 'edit_dbt_project',
+    editProjectContext: 'edit_project_context',
+    editRepo: 'edit_repo',
+    syncDbtProject: 'sync_dbt_project',
+    exploreRepo: 'explore_repo',
+    discoverRepos: 'discover_repos',
+    listWorkstreams: 'list_workstreams',
+    closePullRequest: 'close_pull_request',
+    getPullRequestDiff: 'get_pull_request_diff',
+    setupPreviewDeploy: 'setup_preview_deploy',
+    submitResearchReport: 'submit_research_report',
+    delegateResearchTask: 'delegate_research_task',
+    submitWorkerFindings: 'submit_worker_findings',
 } satisfies Record<ToolName, string>;
-
-// Explicit mapping of tool names to their schemas
-const TOOL_SCHEMAS = {
-    findExplores: toolFindExploresArgsSchemaV3,
-    findFields: toolFindFieldsArgsSchema,
-    searchFieldValues: toolSearchFieldValuesArgsSchema,
-    generateBarVizConfig: toolVerticalBarArgsSchema,
-    generateTableVizConfig: toolTableVizArgsSchema,
-    generateTimeSeriesVizConfig: toolTimeSeriesArgsSchema,
-    // TODO: agent needs to be v2 for this to work
-    generateDashboard: toolDashboardV2ArgsSchema,
-    findContent: toolFindContentArgsSchema,
-    findDashboards: toolFindDashboardsArgsSchema,
-    findCharts: toolFindChartsArgsSchema,
-    improveContext: toolImproveContextArgsSchema,
-    proposeChange: toolProposeChangeArgsSchema,
-    runQuery: toolRunQueryArgsSchema,
-} satisfies Record<ToolName, z.ZodSchema>;
 
 const getToolInfo = (toolName: string) => {
     if (!isToolName(toolName)) {
         throw new Error(`Tool ${toolName} is not a valid tool`);
     }
-    return TOOL_SCHEMAS[toolName];
+    return agentToolDefinitionsByName[toolName].inputSchema;
 };
 
-const availableTools = Object.entries(TOOL_SCHEMAS).map(([name, schema]) => ({
-    name: TOOL_NAME_TO_DB_TOOL_NAME[name as ToolName],
-    description: schema.description,
-}));
+const availableTools = Object.entries(agentToolDefinitionsByName).map(
+    ([name, definition]) => ({
+        name: TOOL_NAME_TO_DB_TOOL_NAME[name as ToolName],
+        description: definition.description,
+    }),
+);
 
 const availableToolsDescription = availableTools
     .map((tool) => `- ${tool.name}: ${tool.description}`)
@@ -130,6 +154,7 @@ type Params = {
     expectedOutcome: string;
     judge: ReturnType<typeof getOpenaiGptmodel>['model'];
     callOptions: ReturnType<typeof getOpenaiGptmodel>['callOptions'];
+    keyManagement: AiKeyManagement;
     expectedArgsValidation?: {
         toolName: string;
         expectedArgs: object;
@@ -272,16 +297,24 @@ export const evaluateToolCallSequence = async (
     toolCallsScores: ToolCallsScores,
     judge: ReturnType<typeof getOpenaiGptmodel>['model'],
     callOptions: ReturnType<typeof getOpenaiGptmodel>['callOptions'],
+    keyManagement: AiKeyManagement,
 ): Promise<ToolEvaluationResponse> => {
     const toolCallsDescription = toolCallsScores.scores
         .map((score) => score.description)
         .join('\n\n');
 
-    const { object: evaluationResult } = await generateObject({
+    const telemetry = getAiCallTelemetry({
+        functionId: 'evaluateToolCallSequence',
+        feature: 'llm-judge',
+        ...getLanguageModelAttribution(judge),
+        keyManagement,
+    });
+    const result = await generateText({
         model: judge,
         ...defaultAgentOptions,
         ...callOptions,
-        schema: toolEvaluationSchema,
+        ...telemetry,
+        output: Output.object({ schema: toolEvaluationSchema }),
         prompt: `
 You are evaluating AI agent tool usage for business logic testing. Here is the data:
 [BEGIN DATA]
@@ -356,8 +389,9 @@ For passed, return true if effectiveness is excellent/good AND appropriateTools 
 Use empty arrays for suggestions, missingTools, unnecessaryTools, validationErrors, and expectedArgsValidation when not applicable.
         `,
     });
+    emitAiUsage(telemetry, languageModelUsageToTokens(result.usage));
 
-    return evaluationResult;
+    return result.output;
 };
 
 export const llmAsJudgeForTools = async ({
@@ -366,6 +400,7 @@ export const llmAsJudgeForTools = async ({
     expectedOutcome,
     judge,
     callOptions,
+    keyManagement,
     expectedArgsValidation = [],
 }: Params): Promise<ToolJudgeResult> => {
     const toolCallsScores = await scoreToolCalls(
@@ -379,6 +414,7 @@ export const llmAsJudgeForTools = async ({
         toolCallsScores,
         judge,
         callOptions,
+        keyManagement,
     );
 
     return {

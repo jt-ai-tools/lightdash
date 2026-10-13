@@ -5,16 +5,20 @@ Dashboards combine multiple charts, KPIs, and content tiles into a cohesive view
 ## Dashboard Structure
 
 ```yaml
-version: 1
+contentType: dashboard
+config:          # Dashboard configuration (date zoom, etc.)
+  isAddFilterDisabled: false
+  isDateZoomDisabled: false
+description: "Overview of sales performance"
+filters:         # Dashboard-level filters
+  dimensions: []
 name: "Sales Dashboard"
 slug: sales-dashboard
 spaceSlug: sales
-description: "Overview of sales performance"
-
+tabs: []         # Optional tabs for organization; tabs support hidden: true/false
 tiles: []        # Chart and content tiles
-tabs: []         # Optional tabs for organization
-filters:         # Dashboard-level filters
-  dimensions: []
+verified: true   # Optional: true/false to verify/unverify on upload, omit to leave unchanged. Admins only.
+version: 1
 ```
 
 ## Tile Types
@@ -25,31 +29,38 @@ Display a chart from your project:
 
 ```yaml
 tiles:
-  - type: saved_chart
-    x: 0              # Grid column (0-35)
-    y: 0              # Grid row
-    w: 12             # Width in grid units (max 36)
-    h: 6              # Height in grid units
+  - h: 6              # Height in grid units
     properties:
       chartSlug: monthly-revenue
-      title: "Monthly Revenue"      # Optional override
       hideTitle: false
+      title: "Monthly Revenue"      # Optional override — does NOT auto-update when chart is renamed
+    type: saved_chart
+    w: 12             # Width in grid units (max 36)
+    x: 0              # Grid column (0-35)
+    y: 0              # Grid row
 ```
+
+**WARNING:** The `title` property is independent of the chart's own name. When you rename or repurpose a chart, you MUST also update the `title` in every dashboard tile that references it via `chartSlug`. Forgetting this leaves stale titles on the dashboard.
+
+**Chart scoping:** Charts can be scoped to a dashboard (via `dashboardSlug` on the chart YAML) or live independently in a space. See [Chart Types](../SKILL.md#chart-types) for guidance.
+
+**Nested `spaceSlug`:** Use `parent/child` syntax to put a dashboard in a sub-space, e.g. `spaceSlug: sales/forecasts`. A bare slug is a flat top-level space; the slash is what creates the hierarchy.
 
 ### SQL Chart Tile
 
-Display a SQL-based chart:
+Display a SQL chart. The SQL chart must exist before the dashboard references it: upload or create it first, then use its slug as `chartSlug`. See [SQL Chart Reference](./sql-chart-reference.md) for the SQL chart body and workflow.
 
 ```yaml
 tiles:
-  - type: sql_chart
+  - h: 6
+    properties:
+      chartName: Custom SQL chart
+      chartSlug: custom-sql-chart
+      title: Custom SQL chart
+    type: sql_chart
+    w: 12
     x: 12
     y: 0
-    w: 12
-    h: 6
-    properties:
-      chartSlug: custom-sql-chart
-      savedSqlUuid: "abc123-def456"
 ```
 
 ### Markdown Tile
@@ -58,13 +69,8 @@ Add text, notes, or instructions:
 
 ```yaml
 tiles:
-  - type: markdown
-    x: 0
-    y: 6
-    w: 12
-    h: 4
+  - h: 4
     properties:
-      title: "Key Insights"
       content: |
         ## Q4 Performance Summary
 
@@ -75,6 +81,11 @@ tiles:
           2. APAC expansion
 
         [View detailed report](/dashboards/q4-deep-dive)
+      title: "Key Insights"
+    type: markdown
+    w: 12
+    x: 0
+    y: 6
 ```
 
 ### Loom Video Tile
@@ -83,14 +94,14 @@ Embed Loom videos:
 
 ```yaml
 tiles:
-  - type: loom
-    x: 24
-    y: 0
-    w: 12
-    h: 6
+  - h: 6
     properties:
       title: "Dashboard Walkthrough"
       url: "https://www.loom.com/share/abc123"
+    type: loom
+    w: 12
+    x: 24
+    y: 0
 ```
 
 ### Heading Tile
@@ -99,13 +110,13 @@ Add section headers:
 
 ```yaml
 tiles:
-  - type: heading
-    x: 0
-    y: 10
-    w: 36
-    h: 1
+  - h: 1
     properties:
       text: "Regional Breakdown"
+    type: heading
+    w: 36
+    x: 0
+    y: 10
 ```
 
 ## Grid Layout
@@ -163,38 +174,81 @@ x: 27, y: 0, w: 9, h: 3
 
 Organize tiles into multiple views:
 
+**IMPORTANT:** Tab `uuid` values must be valid UUIDs (e.g., `"a1b2c3d4-e5f6-7890-abcd-ef1234567890"`), not friendly names. The linter will reject non-UUID values. Generate UUIDs with `python3 -c "import uuid; print(uuid.uuid4())"`.
+
 ```yaml
 tabs:
-  - uuid: "overview-tab"
-    name: "Overview"
+  - name: "Overview"
+    hidden: false
     order: 0
-  - uuid: "details-tab"
-    name: "Details"
+    uuid: "b3f1a2c4-d5e6-4f78-9abc-def012345678"
+  - name: "Details"
+    hidden: false
     order: 1
-  - uuid: "trends-tab"
-    name: "Trends"
+    uuid: "c4d2b3e5-f6a7-4089-bcde-f12345678901"
+  - name: "Trends"
+    hidden: false
     order: 2
+    uuid: "d5e3c4f6-a7b8-4190-cdef-234567890123"
 
 tiles:
   # Overview tab tiles
-  - type: saved_chart
-    tabUuid: "overview-tab"
-    x: 0
-    y: 0
-    w: 36
-    h: 6
+  - h: 6
     properties:
       chartSlug: revenue-summary
-
-  # Details tab tiles
-  - type: saved_chart
-    tabUuid: "details-tab"
+    tabUuid: "b3f1a2c4-d5e6-4f78-9abc-def012345678"
+    type: saved_chart
+    w: 36
     x: 0
     y: 0
-    w: 36
-    h: 10
+
+  # Details tab tiles
+  - h: 10
     properties:
       chartSlug: detailed-breakdown
+    tabUuid: "c4d2b3e5-f6a7-4089-bcde-f12345678901"
+    type: saved_chart
+    w: 36
+    x: 0
+    y: 0
+```
+
+**IMPORTANT:** Tab rendering depends on `tabs` and tile `tabUuid` values:
+
+- If no tabs are defined, all tiles render in a single untabbed dashboard view.
+- If tabs are defined, tiles with `tabUuid: null` render on the default/first tab.
+- Avoid relying on this defaulting behavior. When using tabs, set each tile's `tabUuid` explicitly.
+
+Example: no tabs, so both tiles render together in one untabbed view.
+
+```yaml
+tabs: []
+
+tiles:
+  - tabUuid: null
+    type: saved_chart
+  - tabUuid: null
+    type: saved_chart
+```
+
+Example: tabs are defined, so the `null` tile renders on "Overview" and the other tile renders on "Details".
+
+```yaml
+tabs:
+  - name: "Overview"
+    hidden: false
+    order: 0
+    uuid: "b3f1a2c4-d5e6-4f78-9abc-def012345678"
+  - name: "Details"
+    hidden: false
+    order: 1
+    uuid: "c4d2b3e5-f6a7-4089-bcde-f12345678901"
+
+tiles:
+  - tabUuid: null
+    type: saved_chart
+  - tabUuid: "c4d2b3e5-f6a7-4089-bcde-f12345678901"
+    type: saved_chart
 ```
 
 ## Dashboard Filters
@@ -204,17 +258,17 @@ tiles:
 ```yaml
 filters:
   dimensions:
-    - target:
+    - disabled: false
+      label: "Date Range"
+      operator: inThePast
+      required: false
+      settings:
+        completed: true
+        unitOfTime: months
+      target:
         fieldId: orders_created_at_month
         tableName: orders
-      operator: inThePast
       values: [12]
-      settings:
-        unitOfTime: months
-        completed: true
-      label: "Date Range"
-      required: false
-      disabled: false
 ```
 
 ### Filter Operators
@@ -246,14 +300,14 @@ filters:
 ```yaml
 filters:
   dimensions:
-    - target:
+    - operator: inThePast
+      settings:
+        completed: true        # Only completed periods
+        unitOfTime: days       # days, weeks, months, quarters, years
+      target:
         fieldId: orders_created_at
         tableName: orders
-      operator: inThePast
       values: [30]
-      settings:
-        unitOfTime: days       # days, weeks, months, quarters, years
-        completed: true        # Only completed periods
 ```
 
 ### Per-Tile Filter Targeting (tileTargets)
@@ -269,25 +323,25 @@ When your dashboard has tiles from multiple explores (e.g., orders and customers
 ```yaml
 filters:
   dimensions:
-    - target:
+    - label: "Date Range"
+      operator: inThePast
+      settings:
+        completed: false
+        unitOfTime: days
+      target:
         fieldId: orders_created_at    # Default: for tiles using orders explore
         tableName: orders
-      operator: inThePast
-      values: [30]
-      settings:
-        unitOfTime: days
-        completed: false
-      label: "Date Range"
       tileTargets:
-        sales-by-region:              # Tile slug - uses orders explore (matches default)
-          fieldId: orders_created_at
-          tableName: orders
         customer-metrics:             # Tile slug - uses customers explore (different field!)
           fieldId: customers_signup_date
           tableName: customers
         revenue-summary:              # Tile slug - uses orders explore
           fieldId: orders_created_at
           tableName: orders
+        sales-by-region:              # Tile slug - uses orders explore (matches default)
+          fieldId: orders_created_at
+          tableName: orders
+      values: [30]
 ```
 
 #### Excluding Tiles from a Filter
@@ -297,14 +351,14 @@ Set a tile target to `false` to exclude it from the filter entirely:
 ```yaml
 filters:
   dimensions:
-    - target:
+    - label: "Region"
+      operator: equals
+      target:
         fieldId: orders_region
         tableName: orders
-      operator: equals
-      values: []
-      label: "Region"
       tileTargets:
         company-overview: false       # This tile ignores the region filter
+      values: []
 ```
 
 #### Empty tileTargets
@@ -314,16 +368,16 @@ When all tiles use the same explore, you can leave `tileTargets` empty - the fil
 ```yaml
 filters:
   dimensions:
-    - target:
+    - label: "Time Period"
+      operator: inThePast
+      settings:
+        completed: true
+        unitOfTime: months
+      target:
         fieldId: orders_created_at
         tableName: orders
-      operator: inThePast
-      values: [12]
-      settings:
-        unitOfTime: months
-        completed: true
-      label: "Time Period"
       tileTargets: {}                 # Applies to all tiles with orders_created_at
+      values: [12]
 ```
 
 ### Required Filters
@@ -333,13 +387,13 @@ Force users to select a value:
 ```yaml
 filters:
   dimensions:
-    - target:
+    - label: "Select Date"
+      operator: equals
+      required: true           # Must be set
+      target:
         fieldId: orders_date
         tableName: orders
-      operator: equals
       values: []
-      required: true           # Must be set
-      label: "Select Date"
 ```
 
 ### Single Value Filters
@@ -349,96 +403,158 @@ Restrict to single selection:
 ```yaml
 filters:
   dimensions:
-    - target:
+    - operator: equals
+      singleValue: true        # Only one value allowed
+      target:
         fieldId: orders_region
         tableName: orders
-      operator: equals
       values: []
-      singleValue: true        # Only one value allowed
 ```
+
+## Dashboard Configuration
+
+Control dashboard-level settings like date zoom behavior:
+
+```yaml
+config:
+  dateZoomGranularities:
+    - Day
+    - Week
+    - Month
+    - Quarter
+    - Year
+  defaultDateZoomGranularity: Month
+  isAddFilterDisabled: false
+  isDateZoomDisabled: false
+```
+
+### Config Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `isDateZoomDisabled` | boolean | Disable the date zoom feature entirely |
+| `isAddFilterDisabled` | boolean | Disable the add filter button entirely |
+| `dateZoomGranularities` | string[] | Available granularity options (e.g., `Day`, `Week`, `Month`, `Quarter`, `Year`, or custom like `fiscal_quarter`) |
+| `defaultDateZoomGranularity` | string | The granularity selected by default when the dashboard loads |
+| `pinnedParameters` | string[] | List of pinned parameter names |
+
+When `config` is omitted, date zoom is enabled with all default granularities.
 
 ## Complete Dashboard Example
 
 ```yaml
-version: 1
+contentType: dashboard
+config:
+  dateZoomGranularities:
+    - Day
+    - Week
+    - Month
+    - Quarter
+    - Year
+  defaultDateZoomGranularity: Month
+  isAddFilterDisabled: false
+  isDateZoomDisabled: false
+description: "High-level sales performance metrics for leadership team"
+filters:
+  dimensions:
+    - label: "Time Period"
+      operator: inThePast
+      settings:
+        completed: false
+        unitOfTime: months
+      target:
+        fieldId: orders_created_at
+        tableName: orders
+      values: [12]
+
+    - label: "Region"
+      operator: equals
+      singleValue: false
+      target:
+        fieldId: orders_region
+        tableName: orders
+      values: []
+
+    - label: "Customer Segment"
+      operator: equals
+      target:
+        fieldId: orders_segment
+        tableName: orders
+      values: []
+
 name: "Executive Sales Dashboard"
 slug: executive-sales-dashboard
 spaceSlug: leadership
-description: "High-level sales performance metrics for leadership team"
-
 tabs:
-  - uuid: "overview"
-    name: "Overview"
+  - name: "Overview"
+    hidden: false
     order: 0
-  - uuid: "regional"
-    name: "By Region"
+    uuid: "e6f4d5a7-b8c9-4201-def0-345678901234"
+  - name: "By Region"
+    hidden: false
     order: 1
-  - uuid: "products"
-    name: "By Product"
+    uuid: "f7a5e6b8-c9d0-4312-ef01-456789012345"
+  - name: "By Product"
+    hidden: false
     order: 2
+    uuid: "a8b6f7c9-d0e1-4423-f012-567890123456"
 
 tiles:
   # Row 1: KPIs (Overview tab)
-  - type: saved_chart
-    tabUuid: "overview"
-    x: 0
-    y: 0
-    w: 9
-    h: 3
+  - h: 3
     properties:
       chartSlug: total-revenue-kpi
       title: "Total Revenue"
-
-  - type: saved_chart
-    tabUuid: "overview"
-    x: 9
-    y: 0
+    tabUuid: "e6f4d5a7-b8c9-4201-def0-345678901234"
+    type: saved_chart
     w: 9
-    h: 3
+    x: 0
+    y: 0
+
+  - h: 3
     properties:
       chartSlug: total-orders-kpi
       title: "Total Orders"
-
-  - type: saved_chart
-    tabUuid: "overview"
-    x: 18
-    y: 0
+    tabUuid: "e6f4d5a7-b8c9-4201-def0-345678901234"
+    type: saved_chart
     w: 9
-    h: 3
+    x: 9
+    y: 0
+
+  - h: 3
     properties:
       chartSlug: new-customers-kpi
       title: "New Customers"
-
-  - type: saved_chart
-    tabUuid: "overview"
-    x: 27
-    y: 0
+    tabUuid: "e6f4d5a7-b8c9-4201-def0-345678901234"
+    type: saved_chart
     w: 9
-    h: 3
+    x: 18
+    y: 0
+
+  - h: 3
     properties:
       chartSlug: avg-order-value-kpi
       title: "Avg Order Value"
+    tabUuid: "e6f4d5a7-b8c9-4201-def0-345678901234"
+    type: saved_chart
+    w: 9
+    x: 27
+    y: 0
 
   # Row 2: Main chart (Overview tab)
-  - type: saved_chart
-    tabUuid: "overview"
-    x: 0
-    y: 3
-    w: 24
-    h: 8
+  - h: 8
     properties:
       chartSlug: revenue-trend
       title: "Revenue Trend"
+    tabUuid: "e6f4d5a7-b8c9-4201-def0-345678901234"
+    type: saved_chart
+    w: 24
+    x: 0
+    y: 3
 
   # Row 2: Notes (Overview tab)
-  - type: markdown
-    tabUuid: "overview"
-    x: 24
-    y: 3
-    w: 12
-    h: 8
+  - h: 8
     properties:
-      title: "Key Insights"
       content: |
         ## This Month
 
@@ -451,80 +567,61 @@ tiles:
         1. Review underperforming regions
         2. Accelerate Q4 campaigns
         3. Monitor churn in SMB
+      title: "Key Insights"
+    tabUuid: "e6f4d5a7-b8c9-4201-def0-345678901234"
+    type: markdown
+    w: 12
+    x: 24
+    y: 3
 
   # Regional tab
-  - type: heading
-    tabUuid: "regional"
-    x: 0
-    y: 0
-    w: 36
-    h: 1
+  - h: 1
     properties:
       text: "Regional Performance"
-
-  - type: saved_chart
-    tabUuid: "regional"
-    x: 0
-    y: 1
-    w: 18
-    h: 8
-    properties:
-      chartSlug: revenue-by-region
-
-  - type: saved_chart
-    tabUuid: "regional"
-    x: 18
-    y: 1
-    w: 18
-    h: 8
-    properties:
-      chartSlug: regional-trend
-
-  # Products tab
-  - type: saved_chart
-    tabUuid: "products"
+    tabUuid: "f7a5e6b8-c9d0-4312-ef01-456789012345"
+    type: heading
+    w: 36
     x: 0
     y: 0
-    w: 36
-    h: 6
+
+  - h: 8
+    properties:
+      chartSlug: revenue-by-region
+    tabUuid: "f7a5e6b8-c9d0-4312-ef01-456789012345"
+    type: saved_chart
+    w: 18
+    x: 0
+    y: 1
+
+  - h: 8
+    properties:
+      chartSlug: regional-trend
+    tabUuid: "f7a5e6b8-c9d0-4312-ef01-456789012345"
+    type: saved_chart
+    w: 18
+    x: 18
+    y: 1
+
+  # Products tab
+  - h: 6
     properties:
       chartSlug: revenue-by-product-category
-
-  - type: saved_chart
-    tabUuid: "products"
-    x: 0
-    y: 6
+    tabUuid: "a8b6f7c9-d0e1-4423-f012-567890123456"
+    type: saved_chart
     w: 36
-    h: 8
+    x: 0
+    y: 0
+
+  - h: 8
     properties:
       chartSlug: product-performance-table
+    tabUuid: "a8b6f7c9-d0e1-4423-f012-567890123456"
+    type: saved_chart
+    w: 36
+    x: 0
+    y: 6
 
-filters:
-  dimensions:
-    - target:
-        fieldId: orders_created_at
-        tableName: orders
-      operator: inThePast
-      values: [12]
-      settings:
-        unitOfTime: months
-        completed: false
-      label: "Time Period"
-
-    - target:
-        fieldId: orders_region
-        tableName: orders
-      operator: equals
-      values: []
-      label: "Region"
-      singleValue: false
-
-    - target:
-        fieldId: orders_segment
-        tableName: orders
-      operator: equals
-      values: []
-      label: "Customer Segment"
+version: 1
 ```
 
 ## Dashboard Best Practices

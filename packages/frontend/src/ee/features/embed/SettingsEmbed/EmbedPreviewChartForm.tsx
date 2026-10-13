@@ -8,6 +8,7 @@ import {
 } from '@lightdash/common';
 import {
     ActionIcon,
+    Badge,
     Button,
     Flex,
     Group,
@@ -20,18 +21,31 @@ import {
     Text,
     TextInput,
     Title,
-} from '@mantine-8/core';
+    useComputedColorScheme,
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
-import { IconEye, IconLink, IconPlus, IconTrash } from '@tabler/icons-react';
+import {
+    IconEye,
+    IconFlask2Filled,
+    IconLink,
+    IconPlus,
+    IconTrash,
+} from '@tabler/icons-react';
 import { useMutation } from '@tanstack/react-query';
-import { useCallback, type FC } from 'react';
+import {
+    useCallback,
+    useEffect,
+    useState,
+    type FC,
+    type ReactNode,
+} from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { lightdashApi } from '../../../../api';
 import MantineIcon from '../../../../components/common/MantineIcon';
 import useToaster from '../../../../hooks/toaster/useToaster';
 import { useAsyncClipboard } from '../../../../hooks/useAsyncClipboard';
 import useUser from '../../../../hooks/user/useUser';
-import EmbedCodeSnippet from './EmbedCodeSnippet';
+import EmbedCodeSnippet, { type EmbedMethod } from './EmbedCodeSnippet';
 
 const useEmbedUrlCreateMutation = (projectUuid: string) => {
     const { showToastError } = useToaster();
@@ -72,11 +86,24 @@ type FormValues = {
 const EmbedPreviewChartForm: FC<{
     projectUuid: string;
     siteUrl: string;
-    charts: Pick<SavedChart, 'uuid' | 'name'>[];
-}> = ({ projectUuid, siteUrl, charts }) => {
+    charts: Pick<SavedChart, 'uuid' | 'name' | 'spaceUuid'>[];
+    writeActions?: CreateEmbedJwt['writeActions'];
+    writeActionsPanel?: ReactNode;
+    onChartSpaceChange?: (spaceUuid: string | undefined) => void;
+}> = ({
+    projectUuid,
+    siteUrl,
+    charts,
+    writeActions,
+    writeActionsPanel,
+    onChartSpaceChange,
+}) => {
     const { mutateAsync: createEmbedUrl } =
         useEmbedUrlCreateMutation(projectUuid);
+    const colorScheme = useComputedColorScheme();
+
     const { data: user } = useUser(true);
+    const [embedMethod, setEmbedMethod] = useState<EmbedMethod>('iframe');
 
     const form = useForm<FormValues>({
         initialValues: {
@@ -101,6 +128,13 @@ const EmbedPreviewChartForm: FC<{
     });
     const { onSubmit, values: formValues } = form;
 
+    useEffect(() => {
+        onChartSpaceChange?.(
+            charts.find((chart) => chart.uuid === form.values.chartUuid)
+                ?.spaceUuid,
+        );
+    }, [charts, form.values.chartUuid, onChartSpaceChange]);
+
     const convertFormValuesToCreateEmbedJwt = useCallback(
         (
             values: FormValues,
@@ -122,6 +156,7 @@ const EmbedPreviewChartForm: FC<{
                     dashboardFiltersInteractivity: undefined,
                     parameterInteractivity: undefined,
                 },
+                writeActions,
                 userAttributes: values.userAttributes.reduce(
                     (acc, item) => ({
                         ...acc,
@@ -135,7 +170,7 @@ const EmbedPreviewChartForm: FC<{
                 },
             };
         },
-        [projectUuid],
+        [writeActions, projectUuid],
     );
 
     const handlePreview = useCallback(async () => {
@@ -147,15 +182,32 @@ const EmbedPreviewChartForm: FC<{
         const data = await createEmbedUrl(
             convertFormValuesToCreateEmbedJwt(formValues, true),
         );
-        window.open(data.url, '_blank');
-    }, [formValues, form, convertFormValuesToCreateEmbedJwt, createEmbedUrl]);
+        // Open data.url in a new tab, matching the current app color scheme
+        const previewUrl = new URL(data.url);
+        previewUrl.searchParams.set('theme', colorScheme);
+        window.open(previewUrl.toString(), '_blank', 'noopener,noreferrer');
+    }, [
+        formValues,
+        form,
+        convertFormValuesToCreateEmbedJwt,
+        createEmbedUrl,
+        colorScheme,
+    ]);
 
     const generateUrl = useCallback(async () => {
         const data = await createEmbedUrl(
             convertFormValuesToCreateEmbedJwt(form.values),
         );
-        return data.url;
-    }, [convertFormValuesToCreateEmbedJwt, createEmbedUrl, form.values]);
+        // Match the current app color scheme
+        const url = new URL(data.url);
+        url.searchParams.set('theme', colorScheme);
+        return url.toString();
+    }, [
+        convertFormValuesToCreateEmbedJwt,
+        createEmbedUrl,
+        form.values,
+        colorScheme,
+    ]);
 
     const { handleCopy } = useAsyncClipboard(generateUrl);
     const handleCopySubmit = onSubmit(handleCopy);
@@ -173,6 +225,13 @@ const EmbedPreviewChartForm: FC<{
                     placeholder="Select a chart..."
                     searchable
                     {...form.getInputProps('chartUuid')}
+                    onChange={(chartUuid) => {
+                        form.setFieldValue('chartUuid', chartUuid ?? undefined);
+                        onChartSpaceChange?.(
+                            charts.find((chart) => chart.uuid === chartUuid)
+                                ?.spaceUuid,
+                        );
+                    }}
                 />
 
                 <Stack gap="xs">
@@ -184,7 +243,6 @@ const EmbedPreviewChartForm: FC<{
                         onChange={(value) =>
                             form.setFieldValue('expiresIn', value)
                         }
-                        radius="md"
                         data={[
                             { label: '1 hour', value: '1 hour' },
                             { label: '1 day', value: '1 day' },
@@ -196,7 +254,7 @@ const EmbedPreviewChartForm: FC<{
                     />
                 </Stack>
 
-                <Paper p="md" withBorder>
+                <Paper p="md">
                     <Stack gap="md">
                         <Title order={6}>Identification & Security</Title>
                         <Stack gap="xs">
@@ -228,7 +286,7 @@ const EmbedPreviewChartForm: FC<{
                                                 <TextInput
                                                     size="xs"
                                                     placeholder="E.g. user_country"
-                                                    style={{ flex: 1 }}
+                                                    flex={1}
                                                     {...form.getInputProps(
                                                         `userAttributes.${index}.key`,
                                                     )}
@@ -236,7 +294,7 @@ const EmbedPreviewChartForm: FC<{
                                                 <TextInput
                                                     size="xs"
                                                     placeholder="E.g. US"
-                                                    style={{ flex: 1 }}
+                                                    flex={1}
                                                     {...form.getInputProps(
                                                         `userAttributes.${index}.value`,
                                                     )}
@@ -283,7 +341,7 @@ const EmbedPreviewChartForm: FC<{
                     </Stack>
                 </Paper>
 
-                <Paper p="md" withBorder>
+                <Paper p="md">
                     <Stack gap="md">
                         <Title order={6}>Interactivity & Permissions</Title>
                         <Stack gap="xs">
@@ -315,13 +373,36 @@ const EmbedPreviewChartForm: FC<{
                     </Stack>
                 </Paper>
 
+                {writeActionsPanel && (
+                    <Paper p="md">
+                        <Stack gap="xs" mb="md">
+                            <Group gap="sm">
+                                <Title order={6}>Write actions</Title>
+                                <Badge
+                                    color="violet"
+                                    size="sm"
+                                    leftSection={<IconFlask2Filled size={12} />}
+                                >
+                                    Experimental
+                                </Badge>
+                            </Group>
+                            <Text c="dimmed" fz="sm">
+                                Choose which Lightdash actor should power
+                                embedded actions like creating scheduled
+                                deliveries or saving charts.
+                            </Text>
+                        </Stack>
+                        {writeActionsPanel}
+                    </Paper>
+                )}
+
                 <Flex justify="flex-end" gap="sm">
                     <Button
                         variant="light"
                         leftSection={<MantineIcon icon={IconEye} />}
                         onClick={handlePreview}
                     >
-                        Preview
+                        Preview content
                     </Button>
                     <Button
                         variant="default"
@@ -335,13 +416,34 @@ const EmbedPreviewChartForm: FC<{
 
             <Stack gap="md" mb="md">
                 <Stack gap="xs">
-                    <Title order={5}>Code snippet</Title>
+                    <Text size="sm" fw={500}>
+                        Embed method
+                    </Text>
+                    <SegmentedControl
+                        value={embedMethod}
+                        onChange={(value) =>
+                            setEmbedMethod(value as EmbedMethod)
+                        }
+                        data={[
+                            { label: 'Iframe', value: 'iframe' },
+                            { label: 'SDK', value: 'sdk' },
+                        ]}
+                    />
+                </Stack>
+                <Stack gap="xs">
+                    <Title order={5}>
+                        {embedMethod === 'iframe'
+                            ? 'Iframe embed code'
+                            : 'React SDK code'}
+                    </Title>
                     <Text c="dimmed" fz="sm">
-                        Copy and paste this code snippet into your application
-                        to generate embed URLs.
+                        {embedMethod === 'iframe'
+                            ? 'Use this for iframe or direct embedding with a full embed URL.'
+                            : 'Use this for React SDK embedding with a backend-generated JWT.'}
                     </Text>
                 </Stack>
                 <EmbedCodeSnippet
+                    mode={embedMethod}
                     projectUuid={projectUuid}
                     siteUrl={siteUrl}
                     data={convertFormValuesToCreateEmbedJwt(formValues)}

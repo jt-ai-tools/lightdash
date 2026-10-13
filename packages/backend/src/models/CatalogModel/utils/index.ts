@@ -5,6 +5,8 @@ import {
     Explore,
     FieldType,
     friendlyName,
+    getAvailableTimeDimensionsFromTables,
+    getDefaultTimeDimension,
     getItemId,
     isExploreError,
     isMetric,
@@ -13,6 +15,7 @@ import {
     type ChartFieldChanges,
     type ChartFieldUpdates,
     type ChartFieldUsageChanges,
+    type CompiledMetric,
     type ExploreError,
     type Metric,
 } from '@lightdash/common';
@@ -100,6 +103,10 @@ export const convertExploresToCatalog = (
             const baseTable = explore?.tables?.[explore.baseTable];
             const isAdditionalExplore = explore.name !== explore.baseTable;
 
+            // Pre-compute whether this explore has any available time dimensions
+            const exploreHasTimeDimensions =
+                getAvailableTimeDimensionsFromTables(explore.tables).length > 0;
+
             const table: CatalogInsertWithYamlTags = {
                 project_uuid: projectUuid,
                 cached_explore_uuid: explore.cachedExploreUuid,
@@ -119,6 +126,7 @@ export const convertExploresToCatalog = (
                 ai_hints: convertToAiHints(explore.aiHint) ?? null,
                 joined_tables: explore.joinedTables.map((t) => t.table),
                 ownerEmail: null, // Tables don't have owners (only metrics)
+                has_time_dimension: false, // Tables don't need this flag
             };
 
             let dimensionsAndMetrics = [
@@ -186,6 +194,17 @@ export const convertExploresToCatalog = (
                     const owner =
                         metricOwner ?? explore.spotlight?.owner ?? null;
 
+                    // Computed at index time without user attribute context, so
+                    // a metric may appear as having time dimensions even if they
+                    // are restricted or hidden for some users
+                    const hasTimeDimension =
+                        fieldIsMetric &&
+                        (getDefaultTimeDimension(
+                            field as CompiledMetric,
+                            baseTable,
+                        ) !== undefined ||
+                            exploreHasTimeDimensions);
+
                     return {
                         project_uuid: projectUuid,
                         cached_explore_uuid: explore.cachedExploreUuid,
@@ -215,6 +234,7 @@ export const convertExploresToCatalog = (
                         ai_hints: convertToAiHints(field.aiHint) ?? null,
                         joined_tables: null,
                         ownerEmail: owner,
+                        has_time_dimension: hasTimeDimension,
                     };
                 },
             );
@@ -232,7 +252,12 @@ export const convertExploresToCatalog = (
     };
 };
 
-export function getTableNamesByFieldIds(
+type CatalogFieldIdentity = {
+    tableName: string;
+    fieldName: string;
+};
+
+export function getCatalogFieldsByFieldIds(
     fieldIds: string[],
     fieldType: FieldType,
     explore: Explore | ExploreError,
@@ -241,38 +266,46 @@ export function getTableNamesByFieldIds(
         return {};
     }
 
-    const tableNameByFieldIdEntries = fieldIds.map<
-        [string, string | undefined]
+    const catalogFieldByFieldIdEntries = fieldIds.map<
+        [string, CatalogFieldIdentity | undefined]
     >((fieldId) => {
-        const table = Object.values(explore.tables).find((exploreTable) => {
-            if (fieldType === FieldType.DIMENSION) {
-                return Object.values(exploreTable.dimensions).some(
-                    (dimension) =>
-                        getItemId({
-                            table:
-                                exploreTable.originalName ?? exploreTable.name,
-                            name: dimension.name,
-                        }) === fieldId,
-                );
-            }
-
-            return Object.values(exploreTable.metrics).some(
-                (metric) =>
-                    getItemId({
-                        table: exploreTable.originalName ?? exploreTable.name,
-                        name: metric.name,
-                    }) === fieldId,
+        const tableAndField = Object.values(explore.tables).reduce<
+            | {
+                  table: Explore['tables'][string];
+                  field: { name: string };
+              }
+            | undefined
+        >((match, exploreTable) => {
+            if (match) return match;
+            const fields =
+                fieldType === FieldType.DIMENSION
+                    ? exploreTable.dimensions
+                    : exploreTable.metrics;
+            const field = Object.values(fields).find(
+                (candidate) => getItemId(candidate) === fieldId,
             );
-        });
+            return field ? { table: exploreTable, field } : undefined;
+        }, undefined);
 
-        if (!table) {
+        if (!tableAndField) {
             return [fieldId, undefined];
         }
 
-        return [fieldId, table.originalName ?? table.name];
+        return [
+            fieldId,
+            {
+                tableName:
+                    tableAndField.table.canonicalName ??
+                    (tableAndField.table.name === explore.baseTable
+                        ? tableAndField.table.name
+                        : (tableAndField.table.originalName ??
+                          tableAndField.table.name)),
+                fieldName: tableAndField.field.name,
+            },
+        ];
     });
 
-    return Object.fromEntries(tableNameByFieldIdEntries);
+    return Object.fromEntries(catalogFieldByFieldIdEntries);
 }
 
 export function getChartFieldChanges({
@@ -309,23 +342,24 @@ export function getChartFieldChanges({
 
 export function getCatalogFieldWhereStatements(
     fieldIds: string[],
-    fieldTableNameMap: Record<string, string | undefined>,
+    catalogFieldByFieldId: Record<string, CatalogFieldIdentity | undefined>,
     cachedExploreUuidTableNameMap: Record<string, string>,
     fieldType: FieldType,
 ): Array<CatalogFieldWhere> {
     return fieldIds
         .map((fieldId) => {
-            const tableName = fieldTableNameMap[fieldId];
+            const catalogField = catalogFieldByFieldId[fieldId];
             const cachedExploreUuid =
-                tableName && cachedExploreUuidTableNameMap[tableName];
+                catalogField &&
+                cachedExploreUuidTableNameMap[catalogField.tableName];
 
-            if (!cachedExploreUuid) {
+            if (!cachedExploreUuid || !catalogField) {
                 return undefined;
             }
 
             return {
                 cachedExploreUuid,
-                fieldName: fieldId.replace(`${tableName}_`, ''),
+                fieldName: catalogField.fieldName,
                 fieldType,
             };
         })
@@ -344,13 +378,13 @@ export async function getChartFieldUsageChanges(
     const chartFieldChanges = getChartFieldChanges(chartFields);
     const { added, removed } = chartFieldChanges;
 
-    const metricTableNameMap = getTableNamesByFieldIds(
+    const metricCatalogFields = getCatalogFieldsByFieldIds(
         [...added.metrics, ...removed.metrics],
         FieldType.METRIC,
         chartExplore,
     );
 
-    const dimensionTableNameMap = getTableNamesByFieldIds(
+    const dimensionCatalogFields = getCatalogFieldsByFieldIds(
         [...added.dimensions, ...removed.dimensions],
         FieldType.DIMENSION,
         chartExplore,
@@ -360,38 +394,40 @@ export async function getChartFieldUsageChanges(
         projectUuid,
         uniq(
             [
-                ...Object.values(dimensionTableNameMap),
-                ...Object.values(metricTableNameMap),
-            ].filter(
-                (tableName): tableName is string => tableName !== undefined,
-            ),
+                ...Object.values(dimensionCatalogFields),
+                ...Object.values(metricCatalogFields),
+            ]
+                .map((field) => field?.tableName)
+                .filter(
+                    (tableName): tableName is string => tableName !== undefined,
+                ),
         ),
     );
 
     const metricsToIncrement = getCatalogFieldWhereStatements(
         chartFieldChanges.added.metrics,
-        metricTableNameMap,
+        metricCatalogFields,
         cachedExploreUuidTableNameMap,
         FieldType.METRIC,
     );
 
     const metricsToDecrement = getCatalogFieldWhereStatements(
         chartFieldChanges.removed.metrics,
-        metricTableNameMap,
+        metricCatalogFields,
         cachedExploreUuidTableNameMap,
         FieldType.METRIC,
     );
 
     const dimensionsToIncrement = getCatalogFieldWhereStatements(
         chartFieldChanges.added.dimensions,
-        dimensionTableNameMap,
+        dimensionCatalogFields,
         cachedExploreUuidTableNameMap,
         FieldType.DIMENSION,
     );
 
     const dimensionsToDecrement = getCatalogFieldWhereStatements(
         chartFieldChanges.removed.dimensions,
-        dimensionTableNameMap,
+        dimensionCatalogFields,
         cachedExploreUuidTableNameMap,
         FieldType.DIMENSION,
     );

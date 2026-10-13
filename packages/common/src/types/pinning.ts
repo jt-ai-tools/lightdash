@@ -1,7 +1,8 @@
 import {
     type ResourceViewChartItem,
     type ResourceViewDashboardItem,
-    type ResourceViewItem,
+    type ResourceViewDataAppItem,
+    type ResourceViewDocumentItem,
     type ResourceViewItemType,
     type ResourceViewSpaceItem,
 } from './resourceViewItem';
@@ -17,6 +18,8 @@ export type PinnedItem = {
     savedChartUuid?: string;
     dashboardUuid?: string;
     spaceUuid?: string;
+    appUuid?: string;
+    documentUuid?: string;
     createdAt: Date;
 };
 
@@ -39,6 +42,20 @@ export type CreateSpacePinnedItem = {
     spaceUuid: string;
 };
 
+export type CreateAppPinnedItem = {
+    projectUuid: string;
+    appUuid: string;
+};
+
+export type CreateDocumentPinnedItem = {
+    projectUuid: string;
+    documentUuid: string;
+};
+export type DeleteDocumentPinnedItem = {
+    pinnedListUuid: string;
+    documentUuid: string;
+};
+
 export type DeleteChartPinnedItem = {
     pinnedListUuid: string;
     savedChartUuid: string;
@@ -54,19 +71,35 @@ export type DeleteSpacePinnedItem = {
     spaceUuid: string;
 };
 
+export type DeleteAppPinnedItem = {
+    pinnedListUuid: string;
+    appUuid: string;
+};
+
 export type DeletePinnedItem =
     | DeleteChartPinnedItem
     | DeleteDashboardPinnedItem
-    | DeleteSpacePinnedItem;
+    | DeleteSpacePinnedItem
+    | DeleteAppPinnedItem
+    | DeleteDocumentPinnedItem;
 
 export type CreatePinnedItem =
     | CreateChartPinnedItem
     | CreateDashboardPinnedItem
-    | CreateSpacePinnedItem;
+    | CreateSpacePinnedItem
+    | CreateAppPinnedItem
+    | CreateDocumentPinnedItem;
 
 export type UpdatePinnedItemOrder = {
     type: ResourceViewItemType;
-    data: Pick<ResourceViewItem['data'], 'uuid' | 'pinnedListOrder'>;
+    data: Pick<
+        | ResourceViewChartItem['data']
+        | ResourceViewDashboardItem['data']
+        | ResourceViewSpaceItem['data']
+        | ResourceViewDataAppItem['data']
+        | ResourceViewDocumentItem['data'],
+        'uuid' | 'pinnedListOrder'
+    >;
 };
 
 export const isCreateChartPinnedItem = (
@@ -87,13 +120,25 @@ export const isDeleteSpacePinnedItem = (
     item: DeletePinnedItem,
 ): item is DeleteSpacePinnedItem => 'spaceUuid' in item && !!item.spaceUuid;
 
+export const isCreateAppPinnedItem = (
+    item: CreatePinnedItem,
+): item is CreateAppPinnedItem => 'appUuid' in item && !!item.appUuid;
+
+export const isDeleteAppPinnedItem = (
+    item: DeletePinnedItem,
+): item is DeleteAppPinnedItem => 'appUuid' in item && !!item.appUuid;
+
 export type ApiPinnedItems = {
     status: 'ok';
     results: PinnedItems;
 };
 
 export type PinnedItems = Array<
-    ResourceViewDashboardItem | ResourceViewChartItem | ResourceViewSpaceItem
+    | ResourceViewDashboardItem
+    | ResourceViewChartItem
+    | ResourceViewSpaceItem
+    | ResourceViewDataAppItem
+    | ResourceViewDocumentItem
 >;
 
 export type TogglePinnedItemInfo = {
@@ -107,3 +152,12 @@ export type ApiTogglePinnedItem = {
     status: 'ok';
     results: TogglePinnedItemInfo;
 };
+
+export const isCreateDocumentPinnedItem = (
+    item: CreatePinnedItem,
+): item is CreateDocumentPinnedItem =>
+    'documentUuid' in item && !!item.documentUuid;
+export const isDeleteDocumentPinnedItem = (
+    item: DeletePinnedItem,
+): item is DeleteDocumentPinnedItem =>
+    'documentUuid' in item && !!item.documentUuid;

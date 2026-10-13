@@ -11,6 +11,7 @@ import { lightdashApi } from '../api';
 
 type UseChartSummariesV2Args = {
     projectUuid: string | undefined;
+    spaceUuids?: string[];
     pageSize: number;
     page: number;
     search?: string;
@@ -18,13 +19,26 @@ type UseChartSummariesV2Args = {
 
 const getChartSummariesInProjectV2 = async ({
     projectUuid,
+    spaceUuids,
     page,
     pageSize,
     search,
 }: UseChartSummariesV2Args) => {
+    const searchParams = new URLSearchParams({
+        projectUuids: projectUuid ?? '',
+        contentTypes: ContentType.CHART,
+        pageSize: pageSize.toString(),
+        page: page.toString(),
+        search: search ?? '',
+    });
+
+    spaceUuids?.forEach((spaceUuid) => {
+        searchParams.append('spaceUuids', spaceUuid);
+    });
+
     return lightdashApi<ApiChartContentResponse['results']>({
         version: 'v2',
-        url: `/content?projectUuids=${projectUuid}&contentTypes=${ContentType.CHART}&pageSize=${pageSize}&page=${page}&search=${search}`,
+        url: `/content?${searchParams.toString()}`,
         method: 'GET',
         body: undefined,
     });

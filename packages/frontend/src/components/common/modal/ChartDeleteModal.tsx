@@ -1,7 +1,16 @@
-import { Anchor, List, ScrollArea, type ModalProps } from '@mantine-8/core';
+import {
+    Anchor,
+    List,
+    ScrollArea,
+    Stack,
+    type ModalProps,
+} from '@mantine/core';
 import { type FC } from 'react';
-import { Link, useParams } from 'react-router';
+import { Link } from 'react-router';
+import DocumentsLinkingChartCallout from '../../../features/documents/DocumentsLinkingChartCallout';
 import { useDashboardsContainingChart } from '../../../hooks/dashboard/useDashboards';
+import { useProjectUrlIdentifier } from '../../../hooks/useProjectRoute';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
 import {
     useSavedQuery,
     useSavedQueryDeleteMutation,
@@ -20,18 +29,22 @@ const ChartDeleteModal: FC<ChartDeleteModalProps> = ({
     onConfirm,
     ...modalProps
 }) => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
+    const projectUrlIdentifier = useProjectUrlIdentifier();
     const { health } = useApp();
     const softDeleteEnabled = health.data?.softDelete.enabled;
     const retentionDays = health.data?.softDelete.retentionDays;
 
-    const { data: chart, isInitialLoading } = useSavedQuery({ id: uuid });
+    const { data: chart, isInitialLoading } = useSavedQuery({
+        uuidOrSlug: uuid,
+        projectUuid,
+    });
     const {
         data: relatedDashboards,
         isInitialLoading: isLoadingRelatedDashboards,
     } = useDashboardsContainingChart(projectUuid, uuid);
     const { mutateAsync: deleteChart, isLoading: isDeleting } =
-        useSavedQueryDeleteMutation();
+        useSavedQueryDeleteMutation(projectUuid);
 
     if (
         isInitialLoading ||
@@ -66,30 +79,39 @@ const ChartDeleteModal: FC<ChartDeleteModalProps> = ({
             description={description}
             onConfirm={handleConfirm}
             confirmLoading={isDeleting}
+            cancelDisabled={isDeleting}
         >
-            {relatedDashboards.length > 0 && (
-                <Callout
-                    variant={softDeleteEnabled ? 'warning' : 'danger'}
-                    title={dashboardWarningTitle}
-                >
-                    <ScrollArea.Autosize mah="200px">
-                        <List>
-                            {relatedDashboards.map((dashboard) => (
-                                <List.Item key={dashboard.uuid}>
-                                    <Anchor
-                                        component={Link}
-                                        fz="sm"
-                                        target="_blank"
-                                        to={`/projects/${projectUuid}/dashboards/${dashboard.uuid}`}
-                                    >
-                                        {dashboard.name}
-                                    </Anchor>
-                                </List.Item>
-                            ))}
-                        </List>
-                    </ScrollArea.Autosize>
-                </Callout>
-            )}
+            <Stack gap="sm">
+                {relatedDashboards.length > 0 && (
+                    <Callout
+                        variant={softDeleteEnabled ? 'warning' : 'danger'}
+                        title={dashboardWarningTitle}
+                    >
+                        <ScrollArea.Autosize mah="200px">
+                            <List>
+                                {relatedDashboards.map((dashboard) => (
+                                    <List.Item key={dashboard.uuid}>
+                                        <Anchor
+                                            component={Link}
+                                            fz="sm"
+                                            target="_blank"
+                                            to={`/projects/${projectUrlIdentifier}/dashboards/${dashboard.slug}`}
+                                        >
+                                            {dashboard.name}
+                                        </Anchor>
+                                    </List.Item>
+                                ))}
+                            </List>
+                        </ScrollArea.Autosize>
+                    </Callout>
+                )}
+                <DocumentsLinkingChartCallout
+                    projectUuid={projectUuid}
+                    kind="chart"
+                    chartUuid={uuid}
+                    softDeleteEnabled={!!softDeleteEnabled}
+                />
+            </Stack>
         </MantineModal>
     );
 };

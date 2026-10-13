@@ -1,6 +1,5 @@
 import { subject } from '@casl/ability';
 import {
-    type AdditionalMetric,
     CompiledDimension,
     CompiledField,
     Explore,
@@ -17,6 +16,7 @@ import {
     resolveFunnelDateRange,
     SessionUser,
     TimeIntervalUnit,
+    type AdditionalMetric,
     type WarehouseSqlBuilder,
 } from '@lightdash/common';
 import { warehouseSqlBuilderFromType } from '@lightdash/warehouses';
@@ -24,6 +24,8 @@ import * as Sentry from '@sentry/node';
 import type { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
 import type { LightdashConfig } from '../../config/parseConfig';
 import type { ProjectModel } from '../../models/ProjectModel/ProjectModel';
+import type { ConnectionBinding } from '../../models/WarehouseConnectionRouter/WarehouseConnectionRouter';
+import { traceSpan } from '../../tracing/tracing';
 import { BaseService } from '../BaseService';
 import type { ProjectService } from '../ProjectService/ProjectService';
 
@@ -73,13 +75,18 @@ export class FunnelService extends BaseService {
             throw new ForbiddenError('Funnel Builder feature is not enabled');
         }
 
-        const { organizationUuid } =
+        const { organizationUuid, name: projectName } =
             await this.projectModel.getSummary(projectUuid);
 
+        const auditedAbility = this.createAuditedAbility(user);
         if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'manage',
-                subject('SqlRunner', { organizationUuid, projectUuid }),
+                subject('SqlRunner', {
+                    organizationUuid,
+                    projectUuid,
+                    metadata: { projectUuid, projectName },
+                }),
             )
         ) {
             throw new ForbiddenError(
@@ -329,7 +336,7 @@ ORDER BY ${
         eventDimensionId: string,
         timestampFieldId: string,
     ): Promise<string[]> {
-        return Sentry.startSpan(
+        return traceSpan(
             {
                 op: 'FunnelService.getEventNames',
                 name: 'FunnelService.getEventNames',
@@ -368,14 +375,16 @@ ORDER BY ${
                 const baseTableSql = explore.tables[explore.baseTable].sqlTable;
                 const baseTableName = explore.baseTable;
 
-                // Get SQL builder based on warehouse type (no credentials needed for SQL generation)
-                const credentials =
-                    await this.projectModel.getWarehouseCredentialsForProject(
+                const exploreBinding: ConnectionBinding = {
+                    kind: 'explore',
+                    exploreName: explore.name,
+                };
+                const { type } =
+                    await this.projectService.getWarehouseSqlBuilderSettings(
                         projectUuid,
+                        exploreBinding,
                     );
-                const sqlBuilder = warehouseSqlBuilderFromType(
-                    credentials.type,
-                );
+                const sqlBuilder = warehouseSqlBuilderFromType(type);
 
                 // Filter to last 30 days to limit scan cost
                 const thirtyDaysAgo = new Date();
@@ -401,6 +410,7 @@ ORDER BY ${
                         user,
                         projectUuid,
                         sql,
+                        exploreBinding,
                     );
 
                     return results.rows
@@ -425,7 +435,7 @@ ORDER BY ${
         projectUuid: string,
         request: FunnelQueryRequest,
     ): Promise<FunnelQueryResult> {
-        return Sentry.startSpan(
+        return traceSpan(
             {
                 op: 'FunnelService.runFunnelQuery',
                 name: 'FunnelService.runFunnelQuery',
@@ -456,14 +466,16 @@ ORDER BY ${
 
                 const explore = exploreResult;
 
-                // Get SQL builder based on warehouse type (no credentials needed for SQL generation)
-                const credentials =
-                    await this.projectModel.getWarehouseCredentialsForProject(
+                const exploreBinding: ConnectionBinding = {
+                    kind: 'explore',
+                    exploreName: explore.name,
+                };
+                const { type } =
+                    await this.projectService.getWarehouseSqlBuilderSettings(
                         projectUuid,
+                        exploreBinding,
                     );
-                const sqlBuilder = warehouseSqlBuilderFromType(
-                    credentials.type,
-                );
+                const sqlBuilder = warehouseSqlBuilderFromType(type);
 
                 const sql = FunnelService.generateFunnelSql(
                     request,
@@ -478,6 +490,7 @@ ORDER BY ${
                         user,
                         projectUuid,
                         sql,
+                        exploreBinding,
                     );
 
                     // Map rows directly - conversion rates are computed in SQL

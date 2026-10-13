@@ -1,4 +1,6 @@
 import {
+    DbtProjectType,
+    DefaultSupportedDbtVersion,
     type DbtAzureDevOpsProjectConfig,
     type DbtBitBucketProjectConfig,
     type DbtCloudIDEProjectConfig,
@@ -6,8 +8,6 @@ import {
     type DbtGitlabProjectConfig,
     type DbtLocalProjectConfig,
     type DbtNoneProjectConfig,
-    DbtProjectType,
-    DefaultSupportedDbtVersion,
 } from '@lightdash/common';
 import { type DbtManifestProjectConfig } from '@lightdash/common/src';
 
@@ -69,6 +69,7 @@ const dbtCloudIdeDefaultValues: DbtCloudIDEProjectConfig = {
     environment_id: '',
     discovery_api_endpoint: '',
     tags: [],
+    webhook_hmac_secret: '',
 } as const;
 
 // Local
@@ -80,7 +81,7 @@ const dbtDefaultValues: DbtLocalProjectConfig = {
 } as const;
 
 // CLI
-const noneDefaultValues: DbtNoneProjectConfig = {
+export const noneDefaultValues: DbtNoneProjectConfig = {
     type: DbtProjectType.NONE,
     hideRefreshButton: false,
 } as const;

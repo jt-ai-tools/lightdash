@@ -1,4 +1,12 @@
-import { Group, Modal, Text } from '@mantine/core';
+import {
+    Group,
+    Input,
+    Paper,
+    SimpleGrid,
+    Stack,
+    Text,
+    TextInput,
+} from '@mantine/core';
 import { IconTable } from '@tabler/icons-react';
 import { useCallback, type FC, type PropsWithChildren } from 'react';
 import {
@@ -8,9 +16,32 @@ import {
     useExplorerSelector,
 } from '../../../../features/explorer/store';
 import { getFieldColor } from '../../../../utils/fieldColors';
+import { CopyActionIcon } from '../../../common/CopyActionIcon';
 import FieldIcon from '../../../common/Filters/FieldIcon';
 import MantineIcon from '../../../common/MantineIcon';
+import MantineModal from '../../../common/MantineModal';
 import { ItemDetailMarkdown } from './ItemDetailPreview';
+
+const CopyableInput: FC<{ label: string; value: string }> = ({
+    label,
+    value,
+}) => (
+    <TextInput
+        label={label}
+        value={value}
+        readOnly
+        size="xs"
+        onFocus={(e) => e.currentTarget.select()}
+        rightSection={
+            <CopyActionIcon
+                value={value}
+                tooltipPosition="left"
+                size="xs"
+                aria-label={`Copy ${label}`}
+            />
+        }
+    />
+);
 
 /**
  * Provider for a shared modal to display details about tree items
@@ -37,24 +68,24 @@ export const ItemDetailProvider: FC<PropsWithChildren<{}>> = ({ children }) => {
                                 size="md"
                             />
                         )}
-                        <Text size="md">{itemDetail.label}</Text>
+                        <Text fz="md">{itemDetail.label}</Text>
                     </Group>
                 );
             case 'table':
                 return (
-                    <Group spacing="sm">
+                    <Group gap="sm">
                         <MantineIcon
                             icon={IconTable}
                             size="lg"
                             color="ldGray.7"
                         />
-                        <Text size="md">{itemDetail.label}</Text>
+                        <Text fz="md">{itemDetail.label}</Text>
                     </Group>
                 );
             case 'group':
                 return (
                     <Group>
-                        <Text size="md">{itemDetail.label}</Text>
+                        <Text fz="md">{itemDetail.label}</Text>
                     </Group>
                 );
             default:
@@ -63,24 +94,85 @@ export const ItemDetailProvider: FC<PropsWithChildren<{}>> = ({ children }) => {
     }, [itemDetail.itemType, itemDetail.label, itemDetail.fieldItem]);
 
     const renderDetail = useCallback(() => {
+        const metadata = itemDetail.tableMetadata;
+        if (itemDetail.itemType === 'table' && metadata) {
+            return (
+                <Stack gap="xs">
+                    <SimpleGrid cols={2} spacing="xs">
+                        <CopyableInput
+                            label="Model name"
+                            value={metadata.name}
+                        />
+                        {metadata.dbtPackageName && (
+                            <CopyableInput
+                                label="dbt package"
+                                value={metadata.dbtPackageName}
+                            />
+                        )}
+                    </SimpleGrid>
+                    {(metadata.ymlPath || metadata.sqlPath) && (
+                        <SimpleGrid cols={2} spacing="xs">
+                            {metadata.ymlPath && (
+                                <CopyableInput
+                                    label="YAML file"
+                                    value={metadata.ymlPath}
+                                />
+                            )}
+                            {metadata.sqlPath && (
+                                <CopyableInput
+                                    label="SQL file"
+                                    value={metadata.sqlPath}
+                                />
+                            )}
+                        </SimpleGrid>
+                    )}
+                    {itemDetail.description && (
+                        <Input.Wrapper
+                            label="Description"
+                            size="xs"
+                            w="100%"
+                            miw={0}
+                        >
+                            <Paper
+                                p="md"
+                                radius="md"
+                                bg="white"
+                                bd="1px solid ldGray.2"
+                                w="100%"
+                                miw={0}
+                            >
+                                <ItemDetailMarkdown
+                                    source={itemDetail.description}
+                                />
+                            </Paper>
+                        </Input.Wrapper>
+                    )}
+                </Stack>
+            );
+        }
         if (itemDetail.description) {
             return <ItemDetailMarkdown source={itemDetail.description} />;
         }
-        return <Text color="gray">No description available.</Text>;
-    }, [itemDetail.description]);
+        return <Text c="gray">No description available.</Text>;
+    }, [itemDetail.description, itemDetail.itemType, itemDetail.tableMetadata]);
 
     return (
         <>
             {itemDetail.isOpen && (
-                <Modal
-                    p="xl"
-                    size="lg"
+                <MantineModal
                     opened={itemDetail.isOpen}
                     onClose={close}
                     title={renderHeader()}
+                    size={
+                        itemDetail.itemType === 'table' &&
+                        itemDetail.tableMetadata
+                            ? 'xl'
+                            : 'lg'
+                    }
+                    cancelLabel={false}
                 >
                     {renderDetail()}
-                </Modal>
+                </MantineModal>
             )}
 
             {children}

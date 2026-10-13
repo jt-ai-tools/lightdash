@@ -2,23 +2,31 @@ import { type DbtColumnLightdashAdditionalDimension } from '../types/dbt';
 import { NotImplementedError } from '../types/errors';
 import {
     BinType,
-    type CustomBinDimension,
-    type CustomDimension,
-    type CustomSqlDimension,
     DimensionType,
     friendlyName,
     isCustomBinDimension,
+    type CustomBinDimension,
+    type CustomDimension,
+    type CustomSqlDimension,
 } from '../types/field';
-import { type CreateWarehouseCredentials } from '../types/projects';
+import { type WarehouseSqlBuilder } from '../types/warehouse';
+import assertUnreachable from './assertUnreachable';
 import {
-    type TimeIntervalUnit,
-    type WarehouseClient,
-    type WarehouseSqlBuilder,
-} from '../types/warehouse';
-import {
+    getCustomGroupSelectSql,
     getCustomRangeSelectSql,
     getFixedWidthBinSelectSql,
 } from './customDimensions';
+
+export const FIXED_NUMBER_BIN_WRITE_BACK_ERROR =
+    'Fixed-number bins cannot be written back because their boundaries depend on query results. Use a fixed-width, custom-range, or custom-group bin instead.';
+
+export const getCustomDimensionWriteBackError = (
+    customDimension: CustomDimension,
+): string | null =>
+    isCustomBinDimension(customDimension) &&
+    customDimension.binType === BinType.FIXED_NUMBER
+        ? FIXED_NUMBER_BIN_WRITE_BACK_ERROR
+        : null;
 
 export const convertCustomSqlDimensionToDbt = (
     field: CustomSqlDimension,
@@ -43,7 +51,7 @@ export const convertCustomBinDimensionToDbt = ({
                 label: friendlyName(customDimension.name),
                 type: DimensionType.STRING,
                 sql: getCustomRangeSelectSql({
-                    binRanges: customDimension.customRange || [],
+                    binRanges: customDimension.customRange,
                     baseDimensionSql,
                     warehouseSqlBuilder,
                 }),
@@ -53,7 +61,7 @@ export const convertCustomBinDimensionToDbt = ({
                 label: friendlyName(customDimension.name),
                 type: DimensionType.STRING,
                 sql: getFixedWidthBinSelectSql({
-                    binWidth: customDimension.binWidth || 1,
+                    binWidth: customDimension.binWidth,
                     baseDimensionSql,
                     warehouseSqlBuilder,
                 }),
@@ -62,109 +70,30 @@ export const convertCustomBinDimensionToDbt = ({
             throw new NotImplementedError(
                 'Bin with fixed number of bins can not be converted to dbt as it requires a CTE',
             );
+        case BinType.CUSTOM_GROUP:
+            return {
+                label: friendlyName(customDimension.name),
+                type: DimensionType.STRING,
+                sql: getCustomGroupSelectSql({
+                    binGroups: customDimension.customGroups,
+                    baseDimensionSql,
+                    warehouseSqlBuilder,
+                }),
+            };
         default:
-            const never: never = customDimension.binType;
-            throw new Error(`Unknown bin type ${never}`);
+            throw new Error(
+                `Unknown bin type ${assertUnreachable(customDimension, 'Unknown bin type')}`,
+            );
     }
-};
-
-// Mock Bigquery warehouse client for preview
-const warehouseClientMock: WarehouseClient = {
-    credentials: undefined as unknown as CreateWarehouseCredentials,
-    getCatalog() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    getAsyncQueryResults() {
-        throw new NotImplementedError('getAsyncQueryResults not implemented');
-    },
-    getAdapterType() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    getAllTables() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    getFields() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    getMetricSql() {
-        throw new NotImplementedError('getMetricSql not implemented');
-    },
-    getStartOfWeek() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    parseError() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    parseWarehouseCatalog() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    runQuery() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    streamQuery() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    executeAsyncQuery() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    test() {
-        throw new NotImplementedError('getCatalog not implemented');
-    },
-    concatString(...args: string[]): string {
-        return `CONCAT(${args.join(', ')})`;
-    },
-    getStringQuoteChar() {
-        return "'";
-    },
-    getEscapeStringQuoteChar() {
-        return '\\';
-    },
-    getFieldQuoteChar() {
-        return '"';
-    },
-    getFloatingType() {
-        return 'FLOAT';
-    },
-    escapeString(value) {
-        return value;
-    },
-    castToTimestamp(date) {
-        return `CAST('${date.toISOString()}' AS TIMESTAMP)`;
-    },
-    getIntervalSql(value: number, unit: TimeIntervalUnit) {
-        return `INTERVAL '${value} ${unit}'`;
-    },
-    getTimestampDiffSeconds(startTimestampSql, endTimestampSql) {
-        return `EXTRACT(EPOCH FROM (${endTimestampSql} - ${startTimestampSql}))`;
-    },
-    getMedianSql(valueSql) {
-        return `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ${valueSql})`;
-    },
-    buildArray(elements) {
-        return `ARRAY[${elements.join(', ')}]`;
-    },
-    buildArrayAgg(expression, orderBy) {
-        return orderBy
-            ? `ARRAY_AGG(${expression} ORDER BY ${orderBy})`
-            : `ARRAY_AGG(${expression})`;
-    },
 };
 
 export const previewConvertCustomDimensionToDbt = (
     field: CustomDimension,
 ): DbtColumnLightdashAdditionalDimension => {
     if (isCustomBinDimension(field)) {
-        // Mock base dimension SQL and warehouse client for preview
-        const preview = convertCustomBinDimensionToDbt({
-            customDimension: field,
-            baseDimensionSql: '${reference_column}',
-            warehouseSqlBuilder: warehouseClientMock,
-        });
-        return {
-            ...preview,
-            // Add a comment at the top of the multiline string to indicate that this is a preview
-            sql: `/* This is a preview! Replace column references and confirm SQL before using in production. */\n${preview.sql}`,
-        };
+        throw new NotImplementedError(
+            'Custom bin previews require the project warehouse and dbt model SQL',
+        );
     }
     return convertCustomSqlDimensionToDbt(field);
 };

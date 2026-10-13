@@ -14,6 +14,7 @@ import {
 } from '@tanstack/react-query';
 import { lightdashApi } from '../../../../api';
 import useToaster from '../../../../hooks/toaster/useToaster';
+import useIsEmbedded from '../../../providers/Embed/useIsEmbedded';
 
 export const USER_AGENT_PREFERENCES = 'userAgentPreferences';
 
@@ -31,11 +32,12 @@ export const useGetUserAgentPreferences = (
         ApiError
     >,
 ) => {
+    const isEmbed = useIsEmbedded();
     return useQuery<ApiGetUserAgentPreferencesResponse['results'], ApiError>({
         queryKey: [USER_AGENT_PREFERENCES, projectUuid],
         queryFn: () => getUserAgentPreferences(projectUuid!),
         ...options,
-        enabled: !!projectUuid && options?.enabled !== false,
+        enabled: !isEmbed && !!projectUuid && options?.enabled !== false,
     });
 };
 

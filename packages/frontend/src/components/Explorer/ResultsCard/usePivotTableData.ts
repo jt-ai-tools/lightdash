@@ -1,5 +1,6 @@
 import type {
     ItemsMap,
+    ParametersValuesMap,
     PivotData,
     ReadyQueryResultsPage,
     ResultRow,
@@ -18,6 +19,12 @@ type UsePivotTableDataArgs = {
     columnOrder: string[];
     getField: (fieldId: string) => ItemsMap[string] | undefined;
     getFieldLabel: (fieldId: string | null | undefined) => string | undefined;
+    columnLimit?: number;
+    parameters?: ParametersValuesMap;
+    /** Hidden field IDs that are dimensions (filtered out of pivot headers / row index). */
+    hiddenDimensionFieldIds?: string[];
+    /** Hidden field IDs that are metrics (filtered out of pivot data columns). */
+    hiddenMetricFieldIds?: string[];
 };
 
 type PivotTableDataState = {
@@ -42,6 +49,10 @@ export function usePivotTableData({
     columnOrder,
     getField,
     getFieldLabel,
+    columnLimit,
+    parameters,
+    hiddenDimensionFieldIds,
+    hiddenMetricFieldIds,
 }: UsePivotTableDataArgs): PivotTableDataState {
     const worker = useWorker(createWorker);
     const [state, setState] = useState<PivotTableDataState>({
@@ -65,14 +76,28 @@ export function usePivotTableData({
                 metricsAsRows: false,
                 columnTotals: false,
                 rowTotals: false,
-                hiddenMetricFieldIds: [] as string[],
+                hiddenMetricFieldIds: hiddenMetricFieldIds ?? [],
+                hiddenDimensionFieldIds: hiddenDimensionFieldIds ?? [],
                 columnOrder,
             },
             getField,
             getFieldLabel,
             groupedSubtotals: undefined,
+            columnLimit,
+            parameters,
         };
-    }, [enabled, rows, pivotDetails, columnOrder, getField, getFieldLabel]);
+    }, [
+        enabled,
+        rows,
+        pivotDetails,
+        columnOrder,
+        getField,
+        getFieldLabel,
+        columnLimit,
+        parameters,
+        hiddenDimensionFieldIds,
+        hiddenMetricFieldIds,
+    ]);
 
     useEffect(() => {
         // Reset state when inputs become invalid

@@ -1,5 +1,6 @@
 import {
     type ApiError,
+    type AuthType,
     type Explore,
     type FieldType,
     type PivotChartData,
@@ -12,15 +13,16 @@ import {
     type AllVizChartConfig,
     type SortByDirection,
     type VizAggregationOptions,
-    type VizBaseConfig,
-    type VizCartesianChartConfig,
     type VizColumn,
-    type VizPieChartConfig,
-    type VizTableConfig,
 } from '../visualizations/types';
+import { type AgentIdentityClaim } from './agentIdentity';
 import { type Dashboard } from './dashboard';
-import { type Organization } from './organization';
-import { type Project } from './projects';
+import {
+    type Organization,
+    type ResolvedProjectColorPalette,
+} from './organization';
+import { type ParametersValuesMap } from './parameters';
+import { type ProjectType } from './projects';
 import { type RawResultRow } from './results';
 import { type ChartKind } from './savedCharts';
 import { SchedulerJobStatus, type TraceTaskBase } from './scheduler';
@@ -138,6 +140,7 @@ export type SqlRunnerFilter = SqlRunnerFilterTypes & {
 };
 
 export type SqlRunnerPayload = TraceTaskBase & {
+    authMethod?: AuthType | null;
     sqlChartUuid?: string;
     context: QueryExecutionContext;
 } & SqlRunnerBody;
@@ -230,15 +233,16 @@ export const isApiSqlRunnerJobPivotQuerySuccessResponse = (
     response.status === SchedulerJobStatus.COMPLETED;
 
 export type SqlChart = {
+    agentIdentity?: AgentIdentityClaim | null;
     savedSqlUuid: string;
     name: string;
     description: string | null;
     slug: string;
     sql: string;
     limit: number;
-    config: VizBaseConfig &
-        (VizCartesianChartConfig | VizPieChartConfig | VizTableConfig);
+    config: AllVizChartConfig;
     chartKind: ChartKind;
+    warehouseConnectionUuid: string | null;
     createdAt: Date;
     createdBy: Pick<
         LightdashUser,
@@ -249,13 +253,24 @@ export type SqlChart = {
         LightdashUser,
         'userUuid' | 'firstName' | 'lastName'
     > | null;
-    space: Pick<SpaceSummary, 'uuid' | 'name' | 'isPrivate' | 'userAccess'>;
+    space: Pick<SpaceSummary, 'uuid' | 'name' | 'userAccess'>;
     dashboard: Pick<Dashboard, 'uuid' | 'name'> | null;
-    project: Pick<Project, 'projectUuid'>;
+    project: {
+        projectUuid: string;
+        name?: string;
+        type?: ProjectType;
+    };
     organization: Pick<Organization, 'organizationUuid'>;
     views: number;
     firstViewedAt: Date;
     lastViewedAt: Date;
+    /**
+     * Fully resolved palette for this SQL chart, computed from the
+     * org → project → space → dashboard hierarchy. SQL charts have no
+     * per-chart override — set the palette via the containing space,
+     * dashboard, project, or organization.
+     */
+    readonly resolvedColorPalette: ResolvedProjectColorPalette;
 };
 
 export type CreateSqlChart = {
@@ -266,6 +281,7 @@ export type CreateSqlChart = {
     config: AllVizChartConfig;
     spaceUuid: string;
     slug?: string; // Optional: force a specific slug (used by content-as-code)
+    warehouseConnectionUuid?: string | null;
 };
 
 export type UpdateUnversionedSqlChart = {
@@ -278,6 +294,7 @@ export type UpdateVersionedSqlChart = {
     sql: string;
     limit: number;
     config: AllVizChartConfig;
+    warehouseConnectionUuid?: string | null;
 };
 
 export type UpdateSqlChart = {
@@ -313,8 +330,12 @@ export type ApiCreateVirtualView = {
 
 export type CreateVirtualViewPayload = {
     name: string;
+    /** Optional display label. Defaults to a friendly version of name. */
+    label?: string;
     sql: string;
     columns: VizColumn[];
+    parameterValues?: ParametersValuesMap;
+    warehouseConnectionUuid?: string | null;
 };
 
 export type UpdateVirtualViewPayload = CreateVirtualViewPayload;
@@ -322,6 +343,13 @@ export type UpdateVirtualViewPayload = CreateVirtualViewPayload;
 export type ApiGithubDbtWriteBack = {
     status: 'ok';
     results: PullRequestCreated;
+};
+
+export type ApiCustomDimensionWriteBackPreview = {
+    status: 'ok';
+    results: {
+        yaml: string;
+    };
 };
 
 export type ApiGithubDbtWritePreview = {

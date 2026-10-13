@@ -3,20 +3,14 @@ import {
     getItemId,
     type CompactOrAlias,
 } from '@lightdash/common';
-import {
-    Group,
-    SegmentedControl,
-    Select,
-    Stack,
-    Switch,
-    TextInput,
-} from '@mantine-8/core';
+import { Group, SegmentedControl, Select, Stack, Switch } from '@mantine/core';
 import { useEffect, useRef, useState } from 'react';
-import classes from './BigNumberComparison.module.css';
+import FieldSelect from '../../common/FieldSelect';
 import { isBigNumberVisualizationConfig } from '../../LightdashVisualization/types';
 import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
-import FieldSelect from '../../common/FieldSelect';
 import { Config } from '../common/Config';
+import { LabelEditor } from '../common/LabelEditor';
+import classes from './BigNumberComparison.module.css';
 import { StyleOptions } from './common';
 
 type CompareTarget = 'previous_row' | 'another_field';
@@ -63,6 +57,7 @@ export const Comparison: React.FC = () => {
         getField,
         comparisonField,
         setComparisonField,
+        granularityFields,
     } = chartConfig;
 
     const comparisonFieldItem = getField(comparisonField);
@@ -78,6 +73,7 @@ export const Comparison: React.FC = () => {
                     <Group gap="xs" align="center">
                         <Config.Heading>Show comparison</Config.Heading>
                         <Switch
+                            size="xs"
                             checked={showComparison}
                             onChange={() => {
                                 setShowComparison(!showComparison);
@@ -161,13 +157,16 @@ export const Comparison: React.FC = () => {
                             </Group>
 
                             <Switch
+                                size="xs"
                                 label="Flip positive color"
                                 checked={flipColors}
                                 onChange={() => {
                                     setFlipColors(!flipColors);
                                 }}
                                 labelPosition="left"
-                                classNames={{ label: classes.switchLabel }}
+                                classNames={{
+                                    label: classes.switchLabel,
+                                }}
                             />
 
                             {showStyle &&
@@ -191,13 +190,12 @@ export const Comparison: React.FC = () => {
                                     />
                                 )}
 
-                            <TextInput
+                            <LabelEditor
                                 label="Comparison label"
                                 value={comparisonLabel ?? ''}
-                                placeholder={'Add an optional label'}
-                                onChange={(e) =>
-                                    setComparisonLabel(e.currentTarget.value)
-                                }
+                                placeholder="Add an optional label"
+                                onChange={setComparisonLabel}
+                                fields={granularityFields}
                             />
                         </>
                     ) : null}

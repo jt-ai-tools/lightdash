@@ -1,5 +1,6 @@
 import { type Group } from './groups';
 import { type KnexPaginatedData } from './knex-paginate';
+import { type UserAvatarColorValue } from './userAvatars';
 
 export enum OrganizationMemberRole {
     MEMBER = 'member',
@@ -50,6 +51,8 @@ export type OrganizationMemberProfile = {
      */
     role: OrganizationMemberRole;
     roleUuid: string | undefined;
+    /** True when the member holds extra custom roles beyond `role`/`roleUuid` (see role sets). */
+    hasMultipleRoles?: boolean;
     /**
      * Whether the user can login
      */
@@ -62,6 +65,14 @@ export type OrganizationMemberProfile = {
      * Whether the user doesn't have an authentication method (password or openId)
      */
     isPending?: boolean;
+    /**
+     * Content-addressed path to the uploaded avatar image; null when none uploaded
+     */
+    avatarUrl: string | null;
+    /**
+     * Explicit gradient placeholder override; null falls back to the deterministic gradient
+     */
+    avatarGradient: UserAvatarColorValue | null;
 };
 
 export type OrganizationMemberProfileWithGroups = OrganizationMemberProfile & {
@@ -84,23 +95,4 @@ export type ApiOrganizationMemberProfiles = {
 export type ApiOrganizationMemberProfile = {
     status: 'ok';
     results: OrganizationMemberProfile;
-};
-
-export const getRoleDescription = (role: OrganizationMemberRole) => {
-    switch (role) {
-        case OrganizationMemberRole.MEMBER:
-            return 'No access to projects by default. Project level permissions to be set separately';
-        case OrganizationMemberRole.VIEWER:
-            return 'Has view only access to all projects';
-        case OrganizationMemberRole.INTERACTIVE_VIEWER:
-            return 'Has view access to all projects and can create new projects but cannot edit existing projects';
-        case OrganizationMemberRole.EDITOR:
-            return 'Can create, edit and delete projects';
-        case OrganizationMemberRole.DEVELOPER:
-            return 'Can create, edit and delete projects';
-        case OrganizationMemberRole.ADMIN:
-            return 'Full access to entire project, manage all projects and user access';
-        default:
-            return null;
-    }
 };

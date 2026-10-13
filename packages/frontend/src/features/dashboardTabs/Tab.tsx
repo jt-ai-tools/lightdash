@@ -1,9 +1,11 @@
 import { Draggable } from '@hello-pangea/dnd';
 import type { DashboardTab } from '@lightdash/common';
-import { ActionIcon, Menu, Tabs, Tooltip } from '@mantine-8/core';
+import { ActionIcon, Group, Menu, Tabs, Tooltip } from '@mantine/core';
 import {
     IconCopy,
     IconDotsVertical,
+    IconEye,
+    IconEyeOff,
     IconGripVertical,
     IconPencil,
     IconTrash,
@@ -22,6 +24,7 @@ type DraggableTabProps = {
     setDeletingTab: Dispatch<SetStateAction<boolean>>;
     handleDeleteTab: (tabUuid: string) => void;
     handleDuplicateTab: (tabUuid: string) => void;
+    handleToggleTabHidden: (tabUuid: string) => void;
 };
 
 const DraggableTab: FC<DraggableTabProps> = ({
@@ -33,6 +36,7 @@ const DraggableTab: FC<DraggableTabProps> = ({
     setEditingTab,
     handleDeleteTab,
     handleDuplicateTab,
+    handleToggleTabHidden,
     setDeletingTab,
 }) => {
     const { ref, isTruncated } = useIsTruncated('span');
@@ -47,21 +51,18 @@ const DraggableTab: FC<DraggableTabProps> = ({
                 >
                     <Tooltip
                         label={tab.name}
-                        withinPortal
                         position="top"
-                        withArrow
                         openDelay={500}
                         color="dark"
-                        variant="xs"
                         disabled={!isTruncated}
                         maw={300}
-                        multiline
                     >
                         <Tabs.Tab
                             ref={ref}
                             key={idx}
                             value={tab.uuid}
                             maw={`${100 / (sortedTabs.length || 1)}vw`}
+                            opacity={isEditMode && tab.hidden ? 0.55 : 1}
                             styles={{
                                 tabSection: {
                                     flexShrink: 0,
@@ -71,9 +72,7 @@ const DraggableTab: FC<DraggableTabProps> = ({
                                 isEditMode ? (
                                     <ActionIcon
                                         {...provided.dragHandleProps}
-                                        variant="subtle"
                                         size="xs"
-                                        color="gray"
                                     >
                                         <MantineIcon
                                             size="md"
@@ -84,18 +83,9 @@ const DraggableTab: FC<DraggableTabProps> = ({
                             }
                             rightSection={
                                 isEditMode ? (
-                                    <Menu
-                                        position="bottom"
-                                        withArrow
-                                        withinPortal
-                                        shadow="md"
-                                    >
+                                    <Menu position="bottom" withArrow>
                                         <Menu.Target>
-                                            <ActionIcon
-                                                color="gray"
-                                                variant="subtle"
-                                                size="xs"
-                                            >
+                                            <ActionIcon size="xs">
                                                 <MantineIcon
                                                     icon={IconDotsVertical}
                                                 />
@@ -121,6 +111,30 @@ const DraggableTab: FC<DraggableTabProps> = ({
                                                 }
                                             >
                                                 Duplicate Tab
+                                            </Menu.Item>
+                                            <Menu.Item
+                                                onClick={() =>
+                                                    handleToggleTabHidden(
+                                                        tab.uuid,
+                                                    )
+                                                }
+                                                leftSection={
+                                                    tab.hidden ? (
+                                                        <MantineIcon
+                                                            icon={IconEye}
+                                                            size={14}
+                                                        />
+                                                    ) : (
+                                                        <MantineIcon
+                                                            icon={IconEyeOff}
+                                                            size={14}
+                                                        />
+                                                    )
+                                                }
+                                            >
+                                                {tab.hidden
+                                                    ? 'Show Tab'
+                                                    : 'Hide Tab'}
                                             </Menu.Item>
                                             {sortedTabs.length === 1 ||
                                             !currentTabHasTiles ? (
@@ -158,7 +172,14 @@ const DraggableTab: FC<DraggableTabProps> = ({
                                 ) : null
                             }
                         >
-                            {tab.name}
+                            {isEditMode && tab.hidden ? (
+                                <Group gap={4} wrap="nowrap">
+                                    <MantineIcon icon={IconEyeOff} size="sm" />
+                                    <span>{tab.name}</span>
+                                </Group>
+                            ) : (
+                                tab.name
+                            )}
                         </Tabs.Tab>
                     </Tooltip>
                 </div>

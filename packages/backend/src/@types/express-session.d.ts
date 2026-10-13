@@ -1,19 +1,69 @@
 import 'express-session';
+import { type AgentConnectAttempt } from '../services/AiAccessService/AiAccessService';
 
 declare module 'express-session' {
     interface SessionData {
+        passport?: { user?: unknown };
+        'oauth2:snowflake-ai'?: { state?: string };
+        agentConnectBindings?: Record<
+            string,
+            { organizationUuid: string; clientVersion: string | null }
+        >;
+        agentConnectAttempts?: Record<string, AgentConnectAttempt>;
         oauth: {
             inviteCode?: string | undefined;
             returnTo?: string | undefined;
+            intent?: 'link' | undefined;
+            githubFlow?: 'installation' | 'user_link' | undefined;
+            githubInstallation?: {
+                installationId: string;
+                organizationUuid: string;
+            };
             codeVerifier?: string | undefined;
             state?: string | undefined;
+            linear?: {
+                clientId: string;
+                codeVerifier: string;
+                redirectUri: string;
+            };
+            jira?: {
+                redirectUri: string;
+                clientId: string;
+                encryptedClientSecret: string;
+            };
             isPopup?: boolean | undefined;
+            databricks?: {
+                projectUuid?: string | undefined;
+            };
+            redshiftAwsSso?: {
+                clientId: string;
+                clientSecret: string;
+                deviceCode: string;
+                region: string;
+                startUrl: string;
+                expiresAt: number;
+            };
+            azureAdStrategyName?: string | undefined;
+            oktaOrganizationUuid?: string | undefined;
+            oidcStrategyName?: string | undefined;
+            oneLoginStrategyName?: string | undefined;
         };
         slack: {
             teamId?: string | undefined;
             channelId?: string | undefined;
             messageTs?: string | undefined;
             threadTs?: string | undefined;
+            trigger?: 'vote' | 'app_mention' | undefined;
+        };
+        impersonation?: {
+            adminUserUuid: string;
+            adminName: string;
+            adminEmail: string;
+            adminFirstName?: string;
+            adminLastName?: string;
+            adminRole: string;
+            targetUserUuid: string;
+            startedAt: string;
         };
     }
 }

@@ -2,17 +2,40 @@ import {
     AnyType,
     CreateSchedulerAndTargets,
     CreateSchedulerLog,
+    generateSlug,
+    GsheetExportProgress,
+    isAppCreateScheduler,
+    isChartCreateScheduler,
+    isChartScheduler,
+    isCreateSchedulerGoogleChatTarget,
+    isCreateSchedulerMsTeamsTarget,
+    isCreateSchedulerSlackTarget,
+    isDashboardCreateScheduler,
+    isDashboardScheduler,
+    isEmailTarget,
+    isGoogleChatTarget,
+    isMsTeamsTarget,
+    isSlackTarget,
+    isSqlChartScheduler,
+    isUpdateSchedulerEmailTarget,
+    isUpdateSchedulerGoogleChatTarget,
+    isUpdateSchedulerMsTeamsTarget,
+    isUpdateSchedulerSlackTarget,
     KnexPaginateArgs,
     KnexPaginatedData,
     LogCounts,
     NotFoundError,
+    ParameterError,
     Scheduler,
     SchedulerAndTargets,
+    SchedulerBase,
     SchedulerEmailTarget,
     SchedulerFormat,
+    SchedulerGoogleChatTarget,
     SchedulerJobStatus,
     SchedulerLog,
     SchedulerMsTeamsTarget,
+    SchedulerResourceType,
     SchedulerRun,
     SchedulerRunLog,
     SchedulerRunLogsResponse,
@@ -20,29 +43,30 @@ import {
     SchedulerSlackTarget,
     SchedulerTaskName,
     SchedulerWithLogs,
+    UnexpectedServerError,
     UpdateSchedulerAndTargets,
     UserSchedulersSummary,
-    isChartScheduler,
-    isCreateSchedulerMsTeamsTarget,
-    isCreateSchedulerSlackTarget,
-    isDashboardScheduler,
-    isEmailTarget,
-    isMsTeamsTarget,
-    isSlackTarget,
-    isUpdateSchedulerEmailTarget,
-    isUpdateSchedulerMsTeamsTarget,
-    isUpdateSchedulerSlackTarget,
     type SchedulerCronUpdate,
 } from '@lightdash/common';
 import { Knex } from 'knex';
 import { DatabaseError } from 'pg';
+import { AppsTableName } from '../../database/entities/apps';
 import { DashboardsTableName } from '../../database/entities/dashboards';
+import { OrganizationTableName } from '../../database/entities/organizations';
 import { ProjectTableName } from '../../database/entities/projects';
 import { SavedChartsTableName } from '../../database/entities/savedCharts';
+import { SavedSqlTableName } from '../../database/entities/savedSql';
 import {
+    isAppSchedulerDb,
+    isChartSchedulerDb,
+    isDashboardSchedulerDb,
+    isSqlChartSchedulerDb,
     SchedulerDb,
     SchedulerEmailTargetDb,
     SchedulerEmailTargetTableName,
+    SchedulerGoogleChatTargetDb,
+    SchedulerGoogleChatTargetTableName,
+    SchedulerInsert,
     SchedulerLogDb,
     SchedulerLogTableName,
     SchedulerMsTeamsTargetDb,
@@ -54,12 +78,15 @@ import {
 import { SpaceTableName } from '../../database/entities/spaces';
 import { UserTableName } from '../../database/entities/users';
 import KnexPaginate from '../../database/pagination';
-import { getColumnMatchRegexQuery } from '../SearchModel/utils/search';
+import { ServiceAccountsTableName } from '../../ee/database/entities/serviceAccounts';
+import { validateSchedulerWebhookTargets } from '../../utils/schedulerWebhookValidation';
 
 type SelectScheduler = SchedulerDb & {
     created_by_name: string | null;
     saved_chart_name: string | null;
     dashboard_name: string | null;
+    saved_sql_name: string | null;
+    app_name: string | null;
     project_uuid?: string | null;
     project_name?: string | null;
     project_scheduler_timezone?: string | null;
@@ -76,6 +103,17 @@ const statusOrder = [
     SchedulerJobStatus.SCHEDULED,
 ].map((s) => s.toString());
 
+const LIKE_ESCAPE_CHAR = '\\';
+
+const escapeLikeWildcards = (value: string): string =>
+    value
+        .split(LIKE_ESCAPE_CHAR)
+        .join(`${LIKE_ESCAPE_CHAR}${LIKE_ESCAPE_CHAR}`)
+        .split('%')
+        .join(`${LIKE_ESCAPE_CHAR}%`)
+        .split('_')
+        .join(`${LIKE_ESCAPE_CHAR}_`);
+
 export class SchedulerModel {
     private database: Knex;
 
@@ -84,8 +122,9 @@ export class SchedulerModel {
     }
 
     static convertScheduler(scheduler: SelectScheduler): Scheduler {
-        return {
+        const base: SchedulerBase = {
             schedulerUuid: scheduler.scheduler_uuid,
+            slug: scheduler.slug ?? '',
             name: scheduler.name,
             message: scheduler.message,
             createdAt: scheduler.created_at,
@@ -100,19 +139,286 @@ export class SchedulerModel {
             savedChartName: scheduler.saved_chart_name,
             dashboardUuid: scheduler.dashboard_uuid,
             dashboardName: scheduler.dashboard_name,
+            savedSqlUuid: scheduler.saved_sql_uuid,
+            savedSqlName: scheduler.saved_sql_name,
+            appUuid: scheduler.app_uuid,
+            appName: scheduler.app_name,
             format: scheduler.format,
             options: scheduler.options,
-            filters: scheduler.filters,
-            parameters: scheduler.parameters,
-            customViewportWidth: scheduler.custom_viewport_width,
-            thresholds: scheduler.thresholds || undefined,
+            thresholds: scheduler.thresholds ?? undefined,
             enabled: scheduler.enabled,
-            notificationFrequency: scheduler.notification_frequency,
-            selectedTabs: scheduler.selected_tabs,
+            notificationFrequency:
+                scheduler.notification_frequency ?? undefined,
             includeLinks: scheduler.include_links,
+            plainTextEmail: scheduler.plain_text_email,
             projectUuid: scheduler.project_uuid ?? undefined,
             projectName: scheduler.project_name ?? undefined,
-        } as Scheduler;
+        };
+
+        // Discriminate by resource FK so `filters` is narrowed to the shape
+        // stored for that resource type (no shape-sniffing, no casts).
+        if (isDashboardSchedulerDb(scheduler)) {
+            return {
+                ...base,
+                savedChartUuid: null,
+                dashboardUuid: scheduler.dashboard_uuid,
+                savedSqlUuid: null,
+                appUuid: null,
+                filters: scheduler.filters ?? undefined,
+                parameters: scheduler.parameters ?? undefined,
+                customViewportWidth:
+                    scheduler.custom_viewport_width ?? undefined,
+                selectedTabs: scheduler.selected_tabs,
+            };
+        }
+        if (isChartSchedulerDb(scheduler)) {
+            return {
+                ...base,
+                savedChartUuid: scheduler.saved_chart_uuid,
+                dashboardUuid: null,
+                savedSqlUuid: null,
+                appUuid: null,
+                filters: scheduler.filters ?? undefined,
+                parameters: scheduler.parameters ?? undefined,
+            };
+        }
+        if (isSqlChartSchedulerDb(scheduler)) {
+            return {
+                ...base,
+                savedChartUuid: null,
+                dashboardUuid: null,
+                savedSqlUuid: scheduler.saved_sql_uuid,
+                appUuid: null,
+            };
+        }
+        if (isAppSchedulerDb(scheduler)) {
+            return {
+                ...base,
+                savedChartUuid: null,
+                dashboardUuid: null,
+                savedSqlUuid: null,
+                appUuid: scheduler.app_uuid,
+                appState: scheduler.app_state ?? undefined,
+            };
+        }
+        throw new UnexpectedServerError(
+            `Scheduler ${scheduler.scheduler_uuid} has no resource reference`,
+        );
+    }
+
+    // Serialize a value for a JSONB column. Stringify (not raw object) so JS
+    // arrays aren't coerced to Postgres array literals.
+    private static toJsonColumn(value: unknown): string | null {
+        return value ? JSON.stringify(value) : null;
+    }
+
+    // Build the row to insert, choosing the resource FK and overrides by
+    // scheduler type. Only dashboard/chart schedulers carry filter & parameter
+    // overrides; only dashboards carry viewport width & selected tabs.
+    private static toSchedulerInsert(
+        newScheduler: CreateSchedulerAndTargets,
+        projectUuid: string,
+        slug: string,
+    ): SchedulerInsert {
+        const common = {
+            project_uuid: projectUuid,
+            slug,
+            name: newScheduler.name,
+            message: newScheduler.message,
+            format: newScheduler.format,
+            created_by: newScheduler.createdBy,
+            cron: newScheduler.cron,
+            timezone: newScheduler.timezone ?? null,
+            updated_at: new Date(),
+            options: newScheduler.options,
+            thresholds: SchedulerModel.toJsonColumn(newScheduler.thresholds),
+            enabled: true,
+            notification_frequency: newScheduler.notificationFrequency || null,
+            include_links: newScheduler.includeLinks !== false,
+            plain_text_email: newScheduler.plainTextEmail === true,
+        };
+
+        if (isDashboardCreateScheduler(newScheduler)) {
+            return {
+                ...common,
+                saved_chart_uuid: null,
+                dashboard_uuid: newScheduler.dashboardUuid,
+                saved_sql_uuid: null,
+                app_uuid: null,
+                filters: SchedulerModel.toJsonColumn(newScheduler.filters),
+                parameters: SchedulerModel.toJsonColumn(
+                    newScheduler.parameters,
+                ),
+                custom_viewport_width: newScheduler.customViewportWidth ?? null,
+                selected_tabs: newScheduler.selectedTabs ?? null,
+                app_state: null,
+            };
+        }
+        if (isChartCreateScheduler(newScheduler)) {
+            return {
+                ...common,
+                saved_chart_uuid: newScheduler.savedChartUuid,
+                dashboard_uuid: null,
+                saved_sql_uuid: null,
+                app_uuid: null,
+                filters: SchedulerModel.toJsonColumn(newScheduler.filters),
+                parameters: SchedulerModel.toJsonColumn(
+                    newScheduler.parameters,
+                ),
+                custom_viewport_width: null,
+                selected_tabs: null,
+                app_state: null,
+            };
+        }
+        if (isSqlChartScheduler(newScheduler)) {
+            return {
+                ...common,
+                saved_chart_uuid: null,
+                dashboard_uuid: null,
+                saved_sql_uuid: newScheduler.savedSqlUuid,
+                app_uuid: null,
+                filters: null,
+                parameters: null,
+                custom_viewport_width: null,
+                selected_tabs: null,
+                app_state: null,
+            };
+        }
+        if (isAppCreateScheduler(newScheduler)) {
+            return {
+                ...common,
+                saved_chart_uuid: null,
+                dashboard_uuid: null,
+                saved_sql_uuid: null,
+                app_uuid: newScheduler.appUuid,
+                filters: null,
+                parameters: null,
+                custom_viewport_width: null,
+                selected_tabs: null,
+                app_state: SchedulerModel.toJsonColumn(newScheduler.appState),
+            };
+        }
+        throw new UnexpectedServerError(
+            'Cannot create scheduler without a resource reference',
+        );
+    }
+
+    private static async getSchedulerProjectUuid(
+        trx: Knex.Transaction,
+        scheduler: CreateSchedulerAndTargets,
+    ): Promise<string> {
+        let result: { project_uuid: string } | undefined;
+        if (isChartCreateScheduler(scheduler)) {
+            result = await trx(SavedChartsTableName)
+                .select<{ project_uuid: string }>(
+                    `${ProjectTableName}.project_uuid`,
+                )
+                .leftJoin(
+                    DashboardsTableName,
+                    `${DashboardsTableName}.dashboard_uuid`,
+                    `${SavedChartsTableName}.dashboard_uuid`,
+                )
+                .join(SpaceTableName, function joinChartSpace() {
+                    this.on(
+                        `${SpaceTableName}.space_id`,
+                        '=',
+                        `${SavedChartsTableName}.space_id`,
+                    ).orOn(
+                        `${SpaceTableName}.space_id`,
+                        '=',
+                        `${DashboardsTableName}.space_id`,
+                    );
+                })
+                .join(
+                    ProjectTableName,
+                    `${ProjectTableName}.project_id`,
+                    `${SpaceTableName}.project_id`,
+                )
+                .where(
+                    `${SavedChartsTableName}.saved_query_uuid`,
+                    scheduler.savedChartUuid,
+                )
+                .first();
+        } else if (isDashboardCreateScheduler(scheduler)) {
+            result = await trx(DashboardsTableName)
+                .select<{ project_uuid: string }>(
+                    `${ProjectTableName}.project_uuid`,
+                )
+                .join(
+                    SpaceTableName,
+                    `${SpaceTableName}.space_id`,
+                    `${DashboardsTableName}.space_id`,
+                )
+                .join(
+                    ProjectTableName,
+                    `${ProjectTableName}.project_id`,
+                    `${SpaceTableName}.project_id`,
+                )
+                .where(
+                    `${DashboardsTableName}.dashboard_uuid`,
+                    scheduler.dashboardUuid,
+                )
+                .first();
+        } else if (isSqlChartScheduler(scheduler)) {
+            result = await trx(SavedSqlTableName)
+                .select<{ project_uuid: string }>('project_uuid')
+                .where('saved_sql_uuid', scheduler.savedSqlUuid)
+                .first();
+        } else if (isAppCreateScheduler(scheduler)) {
+            result = await trx(AppsTableName)
+                .select<{ project_uuid: string }>('project_uuid')
+                .where('app_id', scheduler.appUuid)
+                .first();
+        }
+        if (!result) {
+            throw new UnexpectedServerError(
+                'Cannot resolve the project for the scheduled delivery resource',
+            );
+        }
+        return result.project_uuid;
+    }
+
+    private static async getCreateSlug(
+        trx: Knex.Transaction,
+        scheduler: CreateSchedulerAndTargets,
+    ): Promise<{ projectUuid: string; slug: string }> {
+        const projectUuid = await SchedulerModel.getSchedulerProjectUuid(
+            trx,
+            scheduler,
+        );
+        const requestedSlug = scheduler.slug;
+        const baseSlug = (requestedSlug ?? generateSlug(scheduler.name)).slice(
+            0,
+            240,
+        );
+
+        if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(baseSlug)) {
+            throw new ParameterError(
+                `Invalid scheduled delivery slug: ${baseSlug}`,
+            );
+        }
+
+        await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [
+            3,
+            `${projectUuid}:${baseSlug}`,
+        ]);
+
+        if (requestedSlug) {
+            return { projectUuid, slug: baseSlug };
+        }
+
+        const matchingSlugs = await trx(SchedulerTableName)
+            .select('slug')
+            .where('project_uuid', projectUuid)
+            .where('slug', 'like', `${baseSlug}%`)
+            .pluck<string>('slug');
+        let slug = baseSlug;
+        let suffix = 1;
+        while (matchingSlugs.includes(slug)) {
+            slug = `${baseSlug}-${suffix}`;
+            suffix += 1;
+        }
+        return { projectUuid, slug };
     }
 
     static convertSlackTarget(
@@ -151,11 +457,25 @@ export class SchedulerModel {
         };
     }
 
+    static convertGoogleChatTarget(
+        scheduler: SchedulerGoogleChatTargetDb,
+    ): SchedulerGoogleChatTarget {
+        return {
+            schedulerGoogleChatTargetUuid:
+                scheduler.scheduler_google_chat_target_uuid,
+            createdAt: scheduler.created_at,
+            updatedAt: scheduler.updated_at,
+            schedulerUuid: scheduler.scheduler_uuid,
+            googleChatWebhook: scheduler.webhook,
+        };
+    }
+
     static getSlackChannels(
         targets: (
             | SchedulerSlackTarget
             | SchedulerEmailTarget
             | SchedulerMsTeamsTarget
+            | SchedulerGoogleChatTarget
         )[],
     ): string[] {
         return targets.reduce<string[]>((acc, target) => {
@@ -175,6 +495,8 @@ export class SchedulerModel {
                 ),
                 `${SavedChartsTableName}.name as saved_chart_name`,
                 `${DashboardsTableName}.name as dashboard_name`,
+                `${SavedSqlTableName}.name as saved_sql_name`,
+                `${AppsTableName}.name as app_name`,
             )
             .whereNull(`${SchedulerTableName}.deleted_at`)
             .leftJoin(
@@ -195,7 +517,37 @@ export class SchedulerModel {
                     '=',
                     `${SchedulerTableName}.dashboard_uuid`,
                 ).andOnNull(`${DashboardsTableName}.deleted_at`);
+            })
+            .leftJoin(SavedSqlTableName, function nonDeletedSqlChartJoin() {
+                this.on(
+                    `${SavedSqlTableName}.saved_sql_uuid`,
+                    '=',
+                    `${SchedulerTableName}.saved_sql_uuid`,
+                ).andOnNull(`${SavedSqlTableName}.deleted_at`);
+            })
+            .leftJoin(AppsTableName, function nonDeletedAppJoin() {
+                this.on(
+                    `${AppsTableName}.app_id`,
+                    '=',
+                    `${SchedulerTableName}.app_uuid`,
+                ).andOnNull(`${AppsTableName}.deleted_at`);
             });
+    }
+
+    static getSchedulerListSelect(db: Knex) {
+        return [
+            `${SchedulerTableName}.*`,
+            db.raw(
+                `(${UserTableName}.first_name || ' ' || ${UserTableName}.last_name) as created_by_name`,
+            ),
+            `${SavedChartsTableName}.name as saved_chart_name`,
+            `${DashboardsTableName}.name as dashboard_name`,
+            `${SavedSqlTableName}.name as saved_sql_name`,
+            `${AppsTableName}.name as app_name`,
+            `${ProjectTableName}.name as project_name`,
+            `${ProjectTableName}.scheduler_timezone as project_scheduler_timezone`,
+            `${ProjectTableName}.organization_id as organization_id`,
+        ];
     }
 
     private async getSchedulersWithTargets(
@@ -221,10 +573,19 @@ export class SchedulerModel {
                 `${SchedulerMsTeamsTargetTableName}.scheduler_uuid`,
                 schedulers.map((s) => s.scheduler_uuid),
             );
+        const googleChatTargets = await this.database(
+            SchedulerGoogleChatTargetTableName,
+        )
+            .select()
+            .whereIn(
+                `${SchedulerGoogleChatTargetTableName}.scheduler_uuid`,
+                schedulers.map((s) => s.scheduler_uuid),
+            );
         const targets = [
             ...slackTargets.map(SchedulerModel.convertSlackTarget),
             ...emailTargets.map(SchedulerModel.convertEmailTarget),
             ...msTeamsTargets.map(SchedulerModel.convertMsTeamsTarget),
+            ...googleChatTargets.map(SchedulerModel.convertGoogleChatTarget),
         ];
 
         return schedulers.map((scheduler) => ({
@@ -236,42 +597,73 @@ export class SchedulerModel {
     }
 
     async getAllSchedulers(): Promise<SchedulerAndTargets[]> {
+        // `service_accounts` is an EE-only table, absent in unlicensed
+        // deployments, so only reference it when it actually exists.
+        // `to_regclass` returns NULL for a missing table instead of erroring.
+        const [row] = await this.database.select<
+            { has_service_accounts: boolean }[]
+        >(
+            this.database.raw(
+                'to_regclass(?) is not null as has_service_accounts',
+                [ServiceAccountsTableName],
+            ),
+        );
+        const hasServiceAccounts = row?.has_service_accounts ?? false;
         const schedulers = SchedulerModel.getBaseSchedulerQuery(this.database)
             .where(`${SchedulerTableName}.enabled`, true)
-            .where(`${UserTableName}.is_active`, true);
+            .where(function activeUserOrServiceAccount() {
+                // Human creators run only while their account is active.
+                void this.where(`${UserTableName}.is_active`, true);
+                // Service accounts are backed by an always-inactive internal
+                // user, so gate them on the service account still existing
+                // instead — deleting the account (tombstone) stops delivery.
+                if (hasServiceAccounts) {
+                    void this.orWhereExists(function serviceAccountExists() {
+                        void this.select('*')
+                            .from(ServiceAccountsTableName)
+                            .whereRaw(
+                                `${ServiceAccountsTableName}.service_account_user_uuid = ${SchedulerTableName}.created_by`,
+                            );
+                    });
+                }
+            });
         return this.getSchedulersWithTargets(await schedulers);
     }
 
     async getSchedulers({
         projectUuid,
+        organizationUuid,
         paginateArgs,
         searchQuery,
         sort,
         filters,
     }: {
         projectUuid?: string;
+        organizationUuid: string;
         paginateArgs?: KnexPaginateArgs;
         searchQuery?: string;
         sort?: { column: string; direction: 'asc' | 'desc' };
         filters?: {
             createdByUserUuids?: string[];
             formats?: string[];
-            resourceType?: 'chart' | 'dashboard';
+            resourceType?: 'chart' | 'dashboard' | 'sqlChart' | 'app';
             resourceUuids?: string[];
             destinations?: string[];
         };
     }): Promise<KnexPaginatedData<SchedulerAndTargets[]>> {
+        // Resolve organization_id once — used to scope all sub-queries
+        const orgRow = await this.database(OrganizationTableName)
+            .select('organization_id')
+            .where('organization_uuid', organizationUuid)
+            .first();
+        if (!orgRow) {
+            throw new NotFoundError('Organization not found');
+        }
+        const { organization_id: organizationId } = orgRow;
+
         let baseQuery = this.database(SchedulerTableName)
             .select<SelectScheduler[]>(
-                `${SchedulerTableName}.*`,
-                this.database.raw(
-                    `(${UserTableName}.first_name || ' ' || ${UserTableName}.last_name) as created_by_name`,
-                ),
-                `${SavedChartsTableName}.name as saved_chart_name`,
-                `${DashboardsTableName}.name as dashboard_name`,
-                `${ProjectTableName}.project_uuid as project_uuid`,
-                `${ProjectTableName}.name as project_name`,
-                `${ProjectTableName}.scheduler_timezone as project_scheduler_timezone`,
+                ...SchedulerModel.getSchedulerListSelect(this.database),
             )
             .whereNull(`${SchedulerTableName}.deleted_at`)
             .leftJoin(
@@ -292,12 +684,31 @@ export class SchedulerModel {
                     '=',
                     `${SchedulerTableName}.dashboard_uuid`,
                 ).andOnNull(`${DashboardsTableName}.deleted_at`);
+            })
+            .leftJoin(SavedSqlTableName, function nonDeletedSqlChartJoin() {
+                this.on(
+                    `${SavedSqlTableName}.saved_sql_uuid`,
+                    '=',
+                    `${SchedulerTableName}.saved_sql_uuid`,
+                ).andOnNull(`${SavedSqlTableName}.deleted_at`);
+            })
+            .leftJoin(AppsTableName, function nonDeletedAppJoin() {
+                this.on(
+                    `${AppsTableName}.app_id`,
+                    '=',
+                    `${SchedulerTableName}.app_uuid`,
+                ).andOnNull(`${AppsTableName}.deleted_at`);
             });
         // Apply search query if present
-        if (searchQuery) {
-            baseQuery = getColumnMatchRegexQuery(baseQuery, searchQuery, [
-                `${SchedulerTableName}.name`,
-            ]);
+        const trimmedSearchQuery = searchQuery?.trim();
+        if (trimmedSearchQuery) {
+            baseQuery = baseQuery.whereRaw(
+                `:column: ILIKE :searchQuery ESCAPE '${LIKE_ESCAPE_CHAR}'`,
+                {
+                    column: `${SchedulerTableName}.name`,
+                    searchQuery: `%${escapeLikeWildcards(trimmedSearchQuery)}%`,
+                },
+            );
         }
 
         if (
@@ -390,6 +801,28 @@ export class SchedulerModel {
                         });
                     }
                 }
+                if (destinations.includes('googlechat')) {
+                    if (isFirst) {
+                        void builder.whereExists((subQuery) => {
+                            void subQuery
+                                .select('*')
+                                .from(SchedulerGoogleChatTargetTableName)
+                                .whereRaw(
+                                    `${SchedulerGoogleChatTargetTableName}.scheduler_uuid = ${SchedulerTableName}.scheduler_uuid`,
+                                );
+                        });
+                        isFirst = false;
+                    } else {
+                        void builder.orWhereExists((subQuery) => {
+                            void subQuery
+                                .select('*')
+                                .from(SchedulerGoogleChatTargetTableName)
+                                .whereRaw(
+                                    `${SchedulerGoogleChatTargetTableName}.scheduler_uuid = ${SchedulerTableName}.scheduler_uuid`,
+                                );
+                        });
+                    }
+                }
             });
         }
 
@@ -403,6 +836,14 @@ export class SchedulerModel {
         let schedulerDashboards = baseQuery
             .clone()
             .whereNotNull(`${SchedulerTableName}.dashboard_uuid`);
+
+        let schedulerSqlCharts = baseQuery
+            .clone()
+            .whereNotNull(`${SchedulerTableName}.saved_sql_uuid`);
+
+        let schedulerApps = baseQuery
+            .clone()
+            .whereNotNull(`${SchedulerTableName}.app_uuid`);
 
         schedulerCharts = schedulerCharts
             // Join to get the dashboard that the chart belongs to (if any)
@@ -445,6 +886,27 @@ export class SchedulerModel {
                 `${SpaceTableName}.project_id`,
             );
 
+        schedulerSqlCharts = schedulerSqlCharts
+            .leftJoin(SpaceTableName, function joinSpaces() {
+                this.on(
+                    `${SpaceTableName}.space_uuid`,
+                    '=',
+                    `${SavedSqlTableName}.space_uuid`,
+                ).andOnNull(`${SpaceTableName}.deleted_at`);
+            })
+            .leftJoin(
+                ProjectTableName,
+                `${ProjectTableName}.project_id`,
+                `${SpaceTableName}.project_id`,
+            );
+
+        // Apps reference project_uuid directly — join straight to projects.
+        schedulerApps = schedulerApps.leftJoin(
+            ProjectTableName,
+            `${ProjectTableName}.project_uuid`,
+            `${AppsTableName}.project_uuid`,
+        );
+
         // Exclude schedulers for content in deleted spaces
         schedulerCharts = schedulerCharts.whereNull(
             `${SpaceTableName}.deleted_at`,
@@ -453,27 +915,24 @@ export class SchedulerModel {
             `${SpaceTableName}.deleted_at`,
         );
 
-        if (projectUuid) {
-            schedulerCharts = schedulerCharts.where(
-                `${ProjectTableName}.project_uuid`,
-                projectUuid,
-            );
-
-            schedulerDashboards = schedulerDashboards.where(
-                `${ProjectTableName}.project_uuid`,
-                projectUuid,
-            );
-        }
-
         // Apply resource type filter
+        const noResults = this.database.raw('1 = 0');
         if (filters?.resourceType === 'chart') {
-            // Only include charts
-            schedulerDashboards = schedulerDashboards.where(
-                this.database.raw('1 = 0'),
-            ); // Make dashboards query return no results
+            schedulerDashboards = schedulerDashboards.where(noResults);
+            schedulerSqlCharts = schedulerSqlCharts.where(noResults);
+            schedulerApps = schedulerApps.where(noResults);
+        } else if (filters?.resourceType === 'sqlChart') {
+            schedulerCharts = schedulerCharts.where(noResults);
+            schedulerDashboards = schedulerDashboards.where(noResults);
+            schedulerApps = schedulerApps.where(noResults);
         } else if (filters?.resourceType === 'dashboard') {
-            // Only include dashboards
-            schedulerCharts = schedulerCharts.where(this.database.raw('1 = 0')); // Make charts query return no results
+            schedulerCharts = schedulerCharts.where(noResults);
+            schedulerSqlCharts = schedulerSqlCharts.where(noResults);
+            schedulerApps = schedulerApps.where(noResults);
+        } else if (filters?.resourceType === 'app') {
+            schedulerCharts = schedulerCharts.where(noResults);
+            schedulerDashboards = schedulerDashboards.where(noResults);
+            schedulerSqlCharts = schedulerSqlCharts.where(noResults);
         }
 
         // Apply resource UUID filter
@@ -486,10 +945,33 @@ export class SchedulerModel {
                 `${SchedulerTableName}.dashboard_uuid`,
                 filters.resourceUuids,
             );
+            schedulerSqlCharts = schedulerSqlCharts.whereIn(
+                `${SchedulerTableName}.saved_sql_uuid`,
+                filters.resourceUuids,
+            );
+            schedulerApps = schedulerApps.whereIn(
+                `${SchedulerTableName}.app_uuid`,
+                filters.resourceUuids,
+            );
         }
 
-        // Use union to combine both queries
-        let query = schedulerCharts.unionAll(schedulerDashboards);
+        // Combine all content-type queries, then scope to the caller's
+        // organization on the outer query. This ensures any new scheduler
+        // content type added to the union is automatically org-scoped.
+        let query = this.database
+            .select<SelectScheduler[]>('*')
+            .from(
+                schedulerCharts
+                    .unionAll(schedulerDashboards)
+                    .unionAll(schedulerSqlCharts)
+                    .unionAll(schedulerApps)
+                    .as('schedulers'),
+            )
+            .where('organization_id', organizationId);
+
+        if (projectUuid) {
+            query = query.where('project_uuid', projectUuid);
+        }
 
         // Apply sorting if present, default to name asc
         if (sort && sort.column && sort.direction) {
@@ -539,6 +1021,22 @@ export class SchedulerModel {
         return this.getSchedulersWithTargets(await schedulers);
     }
 
+    async findSchedulerByProjectSlug(
+        projectUuid: string,
+        slug: string,
+    ): Promise<SchedulerAndTargets | null> {
+        const [scheduler] = await SchedulerModel.getBaseSchedulerQuery(
+            this.database,
+        )
+            .where(`${SchedulerTableName}.project_uuid`, projectUuid)
+            .where(`${SchedulerTableName}.slug`, slug);
+        if (!scheduler) return null;
+        const [schedulerWithTargets] = await this.getSchedulersWithTargets([
+            scheduler,
+        ]);
+        return schedulerWithTargets;
+    }
+
     async getDashboardSchedulers(
         dashboardUuid: string,
     ): Promise<SchedulerAndTargets[]> {
@@ -554,6 +1052,56 @@ export class SchedulerModel {
                     order: 'asc',
                 },
             ]);
+        return this.getSchedulersWithTargets(await schedulers);
+    }
+
+    async getSqlChartSchedulers(
+        savedSqlUuid: string,
+        createdByUserUuid?: string,
+    ): Promise<SchedulerAndTargets[]> {
+        let schedulers = SchedulerModel.getBaseSchedulerQuery(this.database)
+            .where(`${SchedulerTableName}.saved_sql_uuid`, savedSqlUuid)
+            .orderBy([
+                {
+                    column: 'name',
+                    order: 'asc',
+                },
+                {
+                    column: 'created_at',
+                    order: 'asc',
+                },
+            ]);
+        if (createdByUserUuid) {
+            schedulers = schedulers.where(
+                `${SchedulerTableName}.created_by`,
+                createdByUserUuid,
+            );
+        }
+        return this.getSchedulersWithTargets(await schedulers);
+    }
+
+    async getAppSchedulers(
+        appUuid: string,
+        createdByUserUuid?: string,
+    ): Promise<SchedulerAndTargets[]> {
+        let schedulers = SchedulerModel.getBaseSchedulerQuery(this.database)
+            .where(`${SchedulerTableName}.app_uuid`, appUuid)
+            .orderBy([
+                {
+                    column: 'name',
+                    order: 'asc',
+                },
+                {
+                    column: 'created_at',
+                    order: 'asc',
+                },
+            ]);
+        if (createdByUserUuid) {
+            schedulers = schedulers.where(
+                `${SchedulerTableName}.created_by`,
+                createdByUserUuid,
+            );
+        }
         return this.getSchedulersWithTargets(await schedulers);
     }
 
@@ -596,11 +1144,20 @@ export class SchedulerModel {
                 `${SchedulerMsTeamsTargetTableName}.scheduler_uuid`,
                 schedulerUuid,
             );
+        const googleChatTargets = await this.database(
+            SchedulerGoogleChatTargetTableName,
+        )
+            .select()
+            .where(
+                `${SchedulerGoogleChatTargetTableName}.scheduler_uuid`,
+                schedulerUuid,
+            );
 
         const targets = [
             ...slackTargets.map(SchedulerModel.convertSlackTarget),
             ...emailTargets.map(SchedulerModel.convertEmailTarget),
             ...msTeamsTargets.map(SchedulerModel.convertMsTeamsTarget),
+            ...googleChatTargets.map(SchedulerModel.convertGoogleChatTarget),
         ];
 
         return {
@@ -612,47 +1169,21 @@ export class SchedulerModel {
     async createScheduler(
         newScheduler: CreateSchedulerAndTargets,
     ): Promise<SchedulerAndTargets> {
+        await validateSchedulerWebhookTargets(newScheduler.targets);
+
         const schedulerUuid = await this.database.transaction(async (trx) => {
+            const { projectUuid, slug } = await SchedulerModel.getCreateSlug(
+                trx,
+                newScheduler,
+            );
             const [scheduler] = await trx(SchedulerTableName)
-                .insert({
-                    name: newScheduler.name,
-                    message: newScheduler.message,
-                    format: newScheduler.format,
-                    created_by: newScheduler.createdBy,
-                    cron: newScheduler.cron,
-                    timezone: newScheduler.timezone ?? null,
-                    saved_chart_uuid: newScheduler.savedChartUuid,
-                    dashboard_uuid: newScheduler.dashboardUuid,
-                    updated_at: new Date(),
-                    options: newScheduler.options,
-                    filters:
-                        isDashboardScheduler(newScheduler) &&
-                        newScheduler.filters
-                            ? JSON.stringify(newScheduler.filters)
-                            : null,
-                    parameters:
-                        isDashboardScheduler(newScheduler) &&
-                        newScheduler.parameters
-                            ? JSON.stringify(newScheduler.parameters)
-                            : null,
-                    custom_viewport_width:
-                        isDashboardScheduler(newScheduler) &&
-                        newScheduler.customViewportWidth
-                            ? newScheduler.customViewportWidth
-                            : null,
-                    thresholds: newScheduler.thresholds
-                        ? JSON.stringify(newScheduler.thresholds)
-                        : null,
-                    enabled: true,
-                    notification_frequency:
-                        newScheduler.notificationFrequency || null,
-                    selected_tabs:
-                        isDashboardScheduler(newScheduler) &&
-                        newScheduler.selectedTabs
-                            ? newScheduler.selectedTabs
-                            : null,
-                    include_links: newScheduler.includeLinks !== false,
-                })
+                .insert(
+                    SchedulerModel.toSchedulerInsert(
+                        newScheduler,
+                        projectUuid,
+                        slug,
+                    ),
+                )
                 .returning('*');
             const targetPromises = newScheduler.targets.map(async (target) => {
                 if (isCreateSchedulerSlackTarget(target)) {
@@ -666,6 +1197,13 @@ export class SchedulerModel {
                     return trx(SchedulerMsTeamsTargetTableName).insert({
                         scheduler_uuid: scheduler.scheduler_uuid,
                         webhook: target.webhook,
+                        updated_at: new Date(),
+                    });
+                }
+                if (isCreateSchedulerGoogleChatTarget(target)) {
+                    return trx(SchedulerGoogleChatTargetTableName).insert({
+                        scheduler_uuid: scheduler.scheduler_uuid,
+                        webhook: target.googleChatWebhook,
                         updated_at: new Date(),
                     });
                 }
@@ -714,6 +1252,8 @@ export class SchedulerModel {
     async updateScheduler(
         scheduler: UpdateSchedulerAndTargets,
     ): Promise<SchedulerAndTargets> {
+        await validateSchedulerWebhookTargets(scheduler.targets);
+
         await this.database.transaction(async (trx) => {
             await trx(SchedulerTableName)
                 .update({
@@ -724,22 +1264,16 @@ export class SchedulerModel {
                     timezone: scheduler.timezone ?? null,
                     updated_at: new Date(),
                     options: scheduler.options,
-                    filters:
-                        'filters' in scheduler && scheduler.filters
-                            ? JSON.stringify(scheduler.filters)
-                            : null,
-                    parameters:
-                        'parameters' in scheduler && scheduler.parameters
-                            ? JSON.stringify(scheduler.parameters)
-                            : null,
+                    filters: SchedulerModel.toJsonColumn(scheduler.filters),
+                    parameters: SchedulerModel.toJsonColumn(
+                        scheduler.parameters,
+                    ),
+                    app_state: SchedulerModel.toJsonColumn(scheduler.appState),
                     custom_viewport_width:
-                        'customViewportWidth' in scheduler &&
-                        scheduler.customViewportWidth
-                            ? scheduler.customViewportWidth
-                            : null,
-                    thresholds: scheduler.thresholds
-                        ? JSON.stringify(scheduler.thresholds)
-                        : null,
+                        scheduler.customViewportWidth ?? null,
+                    thresholds: SchedulerModel.toJsonColumn(
+                        scheduler.thresholds,
+                    ),
                     notification_frequency:
                         scheduler.notificationFrequency || null,
                     selected_tabs:
@@ -747,6 +1281,7 @@ export class SchedulerModel {
                             ? (scheduler.selectedTabs as string[])
                             : null,
                     include_links: scheduler.includeLinks !== false,
+                    plain_text_email: scheduler.plainTextEmail === true,
                 })
                 .where('scheduler_uuid', scheduler.schedulerUuid);
 
@@ -780,6 +1315,24 @@ export class SchedulerModel {
                     'scheduler_msteams_target_uuid',
                     'not in',
                     msTeamsTargetsToUpdate,
+                );
+
+            const googleChatTargetsToUpdate = scheduler.targets.reduce<
+                string[]
+            >(
+                (acc, target) =>
+                    isUpdateSchedulerGoogleChatTarget(target)
+                        ? [...acc, target.schedulerGoogleChatTargetUuid]
+                        : acc,
+                [],
+            );
+            await trx(SchedulerGoogleChatTargetTableName)
+                .delete()
+                .where('scheduler_uuid', scheduler.schedulerUuid)
+                .andWhere(
+                    'scheduler_google_chat_target_uuid',
+                    'not in',
+                    googleChatTargetsToUpdate,
                 );
 
             const emailTargetsToUpdate = scheduler.targets.reduce<string[]>(
@@ -840,6 +1393,13 @@ export class SchedulerModel {
                         updated_at: new Date(),
                     });
                 }
+                if (isCreateSchedulerGoogleChatTarget(target)) {
+                    return trx(SchedulerGoogleChatTargetTableName).insert({
+                        scheduler_uuid: scheduler.schedulerUuid,
+                        webhook: target.googleChatWebhook,
+                        updated_at: new Date(),
+                    });
+                }
 
                 return trx(SchedulerEmailTargetTableName).insert({
                     scheduler_uuid: scheduler.schedulerUuid,
@@ -880,21 +1440,22 @@ export class SchedulerModel {
     async softDeleteByChartUuid(
         chartUuid: string,
         userUuid: string,
-    ): Promise<void> {
-        await this.database(SchedulerTableName)
+    ): Promise<SchedulerDb[]> {
+        return this.database(SchedulerTableName)
             .update({
                 deleted_at: new Date(),
                 deleted_by_user_uuid: userUuid,
             })
             .where('saved_chart_uuid', chartUuid)
-            .whereNull('deleted_at');
+            .whereNull('deleted_at')
+            .returning('*');
     }
 
     async softDeleteByDashboardUuid(
         dashboardUuid: string,
         userUuid: string,
-    ): Promise<SchedulerDb> {
-        const [scheduler] = await this.database(SchedulerTableName)
+    ): Promise<SchedulerDb[]> {
+        return this.database(SchedulerTableName)
             .update({
                 deleted_at: new Date(),
                 deleted_by_user_uuid: userUuid,
@@ -902,28 +1463,30 @@ export class SchedulerModel {
             .where('dashboard_uuid', dashboardUuid)
             .whereNull('deleted_at')
             .returning('*');
-
-        return scheduler;
     }
 
-    async restoreByChartUuid(chartUuid: string): Promise<void> {
-        await this.database(SchedulerTableName)
+    async restoreByChartUuid(chartUuid: string): Promise<SchedulerDb[]> {
+        return this.database(SchedulerTableName)
             .update({
                 deleted_at: null,
                 deleted_by_user_uuid: null,
             })
             .where('saved_chart_uuid', chartUuid)
-            .whereNotNull('deleted_at');
+            .whereNotNull('deleted_at')
+            .returning('*');
     }
 
-    async restoreByDashboardUuid(dashboardUuid: string): Promise<void> {
-        await this.database(SchedulerTableName)
+    async restoreByDashboardUuid(
+        dashboardUuid: string,
+    ): Promise<SchedulerDb[]> {
+        return this.database(SchedulerTableName)
             .update({
                 deleted_at: null,
                 deleted_by_user_uuid: null,
             })
             .where('dashboard_uuid', dashboardUuid)
-            .whereNotNull('deleted_at');
+            .whereNotNull('deleted_at')
+            .returning('*');
     }
 
     static parseSchedulerLog(logDb: SchedulerLogDb): SchedulerLog {
@@ -961,6 +1524,8 @@ export class SchedulerModel {
                 ),
                 `${SavedChartsTableName}.name as saved_chart_name`,
                 `${DashboardsTableName}.name as dashboard_name`,
+                this.database.raw(`NULL as saved_sql_name`),
+                this.database.raw(`NULL as app_name`),
             )
             .whereNull(`${SchedulerTableName}.deleted_at`)
             .leftJoin(
@@ -1018,6 +1583,8 @@ export class SchedulerModel {
                 ),
                 this.database.raw(`NULL as saved_chart_name`),
                 `${DashboardsTableName}.name as dashboard_name`,
+                this.database.raw(`NULL as saved_sql_name`),
+                this.database.raw(`NULL as app_name`),
             )
             .whereNull(`${SchedulerTableName}.deleted_at`)
             .leftJoin(
@@ -1051,13 +1618,98 @@ export class SchedulerModel {
             );
         }
 
+        let schedulerSqlCharts = this.database(SchedulerTableName)
+            .select<SelectScheduler[]>(
+                `${SchedulerTableName}.*`,
+                this.database.raw(
+                    `(${UserTableName}.first_name || ' ' || ${UserTableName}.last_name) as created_by_name`,
+                ),
+                this.database.raw(`NULL as saved_chart_name`),
+                this.database.raw(`NULL as dashboard_name`),
+                `${SavedSqlTableName}.name as saved_sql_name`,
+                this.database.raw(`NULL as app_name`),
+            )
+            .whereNull(`${SchedulerTableName}.deleted_at`)
+            .leftJoin(
+                UserTableName,
+                `${UserTableName}.user_uuid`,
+                `${SchedulerTableName}.created_by`,
+            )
+            .leftJoin(SavedSqlTableName, function nonDeletedSqlChartJoin() {
+                this.on(
+                    `${SavedSqlTableName}.saved_sql_uuid`,
+                    '=',
+                    `${SchedulerTableName}.saved_sql_uuid`,
+                ).andOnNull(`${SavedSqlTableName}.deleted_at`);
+            })
+            .leftJoin(
+                SpaceTableName,
+                `${SpaceTableName}.space_uuid`,
+                `${SavedSqlTableName}.space_uuid`,
+            )
+            .leftJoin(
+                ProjectTableName,
+                `${ProjectTableName}.project_id`,
+                `${SpaceTableName}.project_id`,
+            )
+            .where(`${ProjectTableName}.project_uuid`, projectUuid)
+            .whereNull(`${SpaceTableName}.deleted_at`);
+        if (schedulerUuids?.length) {
+            schedulerSqlCharts = schedulerSqlCharts.whereIn(
+                `${SchedulerTableName}.scheduler_uuid`,
+                schedulerUuids,
+            );
+        }
+
+        let schedulerApps = this.database(SchedulerTableName)
+            .select<SelectScheduler[]>(
+                `${SchedulerTableName}.*`,
+                this.database.raw(
+                    `(${UserTableName}.first_name || ' ' || ${UserTableName}.last_name) as created_by_name`,
+                ),
+                this.database.raw(`NULL as saved_chart_name`),
+                this.database.raw(`NULL as dashboard_name`),
+                this.database.raw(`NULL as saved_sql_name`),
+                `${AppsTableName}.name as app_name`,
+            )
+            .whereNull(`${SchedulerTableName}.deleted_at`)
+            .leftJoin(
+                UserTableName,
+                `${UserTableName}.user_uuid`,
+                `${SchedulerTableName}.created_by`,
+            )
+            .leftJoin(AppsTableName, function nonDeletedAppJoin() {
+                this.on(
+                    `${AppsTableName}.app_id`,
+                    '=',
+                    `${SchedulerTableName}.app_uuid`,
+                ).andOnNull(`${AppsTableName}.deleted_at`);
+            })
+            .where(`${AppsTableName}.project_uuid`, projectUuid);
+        if (schedulerUuids?.length) {
+            schedulerApps = schedulerApps.whereIn(
+                `${SchedulerTableName}.scheduler_uuid`,
+                schedulerUuids,
+            );
+        }
+
         const schedulerDashboardWithTargets =
             await this.getSchedulersWithTargets(await schedulerDashboards);
         const schedulerChartWithTargets = await this.getSchedulersWithTargets(
             await schedulerCharts,
         );
+        const schedulerSqlChartWithTargets =
+            await this.getSchedulersWithTargets(await schedulerSqlCharts);
+        const schedulerAppWithTargets = await this.getSchedulersWithTargets(
+            await schedulerApps,
+        );
 
-        return [...schedulerChartWithTargets, ...schedulerDashboardWithTargets];
+        return [
+            ...schedulerChartWithTargets,
+            ...schedulerDashboardWithTargets,
+            ...schedulerSqlChartWithTargets,
+            ...schedulerAppWithTargets,
+        ];
     }
 
     async getSchedulersByUuid(
@@ -1130,6 +1782,12 @@ export class SchedulerModel {
                     ) {
                         return true;
                     }
+                    if (
+                        filters.destinations!.includes('googlechat') &&
+                        isGoogleChatTarget(target)
+                    ) {
+                        return true;
+                    }
                     return false;
                 }),
             );
@@ -1148,9 +1806,9 @@ export class SchedulerModel {
                     chartUuids: isChartScheduler(s)
                         ? [...acc.chartUuids, s.savedChartUuid]
                         : acc.chartUuids,
-                    dashboardUuids: isChartScheduler(s)
-                        ? acc.dashboardUuids
-                        : [...acc.dashboardUuids, s.dashboardUuid],
+                    dashboardUuids: isDashboardScheduler(s)
+                        ? [...acc.dashboardUuids, s.dashboardUuid]
+                        : acc.dashboardUuids,
                 }),
                 {
                     schedulerUuids: [],
@@ -1314,14 +1972,10 @@ export class SchedulerModel {
         return b.scheduledTime.getTime() - a.scheduledTime.getTime();
     };
 
-    async getCsvUrl(jobId: string, userUuid: string) {
+    async getGsheetExportStatus(jobId: string, userUuid: string) {
         const jobs = await this.database(SchedulerLogTableName)
             .where(`job_id`, jobId)
-            .andWhere((query) => {
-                void query
-                    .where('task', 'downloadCsv')
-                    .orWhere('task', 'uploadGsheetFromQuery');
-            })
+            .andWhere('task', 'uploadGsheetFromQuery')
             .orderBy('scheduled_time', 'desc')
             .returning('*');
 
@@ -1330,9 +1984,25 @@ export class SchedulerModel {
                 statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status),
         )[0];
         if (!job || job.details?.createdByUserUuid !== userUuid)
-            throw new NotFoundError('Download CSV job not found');
+            throw new NotFoundError('Google Sheets export job not found');
 
         return job;
+    }
+
+    async updateGsheetExportProgress(
+        jobId: string,
+        progress: GsheetExportProgress,
+    ): Promise<void> {
+        await this.database(SchedulerLogTableName)
+            .where('job_id', jobId)
+            .andWhere('task', 'uploadGsheetFromQuery')
+            .andWhere('status', SchedulerJobStatus.STARTED)
+            .update({
+                details: this.database.raw(
+                    "coalesce(details, '{}'::jsonb) || ?::jsonb",
+                    [JSON.stringify({ progress })],
+                ),
+            });
     }
 
     async getJobStatus(jobId: string) {
@@ -1389,7 +2059,7 @@ export class SchedulerModel {
             statuses?: SchedulerRunStatus[];
             createdByUserUuids?: string[];
             destinations?: string[];
-            resourceType?: 'chart' | 'dashboard';
+            resourceType?: 'chart' | 'dashboard' | 'sqlChart' | 'app';
             resourceUuids?: string[];
         };
     }): Promise<KnexPaginatedData<SchedulerRun[]>> {
@@ -1416,6 +2086,7 @@ export class SchedulerModel {
         searchQuery,
         sort,
         filters,
+        latestOnly,
     }: {
         schedulers: SchedulerAndTargets[];
         paginateArgs?: KnexPaginateArgs;
@@ -1426,9 +2097,12 @@ export class SchedulerModel {
             statuses?: SchedulerRunStatus[];
             createdByUserUuids?: string[];
             destinations?: string[];
-            resourceType?: 'chart' | 'dashboard';
+            resourceType?: 'chart' | 'dashboard' | 'sqlChart' | 'app';
             resourceUuids?: string[];
         };
+        // When true, returns at most one row per scheduler (its most recent run)
+        // by adding a per-scheduler ROW_NUMBER filter at the SQL layer.
+        latestOnly?: boolean;
     }): Promise<KnexPaginatedData<SchedulerRun[]>> {
         // Apply scheduler-level filters
         let filteredSchedulers = schedulers;
@@ -1477,25 +2151,41 @@ export class SchedulerModel {
                     ) {
                         return true;
                     }
+                    if (
+                        filters.destinations!.includes('googlechat') &&
+                        isGoogleChatTarget(target)
+                    ) {
+                        return true;
+                    }
                     return false;
                 }),
             );
         }
 
         if (filters?.resourceType) {
-            filteredSchedulers = filteredSchedulers.filter((s) =>
-                filters.resourceType === 'chart'
-                    ? isChartScheduler(s)
-                    : !isChartScheduler(s),
-            );
+            filteredSchedulers = filteredSchedulers.filter((s) => {
+                switch (filters.resourceType) {
+                    case 'chart':
+                        return isChartScheduler(s);
+                    case 'sqlChart':
+                        return isSqlChartScheduler(s);
+                    case 'dashboard':
+                        return isDashboardScheduler(s);
+                    default:
+                        return true;
+                }
+            });
         }
 
         if (filters?.resourceUuids && filters.resourceUuids.length > 0) {
-            filteredSchedulers = filteredSchedulers.filter((s) =>
-                isChartScheduler(s)
-                    ? filters.resourceUuids!.includes(s.savedChartUuid)
-                    : filters.resourceUuids!.includes(s.dashboardUuid),
-            );
+            filteredSchedulers = filteredSchedulers.filter((s) => {
+                const resourceUuid =
+                    s.savedChartUuid ?? s.savedSqlUuid ?? s.dashboardUuid;
+                return (
+                    resourceUuid !== null &&
+                    filters.resourceUuids!.includes(resourceUuid)
+                );
+            });
         }
 
         if (filteredSchedulers.length === 0) {
@@ -1516,6 +2206,16 @@ export class SchedulerModel {
         const sevenDaysAgo: Date = new Date(
             Date.now() - 7 * 24 * 60 * 60 * 1000,
         );
+        const now = new Date();
+
+        const relevantParentRunsQuery = this.database(SchedulerLogTableName)
+            .whereRaw('job_id = job_group')
+            .whereIn('scheduler_uuid', schedulerUuids)
+            .where('scheduled_time', '>', sevenDaysAgo)
+            .where('scheduled_time', '<', now);
+        const relevantParentJobIdsSubquery = relevantParentRunsQuery
+            .clone()
+            .distinct('job_id');
 
         // Build subquery for child job counts - only count most recent status per child
         // First, get the most recent entry for each child job
@@ -1530,6 +2230,7 @@ export class SchedulerModel {
                 ),
             )
             .whereRaw('job_id != job_group') // Only child jobs
+            .whereIn('job_group', relevantParentJobIdsSubquery)
             .as('ranked_children');
 
         // Then count only the most recent status of each child (rn = 1)
@@ -1574,7 +2275,8 @@ export class SchedulerModel {
 
         // Use window function (ROW_NUMBER) to get only the most recent parent job per run
         // This approach is safer and more compatible than DISTINCT ON
-        const rankedRunsSubquery = this.database(SchedulerLogTableName)
+        const rankedRunsSubquery = relevantParentRunsQuery
+            .clone()
             .select(
                 'job_id',
                 'scheduler_uuid',
@@ -1586,10 +2288,6 @@ export class SchedulerModel {
                     'ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY created_at DESC) as rn',
                 ),
             )
-            .whereRaw('job_id = job_group') // Only parent jobs
-            .whereIn('scheduler_uuid', schedulerUuids)
-            .where('scheduled_time', '>', sevenDaysAgo)
-            .where('scheduled_time', '<', new Date())
             .as('ranked_runs');
 
         const distinctRunsSubquery = this.database
@@ -1608,13 +2306,13 @@ export class SchedulerModel {
                 `${SchedulerTableName}.name as scheduler_name`,
                 `${SchedulerTableName}.format`,
                 this.database.raw(
-                    `CASE WHEN ${SchedulerTableName}.saved_chart_uuid IS NOT NULL THEN 'chart' ELSE 'dashboard' END as resource_type`,
+                    `CASE WHEN ${SchedulerTableName}.saved_chart_uuid IS NOT NULL THEN '${SchedulerResourceType.CHART}' WHEN ${SchedulerTableName}.saved_sql_uuid IS NOT NULL THEN '${SchedulerResourceType.SQL_CHART}' WHEN ${SchedulerTableName}.app_uuid IS NOT NULL THEN '${SchedulerResourceType.APP}' ELSE '${SchedulerResourceType.DASHBOARD}' END as resource_type`,
                 ),
                 this.database.raw(
-                    `COALESCE(${SchedulerTableName}.saved_chart_uuid, ${SchedulerTableName}.dashboard_uuid) as resource_uuid`,
+                    `COALESCE(${SchedulerTableName}.saved_chart_uuid, ${SchedulerTableName}.saved_sql_uuid, ${SchedulerTableName}.app_uuid, ${SchedulerTableName}.dashboard_uuid) as resource_uuid`,
                 ),
                 this.database.raw(
-                    `COALESCE(${SavedChartsTableName}.name, ${DashboardsTableName}.name) as resource_name`,
+                    `COALESCE(${SavedChartsTableName}.name, ${SavedSqlTableName}.name, ${DashboardsTableName}.name) as resource_name`,
                 ),
                 `${SchedulerTableName}.created_by as created_by_user_uuid`,
                 this.database.raw(
@@ -1700,13 +2398,40 @@ export class SchedulerModel {
                     '=',
                     `${SchedulerTableName}.dashboard_uuid`,
                 ).andOnNull(`${DashboardsTableName}.deleted_at`);
+            })
+            .leftJoin(SavedSqlTableName, function nonDeletedSqlChartJoin() {
+                this.on(
+                    `${SavedSqlTableName}.saved_sql_uuid`,
+                    '=',
+                    `${SchedulerTableName}.saved_sql_uuid`,
+                ).andOnNull(`${SavedSqlTableName}.deleted_at`);
             });
 
         // Wrap runsQuery as a subquery so we can filter/sort on computed columns like run_status
         // (WHERE clause can't reference SELECT aliases, so we need an outer query)
         const runsWithStatusSubquery = runsQuery.as('runs_with_status');
 
-        let finalQuery = this.database(runsWithStatusSubquery).select('*');
+        let finalQuery;
+        if (latestOnly) {
+            // Add a per-scheduler ROW_NUMBER and keep only rn = 1 so we get the
+            // most recent run for each scheduler (avoids pulling N runs/scheduler
+            // just to take the first one in JS).
+            const rankedPerSchedulerSubquery = this.database(
+                runsWithStatusSubquery,
+            )
+                .select(
+                    '*',
+                    this.database.raw(
+                        'ROW_NUMBER() OVER (PARTITION BY scheduler_uuid ORDER BY scheduled_time DESC) as scheduler_rn',
+                    ),
+                )
+                .as('ranked_per_scheduler');
+            finalQuery = this.database(rankedPerSchedulerSubquery)
+                .select('*')
+                .where('scheduler_rn', 1);
+        } else {
+            finalQuery = this.database(runsWithStatusSubquery).select('*');
+        }
 
         // Apply runStatus filter on the outer query (run_status is now a real column)
         if (filters?.statuses && filters.statuses.length > 0) {
@@ -1752,7 +2477,7 @@ export class SchedulerModel {
             started_count: string;
             completed_count: string;
             error_count: string;
-            resource_type: 'chart' | 'dashboard';
+            resource_type: SchedulerResourceType;
             resource_uuid: string;
             resource_name: string;
             created_by_user_uuid: string;
@@ -1795,6 +2520,39 @@ export class SchedulerModel {
         };
     }
 
+    async attachLatestRunToSchedulerList(
+        schedulers: SchedulerAndTargets[],
+    ): Promise<SchedulerAndTargets[]> {
+        if (schedulers.length === 0) {
+            return schedulers;
+        }
+
+        const runs = await this.getRunsForSchedulers({
+            schedulers,
+            latestOnly: true,
+        });
+
+        const latestRunByScheduler = new Map<string, SchedulerRun>();
+        runs.data.forEach((run) => {
+            latestRunByScheduler.set(run.schedulerUuid, run);
+        });
+
+        return schedulers.map((scheduler) => ({
+            ...scheduler,
+            latestRun:
+                latestRunByScheduler.get(scheduler.schedulerUuid) ?? null,
+        }));
+    }
+
+    async attachLatestRunToSchedulers(
+        schedulers: KnexPaginatedData<SchedulerAndTargets[]>,
+    ): Promise<KnexPaginatedData<SchedulerAndTargets[]>> {
+        return {
+            ...schedulers,
+            data: await this.attachLatestRunToSchedulerList(schedulers.data),
+        };
+    }
+
     async getRunLogs(runId: string): Promise<SchedulerRunLogsResponse> {
         // Get ALL parent job entries (there may be multiple status updates)
         const parentJobs = await this.database(SchedulerLogTableName)
@@ -1802,13 +2560,13 @@ export class SchedulerModel {
                 `${SchedulerLogTableName}.*`,
                 `${SchedulerTableName}.name as scheduler_name`,
                 this.database.raw(
-                    `CASE WHEN ${SchedulerTableName}.saved_chart_uuid IS NOT NULL THEN 'chart' ELSE 'dashboard' END as resource_type`,
+                    `CASE WHEN ${SchedulerTableName}.saved_chart_uuid IS NOT NULL THEN '${SchedulerResourceType.CHART}' WHEN ${SchedulerTableName}.saved_sql_uuid IS NOT NULL THEN '${SchedulerResourceType.SQL_CHART}' WHEN ${SchedulerTableName}.app_uuid IS NOT NULL THEN '${SchedulerResourceType.APP}' ELSE '${SchedulerResourceType.DASHBOARD}' END as resource_type`,
                 ),
                 this.database.raw(
-                    `COALESCE(${SchedulerTableName}.saved_chart_uuid, ${SchedulerTableName}.dashboard_uuid) as resource_uuid`,
+                    `COALESCE(${SchedulerTableName}.saved_chart_uuid, ${SchedulerTableName}.saved_sql_uuid, ${SchedulerTableName}.app_uuid, ${SchedulerTableName}.dashboard_uuid) as resource_uuid`,
                 ),
                 this.database.raw(
-                    `COALESCE(${SavedChartsTableName}.name, ${DashboardsTableName}.name) as resource_name`,
+                    `COALESCE(${SavedChartsTableName}.name, ${SavedSqlTableName}.name, ${DashboardsTableName}.name) as resource_name`,
                 ),
                 `${SchedulerTableName}.created_by as created_by_user_uuid`,
                 this.database.raw(
@@ -1838,6 +2596,13 @@ export class SchedulerModel {
                     '=',
                     `${SchedulerTableName}.dashboard_uuid`,
                 ).andOnNull(`${DashboardsTableName}.deleted_at`);
+            })
+            .leftJoin(SavedSqlTableName, function nonDeletedSqlChartJoin() {
+                this.on(
+                    `${SavedSqlTableName}.saved_sql_uuid`,
+                    '=',
+                    `${SchedulerTableName}.saved_sql_uuid`,
+                ).andOnNull(`${SavedSqlTableName}.deleted_at`);
             })
             .where(`${SchedulerLogTableName}.job_id`, runId)
             .whereRaw(

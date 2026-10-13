@@ -10,20 +10,30 @@ import {
 import { IconArrowRight } from '@tabler/icons-react';
 import {
     useMutation,
-    type UseMutationOptions,
     useQuery,
     useQueryClient,
+    type UseMutationOptions,
     type UseQueryOptions,
 } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router';
 import { lightdashApi } from '../api';
+import useEmbed from '../ee/providers/Embed/useEmbed';
 import useApp from '../providers/App/useApp';
 import { convertDateFilters } from '../utils/dateFilter';
 import useToaster from './toaster/useToaster';
 import { invalidateContent } from './useContent';
+import { useOptionalProjectRoute } from './useProjectRoute';
+import { useProjectUuid } from './useProjectUuid';
 import useSearchParams from './useSearchParams';
 
-const createSavedQuery = async (
+const isCustomSqlDimensionForbiddenError = (
+    error: ApiError['error'],
+): boolean =>
+    error.statusCode === 403 &&
+    typeof error.message === 'string' &&
+    error.message.toLowerCase().includes('custom sql dimensions');
+
+export const createSavedQuery = async (
     projectUuid: string,
     payload: CreateSavedChart,
 ): Promise<SavedChart> => {
@@ -53,9 +63,10 @@ const duplicateSavedQuery = async (
         body: JSON.stringify(data),
     });
 
-const deleteSavedQuery = async (id: string) =>
+const deleteSavedQuery = async (id: string, projectUuid: string) =>
     lightdashApi<null>({
-        url: `/saved/${id}`,
+        url: `/projects/${projectUuid}/saved/${id}`,
+        version: 'v2',
         method: 'DELETE',
         body: undefined,
     });
@@ -71,13 +82,22 @@ const updateSavedQuery = async (
             name: data.name,
             description: data.description,
             spaceUuid: data.spaceUuid,
+            colorPaletteUuid: data.colorPaletteUuid,
+            preserveVerification: data.preserveVerification,
         }),
     });
 };
 
-const getSavedQuery = async (id: string): Promise<SavedChart> =>
+export const getSavedQuery = async (
+    id: string,
+    projectUuid: string,
+    includeUnpublishedDraft = false,
+): Promise<SavedChart> =>
     lightdashApi<SavedChart>({
-        url: `/saved/${id}`,
+        url: `/projects/${projectUuid}/saved/${id}${
+            includeUnpublishedDraft ? '?includeUnpublishedDraft=true' : ''
+        }`,
+        version: 'v2',
         method: 'GET',
         body: undefined,
     });
@@ -105,15 +125,34 @@ const addVersionSavedQuery = async ({
 };
 
 interface Args {
-    id?: string;
+    uuidOrSlug?: string;
+    projectUuid?: string;
+    includeUnpublishedDraft?: boolean;
     useQueryOptions?: UseQueryOptions<SavedChart, ApiError>;
 }
 
-export const useSavedQuery = ({ id, useQueryOptions }: Args = {}) =>
+export const useSavedQuery = ({
+    uuidOrSlug,
+    projectUuid,
+    useQueryOptions,
+    includeUnpublishedDraft = false,
+}: Args) =>
     useQuery<SavedChart, ApiError>({
-        queryKey: ['saved_query', id],
-        queryFn: () => getSavedQuery(id || ''),
-        enabled: id !== undefined,
+        queryKey: [
+            'saved_query',
+            uuidOrSlug,
+            projectUuid,
+            includeUnpublishedDraft,
+        ],
+        queryFn: async () => {
+            if (!projectUuid) throw new Error('projectUuid is required');
+            return getSavedQuery(
+                uuidOrSlug || '',
+                projectUuid,
+                includeUnpublishedDraft,
+            );
+        },
+        enabled: uuidOrSlug !== undefined && !!projectUuid,
         retry: false,
         ...useQueryOptions,
     });
@@ -169,6 +208,7 @@ export const useChartVersionRollbackMutation = (
         'mutationFn'
     >,
 ) => {
+    const queryClient = useQueryClient();
     const { showToastSuccess, showToastApiError } = useToaster();
     return useMutation<null, ApiError, string>(
         (versionUuid: string) =>
@@ -179,6 +219,16 @@ export const useChartVersionRollbackMutation = (
             mutationKey: ['saved_query_rollback'],
             ...useMutationOptions,
             onSuccess: async (...args) => {
+                await queryClient.invalidateQueries(['saved_query']);
+                await queryClient.invalidateQueries([
+                    'chart_history',
+                    chartUuid,
+                ]);
+                await queryClient.resetQueries({
+                    predicate: (query) =>
+                        query.queryKey[0] === 'dashboard_chart_ready_query' &&
+                        query.queryKey[2] === chartUuid,
+                });
                 showToastSuccess({
                     title: `Success! Chart was reverted.`,
                 });
@@ -194,37 +244,39 @@ export const useChartVersionRollbackMutation = (
     );
 };
 
-export const useSavedQueryDeleteMutation = () => {
+export const useSavedQueryDeleteMutation = (projectUuid?: string) => {
     const queryClient = useQueryClient();
     const navigate = useNavigate();
-    const { projectUuid } = useParams<{ projectUuid: string }>();
     const { health } = useApp();
     const isSoftDeleteEnabled = health.data?.softDelete.enabled ?? false;
     const { showToastSuccess, showToastApiError } = useToaster();
     return useMutation<null, ApiError, string>(
         async (data) => {
+            if (!projectUuid) {
+                throw new Error('Project UUID is undefined');
+            }
             queryClient.removeQueries(['savedChartResults', data]);
-            return deleteSavedQuery(data);
+            return deleteSavedQuery(data, projectUuid);
         },
         {
             mutationKey: ['saved_query_create'],
             onSuccess: async () => {
-                await invalidateContent(queryClient, projectUuid!);
+                if (!projectUuid) return;
+                await invalidateContent(queryClient, projectUuid);
                 await queryClient.invalidateQueries(['deletedContent']);
 
                 showToastSuccess({
                     title: `Success! Chart was deleted.`,
-                    action:
-                        isSoftDeleteEnabled && projectUuid
-                            ? {
-                                  children: 'Go to recently deleted',
-                                  icon: IconArrowRight,
-                                  onClick: () =>
-                                      navigate(
-                                          `/generalSettings/projectManagement/${projectUuid}/recentlyDeleted`,
-                                      ),
-                              }
-                            : undefined,
+                    action: isSoftDeleteEnabled
+                        ? {
+                              children: 'Go to recently deleted',
+                              icon: IconArrowRight,
+                              onClick: () =>
+                                  navigate(
+                                      `/generalSettings/projectManagement/${projectUuid}/recentlyDeleted`,
+                                  ),
+                          }
+                        : undefined,
                 });
             },
             onError: ({ error }) => {
@@ -249,7 +301,10 @@ export const useUpdateMutation = (
     return useMutation<
         SavedChart,
         ApiError,
-        Pick<UpdateSavedChart, 'name' | 'description'>
+        Pick<
+            UpdateSavedChart,
+            'name' | 'description' | 'colorPaletteUuid' | 'preserveVerification'
+        >
     >(
         (data) => {
             if (savedQueryUuid) {
@@ -272,31 +327,48 @@ export const useUpdateMutation = (
 
                 await queryClient.invalidateQueries(['spaces']);
 
-                queryClient.setQueryData(['saved_query', data.uuid], data);
-                queryClient.setQueryData(
-                    ['saved_query', params.savedQueryUuid],
+                await queryClient.invalidateQueries([
+                    'project',
+                    data.projectUuid,
+                    'color-palette',
+                ]);
+
+                queryClient.setQueriesData(
+                    {
+                        queryKey: ['saved_query', data.uuid, data.projectUuid],
+                    },
+                    data,
+                );
+                queryClient.setQueriesData(
+                    {
+                        queryKey: [
+                            'saved_query',
+                            params.savedQueryUuid,
+                            data.projectUuid,
+                        ],
+                    },
                     data,
                 );
 
-                if (dashboardUuid) {
-                    // Invalidate dashboard chart queries to refresh charts on dashboards
-                    await queryClient.resetQueries([
-                        'dashboard_chart_ready_query',
-                        data.projectUuid,
-                        data.uuid,
-                        dashboardUuid,
-                    ]);
-                }
+                // Always invalidate dashboard chart queries for this chart,
+                // regardless of whether we came from a dashboard
+                await queryClient.resetQueries({
+                    predicate: (query) =>
+                        query.queryKey[0] === 'dashboard_chart_ready_query' &&
+                        query.queryKey[2] === data.uuid,
+                });
 
                 showToastSuccess({
-                    title: `Success! Chart was saved.`,
+                    title: data.hasUnpublishedChanges
+                        ? 'Chart draft saved for review'
+                        : 'Success! Chart was saved.',
                     action: dashboardUuid
                         ? {
                               children: 'Open dashboard',
                               icon: IconArrowRight,
                               onClick: () =>
                                   navigate(
-                                      `/projects/${data.projectUuid}/dashboards/${dashboardUuid}`,
+                                      `/projects/${data.projectUuid}/dashboards/${data.dashboardSlug ?? dashboardUuid}`,
                                   ),
                           }
                         : undefined,
@@ -315,11 +387,23 @@ export const useUpdateMutation = (
 export const useCreateMutation = ({
     redirectOnSuccess = true,
     showToastOnSuccess = true,
-}: { redirectOnSuccess?: boolean; showToastOnSuccess?: boolean } = {}) => {
+    showViewChartAction = true,
+    projectUuid: explicitProjectUuid,
+}: {
+    redirectOnSuccess?: boolean;
+    showToastOnSuccess?: boolean;
+    showViewChartAction?: boolean;
+    /** Overrides the route/embed project — for surfaces not mounted under a project route */
+    projectUuid?: string;
+} = {}) => {
     const navigate = useNavigate();
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const routeProjectUuid = useProjectUuid();
+    const projectUuid = explicitProjectUuid ?? routeProjectUuid;
     const queryClient = useQueryClient();
-    const { showToastSuccess, showToastApiError } = useToaster();
+    const { embedToken } = useEmbed();
+    const isEmbedded = embedToken !== undefined;
+    const { showToastSuccess, showToastError, showToastApiError } =
+        useToaster();
     return useMutation<SavedChart, ApiError, CreateSavedChart>(
         (data) =>
             projectUuid
@@ -328,18 +412,24 @@ export const useCreateMutation = ({
         {
             mutationKey: ['saved_query_create', projectUuid],
             onSuccess: (data) => {
-                const navigateUrl = `/projects/${projectUuid}/saved/${data.uuid}/view`;
-                queryClient.setQueryData(['saved_query', data.uuid], data);
+                const navigateUrl = `/projects/${projectUuid}/saved/${data.slug}/view`;
+                queryClient.setQueryData(
+                    ['saved_query', data.uuid, data.projectUuid],
+                    data,
+                );
                 if (showToastOnSuccess) {
                     showToastSuccess({
                         title: `Success! Chart was saved.`,
-                        action: redirectOnSuccess
-                            ? undefined
-                            : {
-                                  children: 'View chart',
-                                  icon: IconArrowRight,
-                                  onClick: () => navigate(navigateUrl),
-                              },
+                        action:
+                            isEmbedded ||
+                            redirectOnSuccess ||
+                            !showViewChartAction
+                                ? undefined
+                                : {
+                                      children: 'View chart',
+                                      icon: IconArrowRight,
+                                      onClick: () => navigate(navigateUrl),
+                                  },
                     });
                 }
                 if (redirectOnSuccess) {
@@ -349,6 +439,14 @@ export const useCreateMutation = ({
                 }
             },
             onError: ({ error }) => {
+                if (isCustomSqlDimensionForbiddenError(error)) {
+                    showToastError({
+                        title: "Can't save chart",
+                        subtitle:
+                            "You don't have permission to author custom SQL dimensions. Remove them from your chart to save.",
+                    });
+                    return;
+                }
                 showToastApiError({
                     title: `Failed to save chart`,
                     apiError: error,
@@ -368,7 +466,7 @@ export const useDuplicateChartMutation = (
     options?: DuplicateChartMutationOptions,
 ) => {
     const navigate = useNavigate();
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
     const queryClient = useQueryClient();
     const { showToastSuccess, showToastApiError } = useToaster();
     return useMutation<
@@ -398,7 +496,7 @@ export const useDuplicateChartMutation = (
                     options?.autoRedirect !== false
                 ) {
                     void navigate(
-                        `/projects/${projectUuid}/saved/${data.uuid}`,
+                        `/projects/${projectUuid}/saved/${data.slug}`,
                     );
                 }
 
@@ -412,7 +510,7 @@ export const useDuplicateChartMutation = (
                               icon: IconArrowRight,
                               onClick: () => {
                                   void navigate(
-                                      `/projects/${projectUuid}/saved/${data.uuid}`,
+                                      `/projects/${projectUuid}/saved/${data.slug}`,
                                   );
                               },
                           }
@@ -429,12 +527,20 @@ export const useDuplicateChartMutation = (
     );
 };
 
-export const useAddVersionMutation = () => {
+export const useAddVersionMutation = (options?: {
+    // Embeds save in place (e.g. the dashboard builder's chart editor); the
+    // chart view route doesn't exist there and would hit the auth guard.
+    redirectOnSuccess?: boolean;
+}) => {
+    const redirectOnSuccess = options?.redirectOnSuccess ?? true;
     const navigate = useNavigate();
     const queryClient = useQueryClient();
+    const params = useParams();
     const dashboardUuid = useSearchParams('fromDashboard');
+    const projectRoute = useOptionalProjectRoute();
 
-    const { showToastSuccess, showToastApiError } = useToaster();
+    const { showToastSuccess, showToastError, showToastApiError } =
+        useToaster();
     return useMutation<
         SavedChart,
         ApiError,
@@ -447,17 +553,40 @@ export const useAddVersionMutation = () => {
                 'most-popular-and-recently-updated',
             ]);
 
-            queryClient.setQueryData(['saved_query', data.uuid], data);
+            await queryClient.invalidateQueries([
+                'project',
+                data.projectUuid,
+                'color-palette',
+            ]);
+
+            queryClient.setQueriesData(
+                {
+                    queryKey: ['saved_query', data.uuid, data.projectUuid],
+                },
+                data,
+            );
+            queryClient.setQueriesData(
+                {
+                    queryKey: [
+                        'saved_query',
+                        params.savedQueryUuid,
+                        data.projectUuid,
+                    ],
+                },
+                data,
+            );
             await queryClient.resetQueries(['savedChartResults', data.uuid]);
+            await queryClient.invalidateQueries(['chart_history', data.uuid]);
+
+            // Always invalidate dashboard chart queries for this chart,
+            // regardless of whether we came from a dashboard
+            await queryClient.resetQueries({
+                predicate: (query) =>
+                    query.queryKey[0] === 'dashboard_chart_ready_query' &&
+                    query.queryKey[2] === data.uuid,
+            });
 
             if (dashboardUuid) {
-                // Invalidate dashboard chart queries to refresh charts on dashboards
-                await queryClient.resetQueries([
-                    'dashboard_chart_ready_query',
-                    data.projectUuid,
-                    data.uuid,
-                    dashboardUuid,
-                ]);
                 // Reset create-query cache to sync with Redux state reset
                 // This ensures auto-fetch triggers when returning to view mode
                 await queryClient.resetQueries(['create-query']);
@@ -465,26 +594,40 @@ export const useAddVersionMutation = () => {
 
             if (dashboardUuid)
                 showToastSuccess({
-                    title: `Success! Chart was updated.`,
+                    title: data.hasUnpublishedChanges
+                        ? 'Chart draft saved for review'
+                        : 'Success! Chart was updated.',
                     action: {
                         children: 'Open dashboard',
                         icon: IconArrowRight,
                         onClick: () =>
                             navigate(
-                                `/projects/${data.projectUuid}/dashboards/${dashboardUuid}`,
+                                `/projects/${data.projectUuid}/dashboards/${data.dashboardSlug ?? dashboardUuid}`,
                             ),
                     },
                 });
             else {
                 showToastSuccess({
-                    title: `Success! Chart was updated.`,
+                    title: data.hasUnpublishedChanges
+                        ? 'Chart draft saved for review'
+                        : 'Success! Chart was updated.',
                 });
-                void navigate(
-                    `/projects/${data.projectUuid}/saved/${data.uuid}/view`,
-                );
+                if (redirectOnSuccess) {
+                    void navigate(
+                        `/projects/${projectRoute?.projectUrlIdentifier ?? data.projectUuid}/saved/${data.slug}/view`,
+                    );
+                }
             }
         },
         onError: ({ error }) => {
+            if (isCustomSqlDimensionForbiddenError(error)) {
+                showToastError({
+                    title: "Can't update chart",
+                    subtitle:
+                        "You don't have permission to author custom SQL dimensions. Remove them from your chart to save.",
+                });
+                return;
+            }
             showToastApiError({
                 title: `Failed to update chart`,
                 apiError: error,

@@ -1,20 +1,31 @@
 import {
     assertUnreachable,
+    isAppScheduler,
+    isChartScheduler,
+    isDashboardScheduler,
+    isSqlChartScheduler,
     SchedulerFormat,
     SchedulerJobStatus,
+    SchedulerResourceType,
+    SchedulerRunStatus,
     type SchedulerAndTargets,
     type SchedulerRun,
     type SchedulerWithLogs,
 } from '@lightdash/common';
-import { type MantineTheme } from '@mantine-8/core';
+import { type MantineTheme } from '@mantine/core';
 import {
+    IconAlertCircle,
     IconAlertTriangleFilled,
+    IconCheck,
     IconCircleCheckFilled,
+    IconClock,
     IconClockFilled,
     IconCsv,
+    IconFileTypePdf,
     IconFileTypeXls,
     IconPhoto,
     IconProgress,
+    IconRun,
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import { GSheetsIconFilled } from '../../components/common/GSheetsIcon';
@@ -53,6 +64,8 @@ export const getSchedulerIconRaw = (item: { format: SchedulerFormat }) => {
             return IconPhoto;
         case SchedulerFormat.GSHEETS:
             return GSheetsIconFilled;
+        case SchedulerFormat.PDF:
+            return IconFileTypePdf;
         default:
             return assertUnreachable(
                 item.format,
@@ -77,6 +90,8 @@ export const getSchedulerIcon = (item: { format: SchedulerFormat }) => {
             );
         case SchedulerFormat.GSHEETS:
             return <IconBox icon={getSchedulerIconRaw(item)} color="green" />;
+        case SchedulerFormat.PDF:
+            return <IconBox icon={getSchedulerIconRaw(item)} color="red.6" />;
         default:
             return assertUnreachable(
                 item.format,
@@ -127,6 +142,27 @@ export const getLogStatusIconWithoutTooltip = (
     }
 };
 
+export const getRunStatusConfig = (status: SchedulerRunStatus) => {
+    switch (status) {
+        case SchedulerRunStatus.COMPLETED:
+            return { color: 'green', icon: IconCheck, label: 'Completed' };
+        case SchedulerRunStatus.PARTIAL_FAILURE:
+            return {
+                color: 'yellow',
+                icon: IconAlertCircle,
+                label: 'Partial failure',
+            };
+        case SchedulerRunStatus.FAILED:
+            return { color: 'red', icon: IconAlertCircle, label: 'Failed' };
+        case SchedulerRunStatus.RUNNING:
+            return { color: 'blue', icon: IconRun, label: 'Running' };
+        case SchedulerRunStatus.SCHEDULED:
+            return { color: 'gray', icon: IconClock, label: 'Scheduled' };
+        default:
+            return assertUnreachable(status, 'Unknown scheduler run status');
+    }
+};
+
 export const getSchedulerLink = (
     item: SchedulerItem | SchedulerRun,
     fallbackProjectUuid?: string | null,
@@ -142,26 +178,51 @@ export const getSchedulerLink = (
             ? 'threshold_uuid'
             : 'scheduler_uuid';
 
+    const syncParam =
+        item.format === SchedulerFormat.GSHEETS ? `&isSync=true` : ``;
+
     // Handle SchedulerRun (uses resourceType/resourceUuid)
     if ('resourceType' in item) {
-        const resourcePath =
-            item.resourceType === 'chart'
-                ? `/projects/${projectUuid}/saved/${item.resourceUuid}/view`
-                : `/projects/${projectUuid}/dashboards/${item.resourceUuid}/view`;
+        let resourcePath: string;
+        switch (item.resourceType) {
+            case SchedulerResourceType.CHART:
+                resourcePath = `/projects/${projectUuid}/saved/${item.resourceUuid}/view`;
+                break;
+            case SchedulerResourceType.SQL_CHART:
+                resourcePath = `/projects/${projectUuid}/sql-runner/${item.resourceUuid}`;
+                break;
+            case SchedulerResourceType.DASHBOARD:
+                resourcePath = `/projects/${projectUuid}/dashboards/${item.resourceUuid}/view`;
+                break;
+            case SchedulerResourceType.APP:
+                resourcePath = `/projects/${projectUuid}/apps/${item.resourceUuid}/view`;
+                break;
+            default:
+                assertUnreachable(
+                    item.resourceType,
+                    'Unknown scheduler resource type',
+                );
+        }
 
-        return `${resourcePath}?${paramName}=${item.schedulerUuid}${
-            item.format === SchedulerFormat.GSHEETS ? `&isSync=true` : ``
-        }`;
+        return `${resourcePath}?${paramName}=${item.schedulerUuid}${syncParam}`;
     }
 
-    // Handle SchedulerItem (uses savedChartUuid/dashboardUuid)
-    return item.savedChartUuid
-        ? `/projects/${projectUuid}/saved/${
-              item.savedChartUuid
-          }/view/?${paramName}=${item.schedulerUuid}${
-              item.format === SchedulerFormat.GSHEETS ? `&isSync=true` : ``
-          }`
-        : `/projects/${projectUuid}/dashboards/${item.dashboardUuid}/view/?${paramName}=${item.schedulerUuid}`;
+    // Handle SchedulerItem. Dispatch on the resource type guards rather than
+    // truthiness of a uuid field, so a new scheduler resource type fails to
+    // compile here instead of silently falling through to the dashboard URL.
+    if (isChartScheduler(item)) {
+        return `/projects/${projectUuid}/saved/${item.savedChartUuid}/view/?${paramName}=${item.schedulerUuid}${syncParam}`;
+    }
+    if (isSqlChartScheduler(item)) {
+        return `/projects/${projectUuid}/sql-runner/${item.savedSqlUuid}?${paramName}=${item.schedulerUuid}${syncParam}`;
+    }
+    if (isAppScheduler(item)) {
+        return `/projects/${projectUuid}/apps/${item.appUuid}/view?${paramName}=${item.schedulerUuid}${syncParam}`;
+    }
+    if (isDashboardScheduler(item)) {
+        return `/projects/${projectUuid}/dashboards/${item.dashboardUuid}/view/?${paramName}=${item.schedulerUuid}`;
+    }
+    return assertUnreachable(item, 'Unknown scheduler resource type');
 };
 
 export const getItemLink = (
@@ -171,9 +232,19 @@ export const getItemLink = (
     // Use item's projectUuid if available, otherwise fall back to the provided one
     const projectUuid = item.projectUuid ?? fallbackProjectUuid ?? '';
 
-    return item.savedChartUuid
-        ? `/projects/${projectUuid}/saved/${item.savedChartUuid}/view`
-        : `/projects/${projectUuid}/dashboards/${item.dashboardUuid}/view`;
+    if (isChartScheduler(item)) {
+        return `/projects/${projectUuid}/saved/${item.savedChartUuid}/view`;
+    }
+    if (isSqlChartScheduler(item)) {
+        return `/projects/${projectUuid}/sql-runner/${item.savedSqlUuid}`;
+    }
+    if (isAppScheduler(item)) {
+        return `/projects/${projectUuid}/apps/${item.appUuid}/view`;
+    }
+    if (isDashboardScheduler(item)) {
+        return `/projects/${projectUuid}/dashboards/${item.dashboardUuid}/view`;
+    }
+    return assertUnreachable(item, 'Unknown scheduler resource type');
 };
 
 export const formatTime = (date: Date) =>
@@ -201,6 +272,13 @@ export const formatTaskName = (task: string, targetCount?: number): string => {
                   targetCount === 1 ? 'target' : 'targets'
               })`
             : 'MS Teams Notifications';
+    }
+    if (taskLower.includes('googlechatbatch')) {
+        return targetCount
+            ? `Google Chat (${targetCount} ${
+                  targetCount === 1 ? 'target' : 'targets'
+              })`
+            : 'Google Chat Notifications';
     }
 
     // Convert camelCase to Title Case with spaces

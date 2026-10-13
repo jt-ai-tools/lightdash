@@ -1,4 +1,7 @@
 import { subject } from '@casl/ability';
+import { OrganizationMemberRole } from '../types/organizationMemberProfile';
+import { ProjectMemberRole } from '../types/projectMemberRole';
+import { canMutateVerifiedContent } from './canMutateVerifiedContent';
 import { defineUserAbility } from './index';
 import {
     adminOrgProfile,
@@ -50,7 +53,7 @@ describe('Lightdash member permissions', () => {
             conditions = {
                 projectUuid: 'another-project',
                 organizationUuid: 'another-org',
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
             expect(
                 ability.can('view', subject('SavedChart', { ...conditions })),
@@ -115,7 +118,7 @@ describe('Lightdash member permissions', () => {
             conditions = {
                 organizationUuid: adminOrgProfile.organizationUuid,
                 projectUuid: projectProfile.projectUuid,
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
         });
 
@@ -135,7 +138,7 @@ describe('Lightdash member permissions', () => {
             conditions = {
                 organizationUuid: 'another-org',
                 projectUuid: 'another-project',
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
             expect(
                 ability.can('view', subject('SavedChart', { ...conditions })),
@@ -166,7 +169,7 @@ describe('Lightdash member permissions', () => {
             conditions = {
                 organizationUuid: orgProfile.organizationUuid,
                 projectUuid: adminProjectProfile.projectUuid,
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
         });
 
@@ -186,7 +189,7 @@ describe('Lightdash member permissions', () => {
             conditions = {
                 organizationUuid: 'another-org',
                 projectUuid: 'another-project',
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
             expect(
                 ability.can('view', subject('SavedChart', { ...conditions })),
@@ -233,7 +236,7 @@ describe('Lightdash member permissions', () => {
             // Project specific
             const projectConditions = {
                 projectUuid: conditions.projectUuid,
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
             expect(
                 ability.can(
@@ -265,14 +268,14 @@ describe('Lightdash member permissions', () => {
             conditions = {
                 organizationUuid: orgProfile.organizationUuid,
                 projectUuid: projectProfile.projectUuid,
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
         });
 
         it('can view org and project', async () => {
             const conditionsProjectView = {
                 projectUuid: projectProfile.projectUuid,
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
 
             expect(
@@ -296,7 +299,7 @@ describe('Lightdash member permissions', () => {
 
             const conditionsProjectAdmin = {
                 projectUuid: adminProjectProfile.projectUuid,
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
             expect(
                 ability.can(
@@ -321,7 +324,7 @@ describe('Lightdash member permissions', () => {
         it('cannot view another project', async () => {
             const projectConditions = {
                 projectUuid: 'another-project',
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
             expect(
                 ability.can(
@@ -346,7 +349,7 @@ describe('Lightdash member permissions', () => {
         it('can manage admin project but cannot manage view project', async () => {
             const conditionsProjectView = {
                 projectUuid: projectProfile.projectUuid,
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
 
             expect(
@@ -370,7 +373,7 @@ describe('Lightdash member permissions', () => {
 
             const conditionsProjectAdmin = {
                 projectUuid: adminProjectProfile.projectUuid,
-                isPrivate: false,
+                inheritsFromOrgOrProject: true,
             };
             expect(
                 ability.can(
@@ -434,6 +437,54 @@ describe('Lightdash member permissions', () => {
                     }),
                 ),
             ).toEqual(true);
+        });
+    });
+
+    describe('when user is an org developer and project editor', () => {
+        const verification = {
+            verifiedBy: {
+                userUuid: 'verifier-uuid',
+                firstName: 'Ver',
+                lastName: 'Ifier',
+            },
+            verifiedAt: new Date('2026-01-01'),
+        };
+
+        beforeEach(() => {
+            ability = defineUserAbility(
+                { ...orgProfile, role: OrganizationMemberRole.DEVELOPER },
+                [{ ...projectProfile, role: ProjectMemberRole.EDITOR }],
+            );
+            conditions = {
+                organizationUuid: orgProfile.organizationUuid,
+                projectUuid: projectProfile.projectUuid,
+                inheritsFromOrgOrProject: true,
+            };
+        });
+
+        it('can edit verified content in the project', () => {
+            expect(
+                canMutateVerifiedContent(
+                    ability,
+                    conditions,
+                    verification,
+                    orgProfile.userUuid,
+                ),
+            ).toEqual(true);
+        });
+
+        it('cannot edit verified content in another org', () => {
+            expect(
+                canMutateVerifiedContent(
+                    ability,
+                    {
+                        organizationUuid: 'another-org',
+                        projectUuid: projectProfile.projectUuid,
+                    },
+                    verification,
+                    orgProfile.userUuid,
+                ),
+            ).toEqual(false);
         });
     });
 });

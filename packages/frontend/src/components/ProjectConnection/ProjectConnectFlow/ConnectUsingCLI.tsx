@@ -1,10 +1,17 @@
 import {
-    TimeFrames,
     getDateFormat,
+    TimeFrames,
     type OrganizationProject,
 } from '@lightdash/common';
-import { Avatar, Button, LoadingOverlay, Stack, Text } from '@mantine/core';
-import { Prism } from '@mantine/prism';
+import {
+    Button,
+    LoadingOverlay,
+    Stack,
+    Tabs,
+    Text,
+    Avatar,
+} from '@mantine/core';
+import { useOs } from '@mantine/hooks';
 import { IconChevronLeft, IconClock } from '@tabler/icons-react';
 import { useQueryClient } from '@tanstack/react-query';
 import dayjs from 'dayjs';
@@ -15,6 +22,7 @@ import { useCreateAccessToken } from '../../../hooks/useAccessToken';
 import { useProjects } from '../../../hooks/useProjects';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { EventName } from '../../../types/Events';
+import CodeBlock from '../../common/CodeBlock/CodeBlock';
 import MantineIcon from '../../common/MantineIcon';
 import { ProjectCreationCard } from '../../common/Settings/SettingsCard';
 import { OnboardingTitle } from './common/OnboardingTitle';
@@ -100,6 +108,12 @@ const ConnectUsingCLI: FC<ConnectUsingCliProps> = ({
         track({ name: EventName.COPY_CREATE_PROJECT_CODE_BUTTON_CLICKED });
     }, [showToastSuccess, track]);
 
+    const os = useOs();
+    const isMac = os === 'macos';
+
+    const npmInstall = `npm install -g @lightdash/cli@${version}`;
+    const brewInstall = `brew tap lightdash/lightdash\nbrew install lightdash`;
+
     return (
         <OnboardingWrapper>
             <Button
@@ -107,7 +121,7 @@ const ConnectUsingCLI: FC<ConnectUsingCliProps> = ({
                 variant="subtle"
                 size="sm"
                 top={-50}
-                leftIcon={<MantineIcon icon={IconChevronLeft} />}
+                leftSection={<MantineIcon icon={IconChevronLeft} />}
                 onClick={onBack}
             >
                 Back
@@ -116,11 +130,11 @@ const ConnectUsingCLI: FC<ConnectUsingCliProps> = ({
             <ProjectCreationCard>
                 <LoadingOverlay
                     visible={!isTokenCreated || isTokenCreating}
-                    overlayBlur={2}
+                    overlayProps={{ blur: 2 }}
                 />
 
-                <Stack spacing="xl">
-                    <Stack align="center" spacing="sm">
+                <Stack gap="xl">
+                    <Stack align="center" gap="sm">
                         <Avatar size="lg" radius="xl">
                             <MantineIcon
                                 icon={IconClock}
@@ -130,7 +144,7 @@ const ConnectUsingCLI: FC<ConnectUsingCliProps> = ({
                             />
                         </Avatar>
 
-                        <Stack spacing="xxs">
+                        <Stack gap="xxs">
                             <OnboardingTitle>Waiting for data</OnboardingTitle>
 
                             <Text>Inside your dbt project, run:</Text>
@@ -138,40 +152,61 @@ const ConnectUsingCLI: FC<ConnectUsingCliProps> = ({
                     </Stack>
 
                     <Stack ta="left">
-                        <Stack spacing="xs">
+                        <Stack gap="xs">
                             <Text fw={500}>1. Install lightdash CLI:</Text>
 
-                            <Prism
-                                language="bash"
-                                onCopy={handleCopy}
-                                styles={{ copy: { right: 0 } }}
-                            >
-                                {`npm install -g @lightdash/cli@${version}`}
-                            </Prism>
+                            {isMac ? (
+                                <Tabs defaultValue="npm">
+                                    <Tabs.List>
+                                        <Tabs.Tab value="npm">npm</Tabs.Tab>
+                                        <Tabs.Tab value="brew">
+                                            Homebrew
+                                        </Tabs.Tab>
+                                    </Tabs.List>
+
+                                    <Tabs.Panel value="npm" pt="xs">
+                                        <CodeBlock
+                                            code={npmInstall}
+                                            language="bash"
+                                            onCopy={handleCopy}
+                                        />
+                                    </Tabs.Panel>
+
+                                    <Tabs.Panel value="brew" pt="xs">
+                                        <CodeBlock
+                                            code={brewInstall}
+                                            language="bash"
+                                            onCopy={handleCopy}
+                                        />
+                                    </Tabs.Panel>
+                                </Tabs>
+                            ) : (
+                                <CodeBlock
+                                    code={npmInstall}
+                                    language="bash"
+                                    onCopy={handleCopy}
+                                />
+                            )}
                         </Stack>
 
-                        <Stack spacing="xs">
+                        <Stack gap="xs">
                             <Text fw={500}>2. Login to lightdash:</Text>
 
-                            <Prism
+                            <CodeBlock
+                                code={`lightdash login ${siteUrl} --token ${tokenData?.token}`}
                                 language="bash"
                                 onCopy={handleCopy}
-                                styles={{ copy: { right: 0 } }}
-                            >
-                                {`lightdash login ${siteUrl} --token ${tokenData?.token}`}
-                            </Prism>
+                            />
                         </Stack>
 
-                        <Stack spacing="xs">
+                        <Stack gap="xs">
                             <Text fw={500}>3. Create project:</Text>
 
-                            <Prism
+                            <CodeBlock
+                                code="lightdash deploy --create"
                                 language="bash"
                                 onCopy={handleCopy}
-                                styles={{ copy: { right: 0 } }}
-                            >
-                                lightdash deploy --create
-                            </Prism>
+                            />
                         </Stack>
                     </Stack>
                 </Stack>

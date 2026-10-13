@@ -1,8 +1,8 @@
-import { SegmentedControl, Text } from '@mantine/core';
+import { Text, SegmentedControl } from '@mantine/core';
 import { type FC } from 'react';
 import PaginateControl from '../../PaginateControl';
-import { TableFooter } from '../Table.styles';
 import { DEFAULT_PAGE_SIZE } from '../constants';
+import { TableFooter } from '../Table.styles';
 import { useTableContext } from '../useTableContext';
 
 interface ResultCountProps {
@@ -10,7 +10,7 @@ interface ResultCountProps {
 }
 
 export const ResultCount: FC<ResultCountProps> = ({ count }) => (
-    <Text style={{ marginLeft: 'auto' }} fz="xs">
+    <Text ml="auto" fz="xs">
         {count === 0 ? null : count === 1 ? '1 result' : `${count} results`}
     </Text>
 );

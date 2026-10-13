@@ -2,14 +2,20 @@ import {
     AthenaAuthenticationType,
     BigqueryAuthenticationType,
     DatabricksAuthenticationType,
+    DuckdbConnectionType,
+    DucklakeCatalogType,
+    DucklakeDataPathType,
+    RedshiftAuthenticationType,
     WarehouseTypes,
 } from '@lightdash/common';
-
 import type {
     CreateAthenaCredentials,
     CreateBigqueryCredentials,
     CreateClickhouseCredentials,
     CreateDatabricksCredentials,
+    CreateDuckdbCredentials,
+    CreateDuckdbDucklakeCredentials,
+    CreateDuckdbMotherduckCredentials,
     CreatePostgresCredentials,
     CreateRedshiftCredentials,
     CreateSnowflakeCredentials,
@@ -25,6 +31,7 @@ export const BigQueryDefaultValues: CreateBigqueryCredentials = {
     project: '',
     location: '',
     authenticationType: BigqueryAuthenticationType.PRIVATE_KEY,
+    allowUserCredentials: false,
     // @ts-expect-error we need to set it as empty string to avoid overwritting saved value
     keyfileContents: '', // Not needed for sso, we will load the refresh token from the user in the backend
     executionProject: '',
@@ -34,6 +41,8 @@ export const BigQueryDefaultValues: CreateBigqueryCredentials = {
     maximumBytesBilled: 1000000000,
     // we need to set it as undefined to avoid overwritting saved value
     startOfWeek: undefined,
+    dataTimezone: undefined,
+    accessUrl: '',
 };
 
 export const DatabricksDefaultValues: CreateDatabricksCredentials = {
@@ -46,6 +55,7 @@ export const DatabricksDefaultValues: CreateDatabricksCredentials = {
     catalog: '',
     compute: [],
     startOfWeek: undefined,
+    dataTimezone: undefined,
     requireUserCredentials: false,
 };
 
@@ -75,6 +85,7 @@ export const PostgresDefaultValues: CreatePostgresCredentials = {
     sshTunnelUser: '',
     sshTunnelPublicKey: '',
     startOfWeek: undefined,
+    dataTimezone: undefined,
 };
 
 export const RedshiftDefaultValues: CreateRedshiftCredentials = {
@@ -96,6 +107,21 @@ export const RedshiftDefaultValues: CreateRedshiftCredentials = {
     sshTunnelUser: '',
     sshTunnelPublicKey: '',
     startOfWeek: undefined,
+    dataTimezone: undefined,
+    authenticationType: RedshiftAuthenticationType.PASSWORD,
+    isServerless: false,
+    region: '',
+    clusterIdentifier: '',
+    workgroupName: '',
+    accessKeyId: '',
+    secretAccessKey: '',
+    assumeRoleArn: '',
+    assumeRoleExternalId: '',
+    awsSsoStartUrl: '',
+    awsSsoRegion: '',
+    awsSsoAccountId: '',
+    awsSsoRoleName: '',
+    autoCreate: false,
 };
 
 export const SnowflakeDefaultValues: CreateSnowflakeCredentials = {
@@ -113,9 +139,11 @@ export const SnowflakeDefaultValues: CreateSnowflakeCredentials = {
     queryTag: '',
     accessUrl: '',
     startOfWeek: undefined,
+    dataTimezone: undefined,
     authenticationType: undefined,
     privateKey: '',
     privateKeyPass: '',
+    timeoutSeconds: 300,
 };
 
 export const TrinoDefaultValues: CreateTrinoCredentials = {
@@ -129,6 +157,7 @@ export const TrinoDefaultValues: CreateTrinoCredentials = {
     dbname: '',
     http_scheme: 'https',
     source: '',
+    dataTimezone: undefined,
 };
 
 export const ClickhouseDefaultValues: CreateClickhouseCredentials = {
@@ -141,6 +170,7 @@ export const ClickhouseDefaultValues: CreateClickhouseCredentials = {
     port: 8443,
     secure: true,
     startOfWeek: undefined,
+    dataTimezone: undefined,
     timeoutSeconds: 300,
 };
 
@@ -156,7 +186,45 @@ export const AthenaDefaultValues: CreateAthenaCredentials = {
     threads: 1,
     numRetries: 5,
     startOfWeek: undefined,
+    dataTimezone: undefined,
 };
+
+export const DuckdbMotherduckDefaultValues: CreateDuckdbMotherduckCredentials =
+    {
+        type: WarehouseTypes.DUCKDB,
+        connectionType: DuckdbConnectionType.MOTHERDUCK,
+        database: '',
+        schema: 'main',
+        token: '',
+        threads: 1,
+        startOfWeek: undefined,
+    };
+
+export const DuckdbDucklakeDefaultValues: CreateDuckdbDucklakeCredentials = {
+    type: WarehouseTypes.DUCKDB,
+    connectionType: DuckdbConnectionType.DUCKLAKE,
+    schema: 'main',
+    catalogAlias: 'ducklake',
+    catalog: {
+        type: DucklakeCatalogType.POSTGRES,
+        host: '',
+        port: 5432,
+        database: '',
+        user: '',
+        password: '',
+    },
+    dataPath: {
+        type: DucklakeDataPathType.S3,
+        url: '',
+        accessKeyId: '',
+        secretAccessKey: '',
+    },
+    threads: 1,
+    startOfWeek: undefined,
+};
+
+const DuckdbDefaultValues: CreateDuckdbCredentials =
+    DuckdbMotherduckDefaultValues;
 
 export const warehouseDefaultValues = {
     [WarehouseTypes.BIGQUERY]: BigQueryDefaultValues,
@@ -167,4 +235,5 @@ export const warehouseDefaultValues = {
     [WarehouseTypes.TRINO]: TrinoDefaultValues,
     [WarehouseTypes.CLICKHOUSE]: ClickhouseDefaultValues,
     [WarehouseTypes.ATHENA]: AthenaDefaultValues,
+    [WarehouseTypes.DUCKDB]: DuckdbDefaultValues,
 };

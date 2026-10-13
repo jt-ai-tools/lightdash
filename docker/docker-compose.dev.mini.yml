@@ -13,20 +13,21 @@ services:
             - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
             - MINIO_DEFAULT_BUCKETS=${MINIO_DEFAULT_BUCKETS}
             - MINIO_BROWSER=${MINIO_BROWSER:-off}
+            - MINIO_EXPIRATION_DAYS=${MINIO_EXPIRATION_DAYS:-1}
         volumes:
-            - minio_data:/minio/data
+            - minio_data:/data
             - ./init-minio.sh:/init-minio.sh
         entrypoint: '/init-minio.sh'
 
     db-dev:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:pg18
         restart: always
         environment:
             POSTGRES_PASSWORD: password
         ports:
             - '5432:5432'
         volumes:
-            - postgres_data:/var/lib/postgresql/data
+            - postgres_data:/var/lib/postgresql
 
     headless-browser:
         build:
@@ -45,3 +46,10 @@ services:
             MP_MAX_MESSAGES: 5000
             MP_SMTP_AUTH_ACCEPT_ANY: 1
             MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+    nats:
+        image: nats:2.11-alpine
+        command: ['-js']
+        ports:
+            - '4222:4222'
+            - '8222:8222'

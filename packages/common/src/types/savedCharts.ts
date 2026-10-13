@@ -1,12 +1,19 @@
+import { type DataAppVizOptionValue } from '../ee/apps/dataAppVizConfigOptions';
 import assertUnreachable from '../utils/assertUnreachable';
+import { type AgentIdentityClaim } from './agentIdentity';
 import { type ViewStatistics } from './analytics';
 import { type DateZoom } from './api/paginatedQuery';
 import { type ConditionalFormattingConfig } from './conditionalFormatting';
 import { type ChartSourceType } from './content';
+import { type ContentDraftStaleness } from './contentAsCode/draftRebase';
+import { type ContentVerificationInfo } from './contentVerification';
 import { type CompactOrAlias, type FieldId } from './field';
 import { type KnexPaginatedData } from './knex-paginate';
+import { type SavedMergeDefinition, type SavedMergeQuery } from './mergeQuery';
 import { type MetricQuery, type MetricQueryRequest } from './metricQuery';
+import { type ResolvedProjectColorPalette } from './organization';
 import { type ParametersValuesMap } from './parameters';
+import { type ProjectType } from './projects';
 import type { SchedulerAndTargets } from './scheduler';
 // eslint-disable-next-line import/no-cycle
 import { type SpaceAccess } from './space';
@@ -28,6 +35,8 @@ export enum ChartKind {
     TREEMAP = 'treemap',
     GAUGE = 'gauge',
     MAP = 'map',
+    SANKEY = 'sankey',
+    DATA_APP_VIZ = 'data_app_viz',
 }
 
 export enum ChartType {
@@ -40,6 +49,8 @@ export enum ChartType {
     GAUGE = 'gauge',
     CUSTOM = 'custom',
     MAP = 'map',
+    SANKEY = 'sankey',
+    DATA_APP_VIZ = 'data_app_viz',
 }
 
 export enum ComparisonFormatTypes {
@@ -91,6 +102,7 @@ export type PieChartValueOptions = {
     valueLabel: PieChartValueLabel;
     showValue: boolean;
     showPercentage: boolean;
+    valueLabelColor?: string;
 };
 
 export const PieChartLegendPositions = {
@@ -122,6 +134,8 @@ export type PieChart = {
     showValue?: PieChartValueOptions['showValue'];
     /** Show percentage on slices */
     showPercentage?: PieChartValueOptions['showPercentage'];
+    /** Custom color for value labels */
+    valueLabelColor?: PieChartValueOptions['valueLabelColor'];
     /** Custom labels for each group/slice */
     groupLabelOverrides?: Record<string, string>;
     /** Custom colors for each group/slice */
@@ -197,6 +211,29 @@ export type GaugeChart = {
     customPercentageLabel?: string;
 };
 
+/**
+ * How nodes are laid out:
+ * - `multi-step`: depth-unrolled journeys (default)
+ * - `merged`: one node per label, journeys preserved (acyclic flows only)
+ * - `direct`: two-column source→target pairs, no chaining
+ */
+export type SankeyNodeLayout = 'multi-step' | 'merged' | 'direct';
+
+export type SankeyChart = {
+    /** Field ID for the source node dimension */
+    sourceFieldId?: string;
+    /** Field ID for the target node dimension */
+    targetFieldId?: string;
+    /** Field ID for the link value metric */
+    metricFieldId?: string;
+    /** Node alignment */
+    nodeAlign?: 'left' | 'right' | 'justify';
+    /** Orientation of the diagram */
+    orient?: 'horizontal' | 'vertical';
+    /** How nodes are laid out across steps */
+    nodeLayout?: SankeyNodeLayout;
+};
+
 export enum MapChartLocation {
     USA = 'USA',
     WORLD = 'world',
@@ -208,6 +245,28 @@ export enum MapChartType {
     SCATTER = 'scatter',
     AREA = 'area',
     HEATMAP = 'heatmap',
+    HEXBIN = 'hexbin',
+}
+
+export enum MapHexbinSizingMode {
+    /** Resolution is derived from current map zoom level. */
+    DYNAMIC = 'dynamic',
+    /** Resolution is fixed by the user, independent of zoom. */
+    FIXED = 'fixed',
+}
+
+export enum MapHexbinValueBasis {
+    /** Color cells by the count of points they contain. */
+    COUNT = 'count',
+    /** Color cells by an aggregation over a chosen value field. */
+    FIELD = 'field',
+}
+
+export enum MapHexbinAggregation {
+    SUM = 'sum',
+    AVG = 'avg',
+    MIN = 'min',
+    MAX = 'max',
 }
 
 export enum MapTileBackground {
@@ -216,6 +275,7 @@ export enum MapTileBackground {
     LIGHT = 'light',
     DARK = 'dark',
     SATELLITE = 'satellite',
+    VOYAGER = 'voyager',
 }
 
 export type MapFieldConfig = {
@@ -269,10 +329,32 @@ export type MapChart = {
         /** Opacity of the heatmap layer */
         opacity?: number;
     };
+    /** Configuration for H3 hexagonal binning visualization */
+    hexbinConfig?: {
+        /** Opacity of hex polygons (0.1 to 1) */
+        opacity?: number;
+        /** How bin size is determined. Defaults to DYNAMIC if unset. */
+        sizingMode?: MapHexbinSizingMode;
+        /** H3 resolution (0-15) used when sizingMode is FIXED. Ignored otherwise. */
+        fixedResolution?: number;
+        /** What drives cell color: count of points (default) or an aggregation
+         *  over a chosen value field (controlled via the chart's `valueFieldId`). */
+        valueBasis?: MapHexbinValueBasis;
+        /** Aggregation applied when valueBasis = FIELD. Defaults to SUM. */
+        aggregation?: MapHexbinAggregation;
+        /** Render outlined empty cells across the visible map area, so the user
+         *  can see "where there is no data" relative to the hex grid. */
+        showEmptyBins?: boolean;
+        /** Fill color for empty bins. Hex6 (#rrggbb) = solid fill, hex8
+         *  (#rrggbbaa) = fill with alpha, null/undefined = outline only. */
+        emptyBinColor?: string | null;
+    };
     /** Data layer opacity (0.1 to 1) */
     dataLayerOpacity?: number;
     /** Map tile background style */
     tileBackground?: MapTileBackground;
+    /** Map tile background style for dark mode (uses dark default when undefined) */
+    darkModeTileBackground?: MapTileBackground;
     /** Background color for the map (hex code) */
     backgroundColor?: string;
     /** Color for regions with no data (hex code) */
@@ -337,7 +419,18 @@ export type ColumnProperties = {
     displayStyle?: 'text' | 'bar';
     /** Color for bar display style (hex code) */
     color?: string;
+    /** Color for negative bars in diverging bar display (hex code). Falls back to `color` when unset. */
+    negativeColor?: string;
     width?: number;
+};
+
+export type RowLimit = {
+    /** Whether to show or hide the selected rows */
+    mode: 'show' | 'hide';
+    /** Whether to target the first or last N rows */
+    direction: 'first' | 'last';
+    /** Number of rows to show or hide */
+    count: number;
 };
 
 export type TableChart = {
@@ -349,18 +442,26 @@ export type TableChart = {
     showTableNames?: boolean;
     /** Hide row number column */
     hideRowNumbers?: boolean;
-    /** Wrap column titles in header cells */
-    wrapColumnTitles?: boolean;
     /** Show total results count */
     showResultsTotal?: boolean;
     /** Show subtotal rows */
     showSubtotals?: boolean;
+    /** Default subtotal rows to expanded (vs. collapsed). Only meaningful when showSubtotals is true. */
+    showSubtotalsExpanded?: boolean;
+    /**
+     * Visually deduplicate repeated row-index dimension values across consecutive
+     * rows without showing aggregate subtotal rows. When `showSubtotals` is true,
+     * grouping is implicitly active and this flag is ignored. Defaults to false.
+     */
+    showRowGrouping?: boolean;
     /** Column-specific configuration */
     columns?: Record<string, ColumnProperties>;
     /** Conditional formatting rules */
     conditionalFormattings?: ConditionalFormattingConfig[];
     /** Display metrics as rows instead of columns */
     metricsAsRows?: boolean;
+    /** Limit displayed rows to first/last N */
+    rowLimit?: RowLimit;
 };
 
 export enum CartesianSeriesType {
@@ -468,6 +569,8 @@ export type Series = {
     label?: {
         /** Show data labels on points */
         show?: boolean;
+        /** Custom data label color (hex code) */
+        color?: string;
         /** Position of data labels */
         position?: 'left' | 'top' | 'right' | 'bottom' | 'inside';
         /** Show labels even when they overlap */
@@ -492,6 +595,11 @@ export type Series = {
     /** Whether this series is currently filtered out */
     isFilteredOut?: boolean;
 };
+
+/** High-level legend placement preset. Set to 'outsideRight' or 'outsideLeft' to
+ * render the legend beside the plot with reserved grid space. Undefined behaves
+ * like 'custom' (no override of the existing legend position fields). */
+export type LegendPlacement = 'custom' | 'outsideRight' | 'outsideLeft';
 
 export type EchartsLegend = {
     /** Show the legend */
@@ -524,6 +632,11 @@ export type EchartsLegend = {
         | 'pin'
         | 'arrow'
         | 'none';
+    /** High-level placement preset. Overrides orient/top/right/bottom/left
+     * when set to an outside value. */
+    placement?: LegendPlacement;
+    /** Legend entries toggled off by name. Missing entries default to visible. */
+    selected?: Record<string, boolean>;
 };
 
 export type EchartsGrid = {
@@ -585,6 +698,8 @@ type Axis = {
     min?: string | undefined;
     /** Maximum value (or 'dataMax' for auto) */
     max?: string | undefined;
+    /** Minimum interval between ticks (e.g. 1 to force integer ticks) */
+    minInterval?: number | undefined;
     /** Offset from minimum value */
     minOffset?: string | undefined;
     /** Offset from maximum value */
@@ -600,6 +715,12 @@ export type XAxis = Axis & {
     sortType?: XAxisSortType;
     /** Enable data zoom slider for this axis */
     enableDataZoom?: boolean;
+    /** Where the initial data-zoom window anchors when data zoom is enabled */
+    dataZoomAnchor?: 'start' | 'end';
+    /** Number of items visible at once in the data-zoom window */
+    dataZoomItemCount?: number;
+    /** Render a numeric X axis as discrete categories instead of a continuous scale */
+    treatAsCategory?: boolean;
 };
 
 export enum XAxisSortType {
@@ -660,6 +781,10 @@ export type CompleteCartesianChartLayout = {
     stack?: boolean | string | undefined;
     /** Connect null data points with a line */
     connectNulls?: boolean | undefined;
+    /** Color each bar by its category value instead of using a single series color */
+    colorByCategory?: boolean | undefined;
+    /** Per-category color overrides (maps category value to hex color) */
+    categoryColorOverrides?: Record<string, string> | undefined;
 };
 
 export type CartesianChartLayout = Partial<CompleteCartesianChartLayout>;
@@ -669,13 +794,47 @@ export type CustomVis = {
     spec?: Record<string, unknown>;
 };
 
+/** Maps a viz field name to one query field id or an ordered collection. */
+export type DataAppVizFieldMapping = Record<string, string | string[]>;
+
+/** Maps a declared config option's name → the value the user chose for it. */
+export type DataAppVizOptionValues = Record<string, DataAppVizOptionValue>;
+
+export type DataAppVizChart = {
+    /**
+     * The reusable data app viz this chart renders with (by reference).
+     * Content-as-code files carry the viz's project-scoped slug instead —
+     * see DataAppVizChartAsCode.
+     */
+    dataAppVizUuid: string;
+    /**
+     * The version of the project chart type this saved chart renders.
+     * @isInt
+     * @minimum 1
+     */
+    dataAppVizVersion?: number;
+    fieldMapping: DataAppVizFieldMapping;
+    /**
+     * Only options the user explicitly changed — declared defaults are never
+     * seeded here, they're resolved at render time. Absent on charts saved
+     * before config options shipped.
+     */
+    optionValues?: DataAppVizOptionValues;
+};
+
 export type CartesianChart = {
     /** Layout configuration for the chart axes and orientation */
     layout: CartesianChartLayout;
     /** ECharts-specific configuration */
     eChartsConfig: EChartsConfig;
+    /** Conditional formatting rules */
+    conditionalFormattings?: ConditionalFormattingConfig[];
     /** Metadata for series (colors, etc.) */
     metadata?: Record<string, SeriesMetadata>;
+    /** Limit displayed rows to first/last N */
+    rowLimit?: RowLimit;
+    /** Maximum number of pivot columns to display */
+    columnLimit?: number;
 };
 
 export type BigNumberConfig = {
@@ -697,6 +856,13 @@ export type CustomVisConfig = {
     type: ChartType.CUSTOM;
     /** Chart-type-specific configuration */
     config?: CustomVis;
+};
+
+export type DataAppVizChartConfig = {
+    /** Type of chart visualization */
+    type: ChartType.DATA_APP_VIZ;
+    /** Reference to a data app viz plus its field mapping. */
+    config?: DataAppVizChart;
 };
 
 export type PieChartConfig = {
@@ -741,6 +907,13 @@ export type MapChartConfig = {
     config?: MapChart;
 };
 
+export type SankeyChartConfig = {
+    /** Type of chart visualization */
+    type: ChartType.SANKEY;
+    /** Chart-type-specific configuration */
+    config?: SankeyChart;
+};
+
 export type ChartConfig =
     | BigNumberConfig
     | CartesianChartConfig
@@ -750,13 +923,21 @@ export type ChartConfig =
     | TableChartConfig
     | TreemapChartConfig
     | GaugeChartConfig
-    | MapChartConfig;
+    | DataAppVizChartConfig
+    | MapChartConfig
+    | SankeyChartConfig;
 
 export type SavedChartType = ChartType;
 
-export type SavedChartDAO = Omit<SavedChart, 'isPrivate' | 'access'>;
+export type SavedChartDAO = Omit<
+    SavedChart,
+    'inheritsFromOrgOrProject' | 'access'
+>;
 
 export type SavedChart = {
+    createdAt?: Date;
+    projectName?: string;
+    projectType?: ProjectType;
     uuid: string;
     projectUuid: string;
     /** Display name of the chart */
@@ -771,7 +952,11 @@ export type SavedChart = {
     pivotConfig?: {
         /** Fields to use as pivot columns */
         columns: string[];
+        /** Ordered fields to render on the pivot row axis */
+        rows?: string[];
     };
+    /** Named source queries, join keys, and ordering of the merged result. */
+    merge?: SavedMergeDefinition | null;
     /** Visualization configuration for the chart */
     chartConfig: ChartConfig;
     /** Table view configuration */
@@ -791,11 +976,44 @@ export type SavedChart = {
     pinnedListOrder: number | null;
     dashboardUuid: string | null;
     dashboardName: string | null;
+    dashboardSlug?: string | null;
+    /**
+     * @deprecated Use `resolvedColorPalette.colors` instead. This field carries
+     * only the resolved colors and will be removed once renderers migrate to
+     * `resolvedColorPalette`, which also exposes the source entity, palette
+     * UUID/name, and dark colors.
+     */
     colorPalette: string[];
-    isPrivate: boolean;
+    /**
+     * Chart-level palette override pointer. `null` means inherit from the
+     * containing dashboard / space / project / org. Writable via
+     * `UpdateSavedChart`.
+     */
+    colorPaletteUuid: string | null;
+    /**
+     * Fully resolved palette for this chart, computed from the
+     * org → project → space → dashboard → chart hierarchy. Read-only — set
+     * the chart's own palette via `colorPaletteUuid`.
+     */
+    readonly resolvedColorPalette: ResolvedProjectColorPalette;
+    inheritsFromOrgOrProject: boolean;
     access: SpaceAccess[];
     /** Unique identifier slug for this chart */
     slug: string;
+    verification: ContentVerificationInfo | null;
+    /** The caller's unpublished content-as-code draft is applied. */
+    hasUnpublishedChanges?: boolean;
+    /** Open drafts from other authors visible to content-as-code reviewers. */
+    draftsAwaitingReview?: number;
+    /** The caller's latest dismissed draft, available to reopen. */
+    dismissedDraftUuid?: string;
+    /** The caller's draft started from an upload snapshot the repo has since moved past. */
+    draftStaleness?: ContentDraftStaleness;
+    /** The caller's draft could not be safely applied. */
+    draftOverlayError?: {
+        code: 'invalid_chart_draft';
+        draftUuid: string;
+    };
     deletedAt?: Date;
     deletedBy?: {
         userUuid: string;
@@ -804,32 +1022,37 @@ export type SavedChart = {
     } | null;
 };
 
-type CreateChartBase = Pick<
-    SavedChart,
-    | 'name'
-    | 'description'
-    | 'tableName'
-    | 'metricQuery'
-    | 'pivotConfig'
-    | 'chartConfig'
-    | 'tableConfig'
-    | 'parameters'
->;
+type CreateChartBase = {
+    name: SavedChart['name'];
+    description?: SavedChart['description'];
+    tableName: SavedChart['tableName'];
+    metricQuery: SavedChart['metricQuery'];
+    pivotConfig?: SavedChart['pivotConfig'];
+    chartConfig: SavedChart['chartConfig'];
+    tableConfig: SavedChart['tableConfig'];
+    parameters?: SavedChart['parameters'];
+    /** Accepts schema v2 uploads; saved charts return the named schema v3 shape. */
+    merge?: SavedMergeDefinition | SavedMergeQuery | null;
+};
 
+// colorPaletteUuid is on each member to avoid an allOf in the OpenAPI schema.
 export type CreateChartInSpace = CreateChartBase & {
     spaceUuid?: string;
     dashboardUuid?: null;
+    colorPaletteUuid?: string | null;
 };
 
 export type CreateChartInDashboard = CreateChartBase & {
     dashboardUuid: string;
     spaceUuid?: null;
+    colorPaletteUuid?: string | null;
 };
 
 export type CreateSavedChart = CreateChartInSpace | CreateChartInDashboard;
 
 export type CreateSavedChartVersion = Omit<
     SavedChart,
+    | 'merge'
     | 'uuid'
     | 'name'
     | 'updatedAt'
@@ -844,16 +1067,24 @@ export type CreateSavedChartVersion = Omit<
     | 'dashboardUuid'
     | 'dashboardName'
     | 'colorPalette'
-    | 'isPrivate'
+    | 'colorPaletteUuid'
+    | 'resolvedColorPalette'
+    | 'inheritsFromOrgOrProject'
     | 'access'
     | 'slug'
+    | 'verification'
 > &
     // For Charts created within a dashboard
-    Partial<Pick<SavedChart, 'dashboardUuid' | 'dashboardName'>>;
+    Partial<Pick<SavedChart, 'dashboardUuid' | 'dashboardName'>> & {
+        preserveVerification?: boolean;
+        merge?: SavedMergeDefinition | SavedMergeQuery | null;
+    };
 
 export type UpdateSavedChart = Partial<
-    Pick<SavedChart, 'name' | 'description' | 'spaceUuid'>
->;
+    Pick<SavedChart, 'name' | 'description' | 'spaceUuid' | 'colorPaletteUuid'>
+> & {
+    preserveVerification?: boolean;
+};
 
 export type UpdateMultipleSavedChart = Pick<
     SavedChart,
@@ -875,13 +1106,20 @@ export const isCartesianChartConfig = (
 ): value is CartesianChart =>
     !!value && 'layout' in value && 'eChartsConfig' in value;
 
+export const isDataAppVizChart = (
+    value: ChartConfig['config'],
+): value is DataAppVizChart =>
+    !!value && 'dataAppVizUuid' in value && 'fieldMapping' in value;
+
 export const isBigNumberConfig = (
     value: ChartConfig['config'],
-): value is BigNumber => !!value && !isCartesianChartConfig(value);
+): value is BigNumber =>
+    !!value && !isCartesianChartConfig(value) && !isDataAppVizChart(value);
 
 export const isTableChartConfig = (
     value: ChartConfig['config'],
-): value is TableChart => !!value && !isCartesianChartConfig(value);
+): value is TableChart =>
+    !!value && !isCartesianChartConfig(value) && !isDataAppVizChart(value);
 
 export const isPieChartConfig = (
     value: ChartConfig['config'],
@@ -910,6 +1148,20 @@ export const getCustomLabelsFromTableConfig = (
         ? getCustomLabelsFromColumnProperties(config.columns)
         : undefined;
 
+export const getConditionalFormattingsFromChartConfig = (
+    config: ChartConfig['config'] | undefined,
+): ConditionalFormattingConfig[] | undefined =>
+    config && isTableChartConfig(config)
+        ? config.conditionalFormattings
+        : undefined;
+
+export const getShowColumnTotalsFromChartConfig = (
+    config: ChartConfig['config'] | undefined,
+): boolean | undefined =>
+    config && isTableChartConfig(config)
+        ? config.showColumnCalculation
+        : undefined;
+
 export const hashFieldReference = (reference: PivotReference) =>
     reference.pivotValues
         ? `${reference.field}.${reference.pivotValues
@@ -921,6 +1173,58 @@ export const getSeriesId = (series: Series) =>
     `${hashFieldReference(series.encode.xRef)}|${hashFieldReference(
         series.encode.yRef,
     )}`;
+
+const stripPivotValuesFromSeries = (series: Series): Series => {
+    const { encode, name, color, ...rest } = series;
+    return {
+        ...rest,
+        encode: {
+            xRef: { field: encode.xRef.field },
+            yRef: { field: encode.yRef.field },
+        },
+    };
+};
+
+export const removePivotedSeriesValuesFromChartConfig = (
+    chartConfig: ChartConfig,
+): ChartConfig => {
+    if (chartConfig.type !== ChartType.CARTESIAN || !chartConfig.config) {
+        return chartConfig;
+    }
+
+    const { series } = chartConfig.config.eChartsConfig;
+    if (!series || series.length === 0) {
+        return chartConfig;
+    }
+
+    const seenSeriesIds = new Set<string>();
+    const portableSeries = series.reduce<Series[]>((acc, currentSeries) => {
+        const hasPivotValues =
+            isPivotReferenceWithValues(currentSeries.encode.yRef) ||
+            isPivotReferenceWithValues(currentSeries.encode.xRef);
+        const portableSerie = hasPivotValues
+            ? stripPivotValuesFromSeries(currentSeries)
+            : currentSeries;
+        const seriesId = getSeriesId(portableSerie);
+        if (seenSeriesIds.has(seriesId)) {
+            return acc;
+        }
+
+        seenSeriesIds.add(seriesId);
+        return [...acc, portableSerie];
+    }, []);
+
+    return {
+        ...chartConfig,
+        config: {
+            ...chartConfig.config,
+            eChartsConfig: {
+                ...chartConfig.config.eChartsConfig,
+                series: portableSeries,
+            },
+        },
+    };
+};
 
 export const ECHARTS_DEFAULT_COLORS = [
     '#5470c6',
@@ -936,6 +1240,15 @@ export const ECHARTS_DEFAULT_COLORS = [
 
 export const getDefaultSeriesColor = (index: number) =>
     ECHARTS_DEFAULT_COLORS[index % ECHARTS_DEFAULT_COLORS.length];
+
+export const getDefaultResolvedColorPalette =
+    (): ResolvedProjectColorPalette => ({
+        colors: ECHARTS_DEFAULT_COLORS,
+        darkColors: null,
+        paletteUuid: null,
+        paletteName: null,
+        source: { type: 'default' },
+    });
 
 export const isSeriesWithMixedChartTypes = (
     series: Series[] | undefined,
@@ -964,6 +1277,10 @@ export const getChartType = (chartKind: ChartKind | undefined): ChartType => {
             return ChartType.TREEMAP;
         case ChartKind.GAUGE:
             return ChartType.GAUGE;
+        case ChartKind.SANKEY:
+            return ChartType.SANKEY;
+        case ChartKind.DATA_APP_VIZ:
+            return ChartType.DATA_APP_VIZ;
         default:
             return ChartType.CARTESIAN;
     }
@@ -1022,6 +1339,10 @@ export const getChartKind = (
             return ChartKind.GAUGE;
         case ChartType.MAP:
             return ChartKind.MAP;
+        case ChartType.SANKEY:
+            return ChartKind.SANKEY;
+        case ChartType.DATA_APP_VIZ:
+            return ChartKind.DATA_APP_VIZ;
         default:
             return assertUnreachable(
                 chartType,
@@ -1059,6 +1380,7 @@ export type ChartSummary = Pick<
     | 'pinnedListUuid'
     | 'dashboardUuid'
     | 'dashboardName'
+    | 'dashboardSlug'
     | 'slug'
 > & {
     chartType?: ChartType | undefined;
@@ -1070,6 +1392,7 @@ export type SpaceQuery = ChartSummary &
     Pick<SavedChart, 'updatedAt' | 'updatedByUser' | 'pinnedListOrder'> &
     ViewStatistics & {
         validationErrors?: ValidationSummary[];
+        verification: ContentVerificationInfo | null;
     };
 
 export type ApiChartSummaryListResponse = {
@@ -1087,6 +1410,7 @@ export type ChartHistory = {
 };
 
 export type ChartVersion = {
+    agentIdentity?: AgentIdentityClaim | null;
     chartUuid: string;
     versionUuid: string;
     createdAt: Date;
@@ -1099,7 +1423,7 @@ export type ChartVersion = {
 
 export type ChartVersionSummary = Pick<
     ChartVersion,
-    'chartUuid' | 'versionUuid' | 'createdAt' | 'createdBy'
+    'chartUuid' | 'versionUuid' | 'createdAt' | 'createdBy' | 'agentIdentity'
 >;
 
 export type ApiGetChartHistoryResponse = {
@@ -1131,6 +1455,7 @@ export type CalculateTotalFromQuery = {
     metricQuery: MetricQueryRequest;
     explore: string;
     parameters?: ParametersValuesMap;
+    invalidateCache?: boolean;
 };
 
 export type ApiCalculateTotalResponse = {
@@ -1196,6 +1521,11 @@ export type SkippedReplaceCustomFields = {
             };
         };
     };
+};
+
+export type ApiSavedChartResponse = {
+    status: 'ok';
+    results: SavedChart;
 };
 
 export type ApiSavedChartSchedulersResponse = {

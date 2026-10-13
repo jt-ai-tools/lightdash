@@ -3,9 +3,11 @@ import {
     assertUnreachable,
     friendlyName,
     LightdashPage,
+    MAX_DELIVERY_QUERIES,
     operatorActionValue,
     PartialFailureType,
     ThresholdOptions,
+    type DeliveryNotice,
     type PartialFailure,
 } from '@lightdash/common';
 import {
@@ -14,28 +16,69 @@ import {
     SectionBlock,
     SectionBlockAccessory,
 } from '@slack/bolt';
+import { buildFailureCountPhrase } from '../../utils/partialFailureUtils';
 import { AttachmentUrl } from '../EmailClient/EmailClient';
 
-// Slack Block Kit text limits
+// Slack Block Kit text and structural limits
 const SLACK_LIMITS = {
     HEADER_TEXT: 150,
     SECTION_TEXT: 3000,
     SECTION_FIELD_TEXT: 2000,
     BUTTON_TEXT: 75,
     ALT_TEXT: 2000,
+    URL: 3000,
 } as const;
 
+// Beyond this many per-chart download blocks, dashboard CSV deliveries collapse
+// into a single grouped section to stay under Slack's 50-block message cap.
+const DASHBOARD_CSV_COLLAPSE_THRESHOLD = 35;
+
 // Truncate text to fit Slack limits and add ellipsis if needed
-const truncateText = (text: string, maxLength: number): string => {
+export const truncateText = (text: string, maxLength: number): string => {
     if (!text || text.length <= maxLength) return text;
     return `${text.slice(0, maxLength - 3)}...`;
 };
 
 // Sanitize text to prevent invalid blocks
-const sanitizeText = (text: string | undefined): string => {
+export const sanitizeText = (text: string | undefined): string => {
     if (!text || text.trim() === '') return ' ';
     return text.trim();
 };
+
+// Header blocks reject empty or whitespace-only text — returning undefined lets
+// the caller drop the block entirely instead of emitting a single space.
+const sanitizeHeaderText = (text: string | undefined): string | undefined => {
+    const trimmed = text?.trim();
+    if (!trimmed) return undefined;
+    return truncateText(trimmed, SLACK_LIMITS.HEADER_TEXT);
+};
+
+// Slack rejects button.url and image_url values that are malformed or longer
+// than 3000 chars. Returns undefined when the URL would be rejected so callers
+// can drop the surrounding block / accessory.
+export const safeUrl = (
+    url: string | undefined,
+    maxLength: number = SLACK_LIMITS.URL,
+): string | undefined => {
+    if (!url) return undefined;
+    if (url.length > maxLength) return undefined;
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            return undefined;
+        }
+    } catch {
+        return undefined;
+    }
+    return url;
+};
+
+// A chart image for a message block: either a file hosted on the workspace's
+// Slack (referenced by id, no public URL needed) or an externally hosted URL
+// that Slack's servers must be able to fetch.
+export type SlackChartImage =
+    | { source: 'slackFile'; fileId: string }
+    | { source: 'url'; url: string };
 
 type GetChartAndDashboardBlocksArgs = {
     title: string;
@@ -43,7 +86,7 @@ type GetChartAndDashboardBlocksArgs = {
     description?: string;
     message?: string;
     ctaUrl: string;
-    imageUrl?: string;
+    image?: SlackChartImage;
     footerMarkdown?: string;
     includeLinks?: boolean;
 };
@@ -74,40 +117,100 @@ const getSectionFields = (
 const getBlocks = (blocks: (KnownBlock | undefined)[]): KnownBlock[] =>
     blocks.filter((block): block is KnownBlock => Boolean(block));
 
+// Inline notice that replaces a block we had to drop (oversized URL,
+// malformed image, etc). Better than a silent omission — the user sees
+// where the content would have been and how to recover.
+const unavailableSection = (message: string): KnownBlock => ({
+    type: 'section',
+    text: {
+        type: 'mrkdwn',
+        text: truncateText(`:warning: ${message}`, SLACK_LIMITS.SECTION_TEXT),
+    },
+});
+
+const DOWNLOAD_UNAVAILABLE_MESSAGE =
+    'Download link unavailable for this delivery (the URL was too long or invalid). Open in Lightdash to download.';
+const PREVIEW_UNAVAILABLE_MESSAGE =
+    'Chart preview unavailable (the image URL was too long or invalid). Open in Lightdash to view.';
+const PREVIEW_REJECTED_MESSAGE =
+    'Chart preview unavailable. Open in Lightdash to view.';
+
+const buildChartImageBlock = (
+    image: SlackChartImage | undefined,
+    altText: string,
+): KnownBlock | undefined => {
+    if (image === undefined) return undefined;
+    const truncatedAltText = truncateText(
+        sanitizeText(altText),
+        SLACK_LIMITS.ALT_TEXT,
+    );
+    if (image.source === 'slackFile') {
+        return {
+            type: 'image',
+            slack_file: { id: image.fileId },
+            alt_text: truncatedAltText,
+        };
+    }
+    if (!image.url.trim()) return undefined;
+    const safeImageUrl = safeUrl(image.url);
+    if (safeImageUrl) {
+        return {
+            type: 'image',
+            image_url: safeImageUrl,
+            alt_text: truncatedAltText,
+        };
+    }
+    return unavailableSection(PREVIEW_UNAVAILABLE_MESSAGE);
+};
+
+// Fallback for messages Slack rejected with invalid_blocks: swap the blocks
+// Slack pointed at for a notice so the delivery still reaches the channel.
+export const replaceImageBlocksWithNotice = <T extends { type?: string }>(
+    blocks: T[],
+    indices: number[],
+): (T | KnownBlock)[] => {
+    const rejected = new Set(indices);
+    return blocks.map((block, index) =>
+        rejected.has(index)
+            ? unavailableSection(PREVIEW_REJECTED_MESSAGE)
+            : block,
+    );
+};
+
 export const getChartAndDashboardBlocks = ({
     title,
     name,
     description,
     message,
-    imageUrl,
+    image,
     ctaUrl,
     footerMarkdown,
     includeLinks,
 }: GetChartAndDashboardBlocksArgs): KnownBlock[] => {
-    const lightdashLink: SectionBlockAccessory | undefined =
-        includeLinks === false
-            ? undefined
-            : {
-                  type: 'button',
+    const safeCtaUrl = includeLinks === false ? undefined : safeUrl(ctaUrl);
+    const lightdashLink: SectionBlockAccessory | undefined = safeCtaUrl
+        ? {
+              type: 'button',
+              text: {
+                  type: 'plain_text',
+                  text: 'Open in Lightdash',
+                  emoji: true,
+              },
+              url: safeCtaUrl,
+              action_id: 'button-action',
+          }
+        : undefined;
+    const headerText = sanitizeHeaderText(title);
+    return getBlocks([
+        headerText
+            ? {
+                  type: 'header',
                   text: {
                       type: 'plain_text',
-                      text: 'Open in Lightdash',
-                      emoji: true,
+                      text: headerText,
                   },
-                  url: ctaUrl,
-                  action_id: 'button-action',
-              };
-    return getBlocks([
-        {
-            type: 'header',
-            text: {
-                type: 'plain_text',
-                text: truncateText(
-                    sanitizeText(title),
-                    SLACK_LIMITS.HEADER_TEXT,
-                ),
-            },
-        },
+              }
+            : undefined,
         message?.trim()
             ? {
                   type: 'section',
@@ -128,16 +231,7 @@ export const getChartAndDashboardBlocks = ({
             ]),
             accessory: lightdashLink,
         },
-        imageUrl?.trim()
-            ? {
-                  type: 'image',
-                  image_url: imageUrl,
-                  alt_text: truncateText(
-                      sanitizeText(title),
-                      SLACK_LIMITS.ALT_TEXT,
-                  ),
-              }
-            : undefined,
+        buildChartImageBlock(image, title),
         footerMarkdown?.trim()
             ? {
                   type: 'context',
@@ -174,30 +268,62 @@ export const getChartCsvResultsBlocks = ({
     footerMarkdown,
     includeLinks,
 }: GetChartCsvResultsBlocksArgs): KnownBlock[] => {
-    const lightdashLink: SectionBlockAccessory | undefined =
-        includeLinks === false
-            ? undefined
-            : {
-                  type: 'button',
+    const safeCtaUrl = includeLinks === false ? undefined : safeUrl(ctaUrl);
+    const lightdashLink: SectionBlockAccessory | undefined = safeCtaUrl
+        ? {
+              type: 'button',
+              text: {
+                  type: 'plain_text',
+                  text: 'Open in Lightdash',
+                  emoji: true,
+              },
+              url: safeCtaUrl,
+              action_id: 'button-action',
+          }
+        : undefined;
+    const headerText = sanitizeHeaderText(title);
+    const hasCsvUrl = Boolean(csvUrl?.trim());
+    const safeCsvUrl = safeUrl(csvUrl);
+    const buildDownloadActions = (): KnownBlock | undefined => {
+        if (safeCsvUrl) {
+            return {
+                type: 'actions',
+                elements: [
+                    {
+                        type: 'button',
+                        text: {
+                            type: 'plain_text',
+                            text: 'Download results',
+                            emoji: true,
+                        },
+                        url: safeCsvUrl,
+                        action_id: 'download-results',
+                    },
+                ],
+            };
+        }
+        if (!hasCsvUrl) {
+            return {
+                type: 'section',
+                text: {
+                    type: 'mrkdwn',
+                    text: '*_This query returned no results_*',
+                },
+            };
+        }
+        return unavailableSection(DOWNLOAD_UNAVAILABLE_MESSAGE);
+    };
+    const downloadActions = buildDownloadActions();
+    return getBlocks([
+        headerText
+            ? {
+                  type: 'header',
                   text: {
                       type: 'plain_text',
-                      text: 'Open in Lightdash',
-                      emoji: true,
+                      text: headerText,
                   },
-                  url: ctaUrl,
-                  action_id: 'button-action',
-              };
-    return getBlocks([
-        {
-            type: 'header',
-            text: {
-                type: 'plain_text',
-                text: truncateText(
-                    sanitizeText(title),
-                    SLACK_LIMITS.HEADER_TEXT,
-                ),
-            },
-        },
+              }
+            : undefined,
         message?.trim()
             ? {
                   type: 'section',
@@ -218,31 +344,7 @@ export const getChartCsvResultsBlocks = ({
             ]),
             accessory: lightdashLink,
         },
-
-        csvUrl?.trim()
-            ? {
-                  type: 'actions',
-                  elements: [
-                      {
-                          type: 'button',
-                          text: {
-                              type: 'plain_text',
-                              text: 'Download results',
-                              emoji: true,
-                          },
-                          url: csvUrl,
-                          action_id: 'download-results',
-                      },
-                  ],
-              }
-            : {
-                  type: 'section',
-                  text: {
-                      type: 'mrkdwn',
-                      text: '*_This query returned no results_*',
-                  },
-              },
-
+        downloadActions,
         footerMarkdown?.trim()
             ? {
                   type: 'context',
@@ -266,7 +368,7 @@ type GetChartThresholdBlocksArgs = {
     message?: string;
     description: string | undefined;
     ctaUrl: string;
-    imageUrl?: string;
+    image?: SlackChartImage;
     footerMarkdown?: string;
     thresholds: ThresholdOptions[];
     includeLinks?: boolean;
@@ -276,7 +378,7 @@ export const getChartThresholdAlertBlocks = ({
     title,
     message,
     description,
-    imageUrl,
+    image,
     ctaUrl,
     thresholds,
     footerMarkdown,
@@ -284,19 +386,20 @@ export const getChartThresholdAlertBlocks = ({
 }: GetChartThresholdBlocksArgs): KnownBlock[] => {
     // TODO only pass threshold conditions met
     // TODO send field name from explore or results (instead of friendly name)
-    const lightdashLink: SectionBlockAccessory | undefined =
-        includeLinks === false
-            ? undefined
-            : {
-                  type: 'button',
-                  text: {
-                      type: 'plain_text',
-                      text: 'Open in Lightdash',
-                      emoji: true,
-                  },
-                  url: ctaUrl,
-                  action_id: 'button-action',
-              };
+    const safeCtaUrl = includeLinks === false ? undefined : safeUrl(ctaUrl);
+    const lightdashLink: SectionBlockAccessory | undefined = safeCtaUrl
+        ? {
+              type: 'button',
+              text: {
+                  type: 'plain_text',
+                  text: 'Open in Lightdash',
+                  emoji: true,
+              },
+              url: safeCtaUrl,
+              action_id: 'button-action',
+          }
+        : undefined;
+    const headerText = sanitizeHeaderText(title);
     const thresholdBlocks: KnownBlock[] = thresholds.map((threshold) => ({
         type: 'section',
         text: {
@@ -312,16 +415,15 @@ export const getChartThresholdAlertBlocks = ({
         },
     }));
     return getBlocks([
-        {
-            type: 'header',
-            text: {
-                type: 'plain_text',
-                text: truncateText(
-                    sanitizeText(title),
-                    SLACK_LIMITS.HEADER_TEXT,
-                ),
-            },
-        },
+        headerText
+            ? {
+                  type: 'header',
+                  text: {
+                      type: 'plain_text',
+                      text: headerText,
+                  },
+              }
+            : undefined,
         message?.trim()
             ? {
                   type: 'section',
@@ -349,16 +451,7 @@ export const getChartThresholdAlertBlocks = ({
             accessory: lightdashLink,
         },
         ...thresholdBlocks,
-        imageUrl?.trim()
-            ? {
-                  type: 'image',
-                  image_url: imageUrl,
-                  alt_text: truncateText(
-                      sanitizeText(title),
-                      SLACK_LIMITS.ALT_TEXT,
-                  ),
-              }
-            : undefined,
+        buildChartImageBlock(image, title),
         footerMarkdown?.trim()
             ? {
                   type: 'context',
@@ -384,6 +477,7 @@ type GetDashboardCsvResultsBlocksArgs = {
     csvUrls: AttachmentUrl[];
     footerMarkdown?: string;
     failures?: PartialFailure[];
+    notices?: DeliveryNotice[];
 };
 export const getDashboardCsvResultsBlocks = ({
     title,
@@ -394,6 +488,7 @@ export const getDashboardCsvResultsBlocks = ({
     footerMarkdown,
     ctaUrl,
     failures,
+    notices,
 }: GetDashboardCsvResultsBlocksArgs): KnownBlock[] => {
     const getFailureBlock = ():
         | { type: 'section'; text: { type: 'mrkdwn'; text: string } }
@@ -414,6 +509,18 @@ export const getDashboardCsvResultsBlocks = ({
                             )}:* ${sanitizeText(f.error)}`;
                         case PartialFailureType.MISSING_TARGETS:
                             return `\t• No targets found for this scheduled delivery`;
+                        case PartialFailureType.AI_AUGMENTATION:
+                            return `\t• AI summary could not be generated`;
+                        case PartialFailureType.APP_QUERY:
+                            return `\t• *${sanitizeText(
+                                f.label,
+                            )}:* ${sanitizeText(f.error)}`;
+                        case PartialFailureType.APP_QUERY_MISSING:
+                            return `\t• ${sanitizeText(
+                                f.label,
+                            )}: did not run in this delivery`;
+                        case PartialFailureType.APP_CAPTURE_OVERFLOW:
+                            return `\t• ${f.droppedCount} queries were dropped from capture (limit ${MAX_DELIVERY_QUERIES})`;
                         default:
                             return assertUnreachable(
                                 f,
@@ -444,6 +551,18 @@ export const getDashboardCsvResultsBlocks = ({
                         )}: ${sanitizeText(f.error)}`;
                     case PartialFailureType.MISSING_TARGETS:
                         return `\t• No targets found for this scheduled delivery`;
+                    case PartialFailureType.AI_AUGMENTATION:
+                        return `\t• AI summary could not be generated`;
+                    case PartialFailureType.APP_QUERY:
+                        return `\t• ${sanitizeText(
+                            f.label,
+                        )}: ${sanitizeText(f.error)}`;
+                    case PartialFailureType.APP_QUERY_MISSING:
+                        return `\t• ${sanitizeText(
+                            f.label,
+                        )}: did not run in this delivery`;
+                    case PartialFailureType.APP_CAPTURE_OVERFLOW:
+                        return `\t• ${f.droppedCount} queries were dropped from capture (limit ${MAX_DELIVERY_QUERIES})`;
                     default:
                         return assertUnreachable(
                             f,
@@ -457,24 +576,174 @@ export const getDashboardCsvResultsBlocks = ({
             text: {
                 type: 'mrkdwn',
                 text: truncateText(
-                    `:warning: *Warning:* ${failures.length} chart(s) failed to export:\n${errorText}`,
+                    `:warning: *Warning:* ${buildFailureCountPhrase(
+                        failures,
+                    )} failed to export:\n${errorText}`,
                     SLACK_LIMITS.SECTION_TEXT,
                 ),
             },
         };
     };
 
-    return getBlocks([
-        {
-            type: 'header',
+    const getNoticesBlock = ():
+        | { type: 'section'; text: { type: 'mrkdwn'; text: string } }
+        | undefined => {
+        if (!notices || notices.length === 0) {
+            return undefined;
+        }
+        const noticeText = notices
+            .map(
+                (n) =>
+                    `\t• ${sanitizeText(
+                        n.label,
+                    )} reached its query limit; additional rows may exist (${
+                        n.rowCount
+                    } rows delivered)`,
+            )
+            .join('\n');
+        return {
+            type: 'section',
             text: {
-                type: 'plain_text',
+                type: 'mrkdwn',
                 text: truncateText(
-                    sanitizeText(title),
-                    SLACK_LIMITS.HEADER_TEXT,
+                    `:information_source: ${noticeText}`,
+                    SLACK_LIMITS.SECTION_TEXT,
                 ),
             },
-        },
+        };
+    };
+
+    const safeCtaUrl = safeUrl(ctaUrl);
+    const headerText = sanitizeHeaderText(title);
+
+    // App deliveries carry the query label; dashboards fall back to the
+    // (timestamped) download filename.
+    const displayName = (csvUrl: AttachmentUrl): string =>
+        csvUrl.chartName ?? csvUrl.filename;
+
+    const perChartBlock = (
+        csvUrl: AttachmentUrl,
+        index: number,
+    ): KnownBlock => {
+        if (csvUrl.path === '#no-results') {
+            return {
+                type: 'section',
+                text: {
+                    type: 'mrkdwn',
+                    text: '*_This query returned no results_*',
+                },
+            };
+        }
+        const safeDownloadUrl = safeUrl(csvUrl.path);
+        if (safeDownloadUrl) {
+            return {
+                type: 'section',
+                text: {
+                    type: 'mrkdwn',
+                    text: truncateText(
+                        `:black_small_square: ${sanitizeText(
+                            displayName(csvUrl),
+                        )}`,
+                        SLACK_LIMITS.SECTION_TEXT,
+                    ),
+                },
+                accessory: {
+                    type: 'button',
+                    text: {
+                        type: 'plain_text',
+                        text: 'Download results',
+                        emoji: true,
+                    },
+                    url: safeDownloadUrl,
+                    action_id: `download-results-${index}`,
+                },
+            };
+        }
+        return {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: truncateText(
+                    `:warning: ${sanitizeText(
+                        displayName(csvUrl),
+                    )} — download unavailable. Open in Lightdash to access this result.`,
+                    SLACK_LIMITS.SECTION_TEXT,
+                ),
+            },
+        };
+    };
+
+    // When the dashboard has too many charts, n per-chart blocks would push
+    // the message past Slack's 50-block hard cap. Collapse into a single
+    // grouped section listing each filename as a clickable mrkdwn link to its
+    // download URL, with one CTA so delivery still succeeds.
+    //
+    // The budget leaves headroom for the trailing "+ N more" summary line plus
+    // mrkdwn syntax so we never need to truncate mid-link (which would emit
+    // malformed mrkdwn and re-trigger invalid_blocks).
+    const COLLAPSE_TEXT_BUDGET = SLACK_LIMITS.SECTION_TEXT - 200;
+    const buildCsvRow = (u: AttachmentUrl): string => {
+        const label = sanitizeText(displayName(u));
+        const downloadUrl = safeUrl(u.path);
+        return downloadUrl
+            ? `:black_small_square: <${downloadUrl}|${label}>`
+            : `:warning: ${label} — download unavailable`;
+    };
+    const buildCollapsedSection = (): KnownBlock => {
+        const lines: string[] = [];
+        let used = 0;
+        let included = 0;
+        for (const u of csvUrls) {
+            const line = buildCsvRow(u);
+            const cost = line.length + 1; // +1 for the joining newline
+            if (used + cost > COLLAPSE_TEXT_BUDGET) break;
+            lines.push(line);
+            used += cost;
+            included += 1;
+        }
+        const remaining = csvUrls.length - included;
+        if (remaining > 0) {
+            lines.push(
+                `\n+ ${remaining} more — open in Lightdash to access all downloads.`,
+            );
+        }
+        return {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: truncateText(lines.join('\n'), SLACK_LIMITS.SECTION_TEXT),
+            },
+            ...(safeCtaUrl
+                ? {
+                      accessory: {
+                          type: 'button',
+                          text: {
+                              type: 'plain_text',
+                              text: 'Open in Lightdash',
+                              emoji: true,
+                          },
+                          url: safeCtaUrl,
+                          action_id: 'open-in-lightdash',
+                      },
+                  }
+                : {}),
+        };
+    };
+    const csvSections: KnownBlock[] =
+        csvUrls.length > DASHBOARD_CSV_COLLAPSE_THRESHOLD
+            ? [buildCollapsedSection()]
+            : csvUrls.map<KnownBlock>(perChartBlock);
+
+    return getBlocks([
+        headerText
+            ? {
+                  type: 'header',
+                  text: {
+                      type: 'plain_text',
+                      text: headerText,
+                  },
+              }
+            : undefined,
         message?.trim()
             ? {
                   type: 'section',
@@ -493,50 +762,24 @@ export const getDashboardCsvResultsBlocks = ({
                 ['name', name],
                 ['description', description],
             ]),
-            accessory: {
-                type: 'button',
-                text: {
-                    type: 'plain_text',
-                    text: 'Open in Lightdash',
-                    emoji: true,
-                },
-                url: ctaUrl,
-                action_id: 'button-action',
-            },
-        },
-        ...csvUrls.map<KnownBlock>((csvUrl, index) =>
-            csvUrl.path !== '#no-results'
+            ...(safeCtaUrl
                 ? {
-                      type: 'section',
-                      text: {
-                          type: 'mrkdwn',
-                          text: truncateText(
-                              `:black_small_square: ${sanitizeText(
-                                  csvUrl.filename,
-                              )}`,
-                              SLACK_LIMITS.SECTION_TEXT,
-                          ),
-                      },
                       accessory: {
                           type: 'button',
                           text: {
                               type: 'plain_text',
-                              text: 'Download results',
+                              text: 'Open in Lightdash',
                               emoji: true,
                           },
-                          url: csvUrl.path,
-                          action_id: `download-results-${index}`,
+                          url: safeCtaUrl,
+                          action_id: 'button-action',
                       },
                   }
-                : {
-                      type: 'section',
-                      text: {
-                          type: 'mrkdwn',
-                          text: '*_This query returned no results_*',
-                      },
-                  },
-        ),
+                : {}),
+        },
+        ...csvSections,
         getFailureBlock(),
+        getNoticesBlock(),
         footerMarkdown?.trim()
             ? {
                   type: 'context',
@@ -558,8 +801,10 @@ const getExploreBlocks = (
     title: string,
     ctaUrl: string,
     imageUrl: string | undefined,
-): KnownBlock[] =>
-    getBlocks([
+): KnownBlock[] => {
+    const safeCtaUrl = safeUrl(ctaUrl);
+    const safeImageUrl = safeUrl(imageUrl);
+    return getBlocks([
         {
             type: 'section',
             text: {
@@ -569,21 +814,25 @@ const getExploreBlocks = (
                     SLACK_LIMITS.SECTION_TEXT,
                 ),
             },
-            accessory: {
-                type: 'button',
-                text: {
-                    type: 'plain_text',
-                    text: 'Open in Lightdash',
-                    emoji: true,
-                },
-                url: ctaUrl,
-                action_id: 'button-action',
-            },
+            ...(safeCtaUrl
+                ? {
+                      accessory: {
+                          type: 'button',
+                          text: {
+                              type: 'plain_text',
+                              text: 'Open in Lightdash',
+                              emoji: true,
+                          },
+                          url: safeCtaUrl,
+                          action_id: 'button-action',
+                      },
+                  }
+                : {}),
         },
-        imageUrl?.trim()
+        safeImageUrl
             ? {
                   type: 'image',
-                  image_url: imageUrl,
+                  image_url: safeImageUrl,
                   alt_text: truncateText(
                       sanitizeText(title),
                       SLACK_LIMITS.ALT_TEXT,
@@ -591,6 +840,7 @@ const getExploreBlocks = (
               }
             : undefined,
     ]);
+};
 
 export type Unfurl = {
     title: string;
@@ -600,6 +850,7 @@ export type Unfurl = {
     pageType: LightdashPage;
     minimalUrl: string;
     organizationUuid: string;
+    projectUuid: string | undefined;
     resourceUuid: string | undefined;
     chartTileUuids?: (string | null)[];
     sqlChartTileUuids?: (string | null)[];
@@ -617,11 +868,37 @@ export const getUnfurlBlocks = (
                 : getChartAndDashboardBlocks({
                       title: unfurl.title,
                       description: unfurl.description,
-                      imageUrl: unfurl.imageUrl,
+                      image: unfurl.imageUrl
+                          ? { source: 'url', url: unfurl.imageUrl }
+                          : undefined,
                       ctaUrl: originalUrl,
                   }),
     },
 });
+
+export const getDeliveryFailureRecipientBlocks = (
+    contentName: string | null,
+    contactSentence: string | null,
+): KnownBlock[] => {
+    const baseSentence = contentName
+        ? `The scheduled delivery for *"${sanitizeText(
+              contentName,
+          )}"* failed to run, and the delivery owner has been notified.`
+        : 'A scheduled delivery failed to run, and the delivery owner has been notified.';
+    const appended = contactSentence ? ` ${sanitizeText(contactSentence)}` : '';
+    return [
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: truncateText(
+                    `${baseSentence}${appended}`,
+                    SLACK_LIMITS.SECTION_TEXT,
+                ),
+            },
+        },
+    ];
+};
 
 export const getNotificationChannelErrorBlocks = (
     schedulerName: string,
@@ -629,20 +906,21 @@ export const getNotificationChannelErrorBlocks = (
     resourceUrl: string,
     type: 'Scheduled delivery' | 'Google Sync' = 'Scheduled delivery',
     isDisabled: boolean = false,
-): KnownBlock[] =>
-    getBlocks([
-        {
-            type: 'header',
-            text: {
-                type: 'plain_text',
-                text: truncateText(
-                    `❌ Error sending ${type}: "${sanitizeText(
-                        schedulerName,
-                    )}"`,
-                    SLACK_LIMITS.HEADER_TEXT,
-                ),
-            },
-        },
+): KnownBlock[] => {
+    const headerText = sanitizeHeaderText(
+        `❌ Error sending ${type}: "${sanitizeText(schedulerName)}"`,
+    );
+    const safeResourceUrl = safeUrl(resourceUrl);
+    return getBlocks([
+        headerText
+            ? {
+                  type: 'header',
+                  text: {
+                      type: 'plain_text',
+                      text: headerText,
+                  },
+              }
+            : undefined,
 
         {
             type: 'section',
@@ -650,16 +928,20 @@ export const getNotificationChannelErrorBlocks = (
                 type: 'mrkdwn',
                 text: `*Details:*`,
             },
-            accessory: {
-                type: 'button',
-                text: {
-                    type: 'plain_text',
-                    text: 'Open in Lightdash',
-                    emoji: true,
-                },
-                url: resourceUrl,
-                action_id: 'button-action',
-            },
+            ...(safeResourceUrl
+                ? {
+                      accessory: {
+                          type: 'button',
+                          text: {
+                              type: 'plain_text',
+                              text: 'Open in Lightdash',
+                              emoji: true,
+                          },
+                          url: safeResourceUrl,
+                          action_id: 'button-action',
+                      },
+                  }
+                : {}),
         },
         {
             type: 'section',
@@ -686,3 +968,4 @@ export const getNotificationChannelErrorBlocks = (
               }
             : undefined,
     ]);
+};

@@ -40,6 +40,19 @@ export const fetchSavedSqlChart = async ({
         body: undefined,
     });
 
+export const fetchEmbedDashboardSqlChartTile = async ({
+    projectUuid,
+    tileUuid,
+}: {
+    projectUuid: string;
+    tileUuid: string;
+}) =>
+    lightdashApi<SqlChart>({
+        url: `/embed/${projectUuid}/sql-chart-tile/${tileUuid}`,
+        method: 'GET',
+        body: undefined,
+    });
+
 const createSavedSqlChart = async (projectUuid: string, data: CreateSqlChart) =>
     lightdashApi<ApiCreateSqlChart['results']>({
         url: `/projects/${projectUuid}/sqlRunner/saved`,
@@ -71,7 +84,15 @@ export const useSavedSqlChart = (
     });
 };
 
-export const useCreateSqlChartMutation = (projectUuid: string) => {
+export const useCreateSqlChartMutation = (
+    projectUuid: string,
+    options: {
+        redirectOnSuccess?: boolean;
+        onSuccess?: (
+            data: ApiCreateSqlChart['results'],
+        ) => void | Promise<void>;
+    } = {},
+) => {
     const { showToastSuccess, showToastApiError } = useToaster();
     const navigate = useNavigate();
 
@@ -79,10 +100,14 @@ export const useCreateSqlChartMutation = (projectUuid: string) => {
         (data) => createSavedSqlChart(projectUuid, data),
         {
             mutationKey: ['sqlRunner', 'createSqlChart', projectUuid],
-            onSuccess: (data) => {
-                void navigate(
-                    `/projects/${projectUuid}/sql-runner/${data.slug}`,
-                );
+            onSuccess: async (data) => {
+                await options.onSuccess?.(data);
+
+                if (options.redirectOnSuccess ?? true) {
+                    void navigate(
+                        `/projects/${projectUuid}/sql-runner/${data.slug}`,
+                    );
+                }
 
                 showToastSuccess({
                     title: `Success! SQL chart created`,

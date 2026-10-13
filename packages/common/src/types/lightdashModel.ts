@@ -50,7 +50,10 @@ export type LightdashModelMetric = DbtColumnLightdashMetric;
 export type LightdashModelExplore = {
     label?: string;
     description?: string;
+    tags?: string | string[];
+    /** @deprecated Use groups instead */
     group_label?: string;
+    groups?: string[];
     joins?: DbtModelJoin[]; // Reuses DbtModelJoin directly
     required_filters?: RequiredFilter[];
     default_filters?: RequiredFilter[];
@@ -84,4 +87,9 @@ export type LightdashModel = Omit<
     joins?: DbtModelJoin[]; // Reuses DbtModelJoin directly
     explores?: Record<string, LightdashModelExplore>; // Override to use RequiredFilter
     dimensions: LightdashModelDimension[]; // Required: array of dimensions with types
+};
+
+export type LightdashModelWithSource = LightdashModel & {
+    /** Path relative to the project directory, retained for source editing. */
+    sourcePath: string;
 };

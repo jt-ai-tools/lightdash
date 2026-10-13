@@ -2,8 +2,11 @@ import {
     FeatureFlags,
     isOrganizationMemberProfileWithGroups,
     OrganizationMemberRole,
+    OrganizationMemberRoleLabels,
     type OrganizationMemberProfile,
     type OrganizationMemberProfileWithGroups,
+    type OrganizationRoleSet,
+    type Role,
 } from '@lightdash/common';
 import {
     Badge,
@@ -15,21 +18,9 @@ import {
     Stack,
     Text,
     useMantineTheme,
-} from '@mantine-8/core';
-import { useDebouncedValue } from '@mantine/hooks';
-import {
-    IconArrowDown,
-    IconArrowsSort,
-    IconArrowUp,
-    IconUserCircle,
-} from '@tabler/icons-react';
-import capitalize from 'lodash/capitalize';
-import {
-    MantineReactTable,
-    useMantineReactTable,
-    type MRT_ColumnDef,
-    type MRT_Virtualizer,
-} from 'mantine-react-table';
+} from '@mantine/core';
+import { useDebouncedValue, useMediaQuery } from '@mantine/hooks';
+import { IconUserCircle } from '@tabler/icons-react';
 import {
     useCallback,
     useEffect,
@@ -37,36 +28,59 @@ import {
     useRef,
     useState,
     type FC,
-    type UIEvent,
 } from 'react';
+import { OrganizationRoleSetCell } from '../../../features/roleSets/components/OrganizationRoleSetCell';
+import {
+    useMultipleRolesEnabled,
+    useReplaceOrganizationUserRoleSetMutation,
+} from '../../../features/roleSets/hooks/useRoleSets';
+import { useInfiniteScroll } from '../../../hooks/useInfiniteScroll';
 import { useCreateInviteLinkMutation } from '../../../hooks/useInviteLink';
-import { useUpsertOrganizationUserRoleAssignmentMutation } from '../../../hooks/useOrganizationRoles';
+import {
+    useOrganizationRoles,
+    useUpsertOrganizationUserRoleAssignmentMutation,
+} from '../../../hooks/useOrganizationRoles';
 import { useInfiniteOrganizationUsers } from '../../../hooks/useOrganizationUsers';
 import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import useApp from '../../../providers/App/useApp';
+import {
+    ContentTable,
+    useContentTable,
+    type ContentTableColumnDef,
+    type ContentTableVirtualizer,
+} from '../../common/ContentTable';
 import MantineIcon from '../../common/MantineIcon';
+import ConfirmAdminSelfDowngradeModal from './ConfirmAdminSelfDowngradeModal';
 import InviteSuccess from './InviteSuccess';
 import UsersActionMenu from './UsersActionMenu';
 import { UsersTopToolbar } from './UsersTopToolbar';
 
 const fetchSize = 50;
 
-interface UsersTableProps {
-    onInviteClick: () => void;
-}
+type PendingRoleChange =
+    | { userId: string; roleId: string }
+    | { userId: string; roleSet: OrganizationRoleSet };
 
-const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
+const UsersTable: FC = () => {
     const theme = useMantineTheme();
+    const isCompact = useMediaQuery(
+        `(width < ${theme.breakpoints.sm})`,
+        undefined,
+        { getInitialValueInEffect: false },
+    );
     const { user: activeUser } = useApp();
-    const tableContainerRef = useRef<HTMLDivElement>(null);
     const rowVirtualizerInstanceRef =
-        useRef<MRT_Virtualizer<HTMLDivElement, HTMLTableRowElement>>(null);
+        useRef<ContentTableVirtualizer<HTMLDivElement, HTMLTableRowElement>>(
+            null,
+        );
 
     const [search, setSearch] = useState('');
     const inviteLink = useCreateInviteLinkMutation();
     const [inviteSuccessFor, setInviteSuccessFor] = useState<string | null>(
         null,
     );
+    const [pendingRoleChange, setPendingRoleChange] =
+        useState<PendingRoleChange | null>(null);
 
     // Callback to handle when an invite is sent
     const handleInviteSent = useCallback((userUuid: string) => {
@@ -89,7 +103,7 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
     const [debouncedSearchValue] = useDebouncedValue(debouncedSearch, 300);
 
     // Use infinite query for pagination
-    const { data, fetchNextPage, isError, isFetching, isLoading } =
+    const { data, fetchNextPage, hasNextPage, isError, isFetching, isLoading } =
         useInfiniteOrganizationUsers({
             searchInput: debouncedSearchValue.search,
             includeGroups: isGroupManagementEnabled ? 10000 : undefined,
@@ -103,67 +117,136 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
     const totalDBRowCount = data?.pages?.[0]?.pagination?.totalResults ?? 0;
     const totalFetched = flatData.length;
 
-    // Temporary workaround to resolve a memoization issue with react-mantine-table
-    const [tableData, setTableData] = useState<
-        (OrganizationMemberProfile | OrganizationMemberProfileWithGroups)[]
-    >([]);
-    useEffect(() => {
-        setTableData(flatData);
-    }, [flatData]);
-
-    // Callback to fetch more data when scrolling
-    const fetchMoreOnBottomReached = useCallback(
-        (containerRefElement?: HTMLDivElement | null) => {
-            if (containerRefElement) {
-                const { scrollHeight, scrollTop, clientHeight } =
-                    containerRefElement;
-                // Fetch more when within 400px of bottom
-                if (
-                    scrollHeight - scrollTop - clientHeight < 400 &&
-                    !isFetching &&
-                    totalFetched < totalDBRowCount
-                ) {
-                    void fetchNextPage();
-                }
-            }
-        },
-        [fetchNextPage, isFetching, totalFetched, totalDBRowCount],
-    );
+    const {
+        containerRef: tableContainerRef,
+        onScroll,
+        scrollToTop,
+    } = useInfiniteScroll({
+        fetchNextPage,
+        isFetching,
+        hasMore: totalFetched < totalDBRowCount,
+        threshold: 400,
+    });
 
     // Scroll to top when search changes
     useEffect(() => {
-        if (tableContainerRef.current) {
-            tableContainerRef.current.scrollTop = 0;
-        }
-    }, [debouncedSearchValue]);
-
-    // Check on mount if table needs initial fetch
-    useEffect(() => {
-        fetchMoreOnBottomReached(tableContainerRef.current);
-    }, [fetchMoreOnBottomReached]);
+        scrollToTop();
+    }, [debouncedSearchValue, scrollToTop]);
 
     const updateUserRole = useUpsertOrganizationUserRoleAssignmentMutation();
+    const replaceRoleSet = useReplaceOrganizationUserRoleSetMutation();
+    const multipleRolesEnabled = useMultipleRolesEnabled();
+    const organizationRolesQuery = useOrganizationRoles();
+
+    const handleRoleChange = useCallback(
+        (user: OrganizationMemberProfile, newRole: string) => {
+            const isCurrentUser = activeUser.data?.userUuid === user.userUuid;
+            const isAdminSelfDowngrade =
+                isCurrentUser &&
+                user.role === OrganizationMemberRole.ADMIN &&
+                newRole !== OrganizationMemberRole.ADMIN;
+
+            if (isAdminSelfDowngrade) {
+                setPendingRoleChange({
+                    userId: user.userUuid,
+                    roleId: newRole,
+                });
+                return;
+            }
+
+            updateUserRole.mutate({
+                userId: user.userUuid,
+                roleId: newRole,
+            });
+        },
+        [activeUser.data?.userUuid, updateUserRole],
+    );
+
+    const handleRoleSetChange = useCallback(
+        (user: OrganizationMemberProfile, roleSet: OrganizationRoleSet) => {
+            const isCurrentUser = activeUser.data?.userUuid === user.userUuid;
+            const isAdminSelfDowngrade =
+                isCurrentUser &&
+                user.role === OrganizationMemberRole.ADMIN &&
+                roleSet.systemRole !== OrganizationMemberRole.ADMIN;
+
+            if (isAdminSelfDowngrade) {
+                setPendingRoleChange({ userId: user.userUuid, roleSet });
+                return;
+            }
+            replaceRoleSet.mutate({ userUuid: user.userUuid, roleSet });
+        },
+        [activeUser.data?.userUuid, replaceRoleSet],
+    );
+
+    const handleConfirmAdminSelfDowngrade = useCallback(() => {
+        if (!pendingRoleChange) {
+            return;
+        }
+        const onSuccess = () => setPendingRoleChange(null);
+        if ('roleSet' in pendingRoleChange) {
+            replaceRoleSet.mutate(
+                {
+                    userUuid: pendingRoleChange.userId,
+                    roleSet: pendingRoleChange.roleSet,
+                },
+                { onSuccess },
+            );
+            return;
+        }
+        updateUserRole.mutate(pendingRoleChange, { onSuccess });
+    }, [pendingRoleChange, updateUserRole, replaceRoleSet]);
+
+    const organizationRoleOptions = useMemo(() => {
+        const systemRoles = Object.values(OrganizationMemberRole).map(
+            (orgMemberRole) => ({
+                value: orgMemberRole,
+                label: OrganizationMemberRoleLabels[orgMemberRole],
+            }),
+        );
+        const customRoles =
+            organizationRolesQuery.data
+                ?.filter(
+                    (role: Role) =>
+                        role.ownerType === 'user' &&
+                        role.level === 'organization',
+                )
+                .map((role: Role) => ({
+                    value: role.roleUuid,
+                    label: role.name,
+                })) ?? [];
+
+        return customRoles.length > 0
+            ? [
+                  { group: 'System roles', items: systemRoles },
+                  { group: 'Custom roles', items: customRoles },
+              ]
+            : systemRoles;
+    }, [organizationRolesQuery.data]);
 
     const canManageUsers =
         activeUser.data?.ability?.can('manage', 'OrganizationMemberProfile') ??
         false;
     const canInvite =
         activeUser.data?.ability?.can('create', 'InviteLink') ?? false;
+    const canImpersonate =
+        activeUser.data?.ability?.can('impersonate', 'User') ?? false;
+    const showActions = canManageUsers || canInvite || canImpersonate;
 
-    const columns: MRT_ColumnDef<
+    const columns: ContentTableColumnDef<
         OrganizationMemberProfile | OrganizationMemberProfileWithGroups
     >[] = useMemo(() => {
-        const cols: MRT_ColumnDef<
+        const cols: ContentTableColumnDef<
             OrganizationMemberProfile | OrganizationMemberProfileWithGroups
         >[] = [
             {
                 accessorKey: 'email',
                 header: 'User',
                 enableSorting: false,
-                size: 300,
+                size: isCompact ? 180 : 300,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconUserCircle} color="ldGray.6" />
+                        <MantineIcon icon={IconUserCircle} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -178,14 +261,12 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
                         <Stack gap="xs">
                             {!user.isActive ? (
                                 <Stack gap="xxs" align="flex-start">
-                                    <Text fw={600} fz="sm" c="ldGray.6">
+                                    <Text fw={600} fz="sm" c="dimmed">
                                         {user.firstName
                                             ? `${user.firstName} ${user.lastName}`
                                             : user.email}
                                     </Text>
-                                    <Badge variant="light" color="red">
-                                        Inactive
-                                    </Badge>
+                                    <Badge color="red">Inactive</Badge>
                                 </Stack>
                             ) : user.isPending ? (
                                 <Stack gap="xxs" align="flex-start">
@@ -195,7 +276,7 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
                                         </Text>
                                     )}
                                     <Group gap="xs">
-                                        <Badge variant="light" color="orange">
+                                        <Badge color="orange">
                                             {!user.isInviteExpired
                                                 ? 'Pending'
                                                 : 'Link expired'}
@@ -208,11 +289,7 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
                                         {user.firstName} {user.lastName}
                                     </Text>
 
-                                    {user.email && (
-                                        <Badge variant="light" color="gray">
-                                            {user.email}
-                                        </Badge>
-                                    )}
+                                    {user.email && <Badge>{user.email}</Badge>}
                                 </Stack>
                             )}
                             {showInviteSuccess && (
@@ -236,28 +313,34 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
                 accessorKey: 'role',
                 header: 'Role',
                 enableSorting: false,
-                size: 200,
+                size: isCompact ? 130 : 200,
                 Cell: ({ row }) => {
                     const user = row.original;
+                    if (multipleRolesEnabled) {
+                        return (
+                            <OrganizationRoleSetCell
+                                user={user}
+                                organizationRoles={organizationRolesQuery.data}
+                                disabled={
+                                    organizationRolesQuery.isLoading ||
+                                    replaceRoleSet.isLoading
+                                }
+                                onChange={(roleSet) =>
+                                    handleRoleSetChange(user, roleSet)
+                                }
+                            />
+                        );
+                    }
                     return (
                         <Select
-                            data={Object.values(OrganizationMemberRole).map(
-                                (orgMemberRole) => ({
-                                    value: orgMemberRole,
-                                    label: capitalize(
-                                        orgMemberRole.replace('_', ' '),
-                                    ),
-                                }),
-                            )}
+                            data={organizationRoleOptions}
                             onChange={(newRole: string | null) => {
                                 if (newRole) {
-                                    updateUserRole.mutate({
-                                        userId: user.userUuid,
-                                        roleId: newRole,
-                                    });
+                                    handleRoleChange(user, newRole);
                                 }
                             }}
-                            value={user.role}
+                            value={user.roleUuid ?? user.role}
+                            disabled={organizationRolesQuery.isLoading}
                             w={180}
                             size="xs"
                         />
@@ -265,7 +348,7 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
                 },
             });
 
-            if (isGroupManagementEnabled) {
+            if (isGroupManagementEnabled && !isCompact) {
                 cols.push({
                     accessorKey: 'groups',
                     header: 'Groups',
@@ -278,26 +361,23 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
                             !user.groups
                         ) {
                             return (
-                                <Text fz="sm" c="ldGray.6">
+                                <Text fz="sm" c="dimmed">
                                     0 groups
                                 </Text>
                             );
                         }
 
                         return (
-                            <HoverCard
-                                shadow="sm"
-                                disabled={user.groups.length < 1}
-                            >
+                            <HoverCard disabled={user.groups.length < 1}>
                                 <HoverCard.Target>
-                                    <Text fz="sm" c="ldGray.6">
+                                    <Text fz="sm" c="dimmed">
                                         {`${user.groups.length} group${
                                             user.groups.length !== 1 ? 's' : ''
                                         }`}
                                     </Text>
                                 </HoverCard.Target>
                                 <HoverCard.Dropdown p="sm">
-                                    <Text fz="xs" fw={600} c="ldGray.6">
+                                    <Text fz="xs" fw={600} c="dimmed">
                                         User groups:
                                     </Text>
                                     <List size="xs" ml="xs" mt="xs" fz="xs">
@@ -313,17 +393,19 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
                     },
                 });
             }
+        }
 
+        if (showActions) {
             cols.push({
                 id: 'actions',
                 header: '',
                 enableSorting: false,
-                size: 50,
+                size: isCompact ? 44 : 50,
                 Cell: ({ row }) => {
                     const user = row.original;
                     const isCurrentUser =
                         activeUser.data?.userUuid === user.userUuid;
-                    const disabled = isCurrentUser || tableData.length < 1;
+                    const disabled = isCurrentUser || flatData.length < 1;
 
                     return (
                         <Box
@@ -337,6 +419,7 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
                                 user={user}
                                 disabled={disabled}
                                 canInvite={canInvite}
+                                canDelete={canManageUsers}
                                 inviteLink={inviteLink}
                                 onInviteSent={handleInviteSent}
                             />
@@ -349,57 +432,40 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
         return cols;
     }, [
         canManageUsers,
+        showActions,
         inviteLink,
         inviteSuccessFor,
         isGroupManagementEnabled,
-        updateUserRole,
+        handleRoleChange,
+        handleRoleSetChange,
+        multipleRolesEnabled,
+        replaceRoleSet.isLoading,
+        organizationRoleOptions,
+        organizationRolesQuery.data,
+        organizationRolesQuery.isLoading,
         activeUser.data?.userUuid,
-        tableData.length,
+        flatData.length,
         canInvite,
         handleInviteSent,
+        isCompact,
     ]);
 
-    const table = useMantineReactTable({
+    const table = useContentTable({
         columns,
-        data: tableData,
+        data: flatData,
         enableColumnResizing: false,
-        enableRowNumbers: false,
         enablePagination: false,
-        enableFilters: false,
-        enableFullScreenToggle: false,
-        enableDensityToggle: false,
-        enableColumnActions: false,
-        enableColumnFilters: false,
-        enableHiding: false,
-        enableGlobalFilterModes: false,
         enableSorting: false,
         enableRowVirtualization: true,
         enableTopToolbar: true,
-        enableBottomToolbar: false,
-        mantinePaperProps: {
-            shadow: undefined,
-            style: {
-                border: `1px solid ${theme.colors.ldGray[2]}`,
-                borderRadius: theme.spacing.sm,
-                boxShadow: theme.shadows.subtle,
-                display: 'flex',
-                flexDirection: 'column',
-            },
-        },
-        mantineTableHeadRowProps: {
-            style: {
-                boxShadow: 'none',
-            },
-        },
         mantineTableContainerProps: {
             ref: tableContainerRef,
             style: { maxHeight: 'calc(100dvh - 420px)' },
-            onScroll: (event: UIEvent<HTMLDivElement>) =>
-                fetchMoreOnBottomReached(event.target as HTMLDivElement),
+            onScroll,
         },
         mantineTableProps: {
             highlightOnHover: true,
-            withColumnBorders: Boolean(tableData.length),
+            withColumnBorders: Boolean(flatData.length),
         },
         mantineTableHeadCellProps: (props) => {
             const isLastColumn =
@@ -412,7 +478,9 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
                 pos: 'relative',
                 style: {
                     userSelect: 'none',
-                    padding: `${theme.spacing.xs} ${theme.spacing.xl}`,
+                    padding: `${theme.spacing.xs} ${
+                        isCompact ? theme.spacing.md : theme.spacing.xl
+                    }`,
                     borderBottom: `1px solid ${theme.colors.ldGray[2]}`,
                     borderRight: props.column.getIsResizing()
                         ? `2px solid ${theme.colors.blue[3]}`
@@ -429,7 +497,9 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
         mantineTableBodyCellProps: () => {
             return {
                 style: {
-                    padding: `${theme.spacing.md} ${theme.spacing.xl}`,
+                    padding: `${theme.spacing.md} ${
+                        isCompact ? theme.spacing.md : theme.spacing.xl
+                    }`,
                     borderRight: 'none',
                     borderLeft: 'none',
                     borderBottom: `1px solid ${theme.colors.ldGray[2]}`,
@@ -438,28 +508,40 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
             };
         },
         renderTopToolbar: () => (
-            <UsersTopToolbar
-                search={search}
-                setSearch={setSearch}
-                isFetching={isFetching || isLoading}
-                currentResultsCount={totalFetched}
-                canInvite={canInvite}
-                onInviteClick={onInviteClick}
-            />
+            <UsersTopToolbar search={search} setSearch={setSearch} />
         ),
-        icons: {
-            IconArrowsSort: () => (
-                <MantineIcon icon={IconArrowsSort} size="md" color="ldGray.5" />
-            ),
-            IconSortAscending: () => (
-                <MantineIcon icon={IconArrowUp} size="md" color="blue.6" />
-            ),
-            IconSortDescending: () => (
-                <MantineIcon icon={IconArrowDown} size="md" color="blue.6" />
-            ),
-        },
+        renderBottomToolbar: () => (
+            <Box
+                p={`${theme.spacing.sm} ${theme.spacing.xl} ${theme.spacing.md} ${theme.spacing.xl}`}
+                fz="xs"
+                fw={500}
+                c="ldGray.8"
+                style={{
+                    borderTop: `1px solid ${theme.colors.ldGray[3]}`,
+                }}
+            >
+                {isFetching ? (
+                    <Text c="ldGray.8" fz="xs">
+                        Loading more...
+                    </Text>
+                ) : (
+                    <Group gap="two">
+                        <Text fz="xs" c="ldGray.8">
+                            {hasNextPage
+                                ? 'Scroll for more users'
+                                : 'All users loaded'}
+                        </Text>
+                        <Text fz="xs" fw={400} c="dimmed">
+                            {hasNextPage
+                                ? `(${totalFetched} of ${totalDBRowCount} loaded)`
+                                : `(${totalFetched})`}
+                        </Text>
+                    </Group>
+                )}
+            </Box>
+        ),
         rowVirtualizerInstanceRef,
-        rowVirtualizerProps: { overscan: 10 },
+        rowVirtualizerProps: { estimateSize: () => 72, overscan: 10 },
         state: {
             isLoading,
             showAlertBanner: isError,
@@ -468,7 +550,17 @@ const UsersTable: FC<UsersTableProps> = ({ onInviteClick }) => {
         },
     });
 
-    return <MantineReactTable table={table} />;
+    return (
+        <>
+            <ContentTable table={table} />
+            <ConfirmAdminSelfDowngradeModal
+                opened={pendingRoleChange !== null}
+                loading={updateUserRole.isLoading || replaceRoleSet.isLoading}
+                onClose={() => setPendingRoleChange(null)}
+                onConfirm={handleConfirmAdminSelfDowngrade}
+            />
+        </>
+    );
 };
 
 export default UsersTable;

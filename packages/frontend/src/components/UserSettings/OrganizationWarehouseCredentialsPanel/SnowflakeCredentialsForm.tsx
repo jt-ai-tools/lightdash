@@ -3,13 +3,14 @@ import {
     Select,
     Stack,
     Switch,
-    TextInput,
     Textarea,
-} from '@mantine-8/core';
+    TextInput,
+} from '@mantine/core';
 import { type UseFormReturnType } from '@mantine/form';
 import { type FC } from 'react';
 import { useToggle } from 'react-use';
 import { SnowflakeOAuthInput } from '../../common/Authentication/SnowflakeOAuthInput';
+import { NumberInput } from '../../common/NumberInput';
 import FormCollapseButton from '../../ProjectConnection/FormCollapseButton';
 import FormSection from '../../ProjectConnection/Inputs/FormSection';
 
@@ -211,6 +212,14 @@ export const SnowflakeCredentialsForm: FC<Props> = ({
                                 value ? parseInt(value) : null,
                             )
                         }
+                    />
+
+                    <NumberInput
+                        size="xs"
+                        label="Timeout in seconds"
+                        description="Sets the maximum execution time for queries. If a query takes longer than this timeout, Snowflake will cancel it."
+                        disabled={disabled}
+                        {...form.getInputProps('credentials.timeoutSeconds')}
                     />
                 </Stack>
             </FormSection>

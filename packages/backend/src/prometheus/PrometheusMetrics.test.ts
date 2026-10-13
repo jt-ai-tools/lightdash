@@ -1,0 +1,418 @@
+import express from 'express';
+import http from 'node:http';
+import prometheus from 'prom-client';
+import { lightdashConfigMock } from '../config/lightdashConfig.mock';
+import Logger from '../logging/logger';
+import PrometheusMetrics, { getHttpUriLabel } from './PrometheusMetrics';
+
+type PartialRequest = Partial<express.Request>;
+
+describe('daily job generation metrics', () => {
+    beforeEach(() => {
+        prometheus.register.clear();
+        vi.spyOn(http.Server.prototype, 'listen').mockImplementation(
+            function mockListen(this: http.Server) {
+                return this;
+            },
+        );
+    });
+
+    afterEach(() => {
+        prometheus.register.clear();
+        vi.restoreAllMocks();
+    });
+
+    it('exports a completion timestamp and counts errors separately by phase', async () => {
+        const metrics = new PrometheusMetrics({
+            ...lightdashConfigMock.prometheus,
+            enabled: true,
+        });
+        metrics.start();
+        const heartbeat = prometheus.register.getSingleMetric(
+            'lightdash_scheduler_daily_job_generation_last_completed_timestamp_seconds',
+        );
+        const errors = prometheus.register.getSingleMetric(
+            'lightdash_scheduler_daily_job_generation_errors_total',
+        );
+        expect(heartbeat).toBeDefined();
+        expect(errors).toBeDefined();
+        expect((await heartbeat!.get()).values).toMatchObject([{ value: 0 }]);
+        expect((await errors!.get()).values).toEqual(
+            ['load_schedulers', 'scheduler', 'pre_aggregate'].map((phase) => ({
+                labels: { phase },
+                value: 0,
+            })),
+        );
+
+        const now = vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+        metrics.recordSchedulerDailyJobGenerationCompleted();
+        metrics.recordSchedulerDailyJobGenerationError('scheduler');
+        metrics.recordSchedulerDailyJobGenerationError('scheduler');
+        metrics.recordSchedulerDailyJobGenerationError('load_schedulers');
+        metrics.recordSchedulerDailyJobGenerationError('pre_aggregate');
+
+        // Scraping later must not advance the heartbeat.
+        now.mockReturnValue(1_800_090_000_000);
+        expect((await heartbeat!.get()).values).toMatchObject([
+            { value: 1_800_000_000 },
+        ]);
+        expect((await errors!.get()).values).toEqual([
+            { labels: { phase: 'load_schedulers' }, value: 1 },
+            { labels: { phase: 'scheduler' }, value: 2 },
+            { labels: { phase: 'pre_aggregate' }, value: 1 },
+        ]);
+        await metrics.stop();
+    });
+
+    it('contains completion metric failures and logs a warning', () => {
+        const metrics = new PrometheusMetrics({
+            ...lightdashConfigMock.prometheus,
+            enabled: true,
+        });
+        metrics.start();
+        const error = new Error('gauge update failed');
+        vi.spyOn(
+            metrics.schedulerDailyJobGenerationLastCompletedTimestamp!,
+            'set',
+        ).mockImplementation(() => {
+            throw error;
+        });
+        const warn = vi.spyOn(Logger, 'warn').mockReturnValue(Logger);
+
+        expect(() =>
+            metrics.recordSchedulerDailyJobGenerationCompleted(),
+        ).not.toThrow();
+        expect(warn).toHaveBeenCalledWith(
+            'Failed to record daily job generation completion',
+            error,
+        );
+    });
+
+    it.each(['load_schedulers', 'scheduler', 'pre_aggregate'] as const)(
+        'contains error metric failures for %s and logs a warning',
+        (phase) => {
+            const metrics = new PrometheusMetrics({
+                ...lightdashConfigMock.prometheus,
+                enabled: true,
+            });
+            metrics.start();
+            const error = new Error('counter update failed');
+            vi.spyOn(
+                metrics.schedulerDailyJobGenerationErrors!,
+                'inc',
+            ).mockImplementation(() => {
+                throw error;
+            });
+            const warn = vi.spyOn(Logger, 'warn').mockReturnValue(Logger);
+
+            expect(() =>
+                metrics.recordSchedulerDailyJobGenerationError(phase),
+            ).not.toThrow();
+            expect(warn).toHaveBeenCalledWith(
+                'Failed to record daily job generation error',
+                error,
+            );
+        },
+    );
+
+    it('does nothing when Prometheus is disabled', () => {
+        const metrics = new PrometheusMetrics(lightdashConfigMock.prometheus);
+        metrics.start();
+        metrics.recordSchedulerDailyJobGenerationCompleted();
+        metrics.recordSchedulerDailyJobGenerationError('scheduler');
+        expect(prometheus.register.getMetricsAsArray()).toEqual([]);
+    });
+});
+
+const buildRequest = (overrides: PartialRequest): express.Request =>
+    overrides as express.Request;
+
+describe('getHttpUriLabel', () => {
+    describe('matched routes', () => {
+        it('returns the templated route path for a TSOA route with a path param', () => {
+            const req = buildRequest({
+                baseUrl: '/api/v1/projects',
+                path: '/3675b69e-8324-4110-bdca-059031aa8da3/spaces',
+                route: {
+                    path: '/:projectUuid/spaces',
+                } as express.Request['route'],
+            });
+            expect(getHttpUriLabel(req)).toBe(
+                '/api/v1/projects/:projectUuid/spaces',
+            );
+        });
+
+        it('collapses different param values into the same label', () => {
+            const route = {
+                path: '/:projectUuid',
+            } as express.Request['route'];
+            const a = getHttpUriLabel(
+                buildRequest({
+                    baseUrl: '/api/v1/projects',
+                    path: '/aaaa',
+                    route,
+                }),
+            );
+            const b = getHttpUriLabel(
+                buildRequest({
+                    baseUrl: '/api/v1/projects',
+                    path: '/bbbb',
+                    route,
+                }),
+            );
+            expect(a).toBe(b);
+            expect(a).toBe('/api/v1/projects/:projectUuid');
+        });
+
+        it('handles a root-mounted route ("/" path)', () => {
+            const req = buildRequest({
+                baseUrl: '/api/v1/health',
+                path: '/',
+                route: { path: '/' } as express.Request['route'],
+            });
+            expect(getHttpUriLabel(req)).toBe('/api/v1/health');
+        });
+
+        it('handles missing baseUrl', () => {
+            const req = buildRequest({
+                baseUrl: '',
+                path: '/livez',
+                route: { path: '/livez' } as express.Request['route'],
+            });
+            expect(getHttpUriLabel(req)).toBe('/livez');
+        });
+    });
+
+    describe('unmatched routes', () => {
+        it('buckets unmatched paths into "unmatched" to cap cardinality', () => {
+            const req = buildRequest({
+                path: '/api/v1/does-not-exist',
+            });
+            expect(getHttpUriLabel(req)).toBe('unmatched');
+        });
+
+        it('buckets attacker scan paths into "unmatched"', () => {
+            const paths = [
+                '/wp-admin',
+                '/.env',
+                '/api/v1/projects/',
+                '/api/v1/projects//spaces',
+            ];
+            for (const path of paths) {
+                expect(getHttpUriLabel(buildRequest({ path }))).toBe(
+                    'unmatched',
+                );
+            }
+        });
+
+        it('buckets static asset requests into "/assets/*"', () => {
+            const req = buildRequest({
+                path: '/assets/main-abc123.js',
+            });
+            expect(getHttpUriLabel(req)).toBe('/assets/*');
+        });
+    });
+});
+
+describe('Project-attributed warehouse phase metrics', () => {
+    beforeEach(() => {
+        prometheus.register.clear();
+    });
+
+    afterEach(() => {
+        prometheus.register.clear();
+    });
+
+    it('observes phase durations with the bounded project dimension', async () => {
+        const metrics = new PrometheusMetrics(lightdashConfigMock.prometheus);
+        const histogram = new prometheus.Histogram({
+            name: 'test_query_warehouse_phase_duration_by_project_seconds',
+            help: 'test',
+            labelNames: ['project_uuid', 'phase', 'warehouse_type', 'context'],
+        });
+        Object.assign(metrics, {
+            projectQueryPhaseDurationHistogram: histogram,
+        });
+
+        metrics.observeProjectQueryPhaseDurations(
+            'project-a',
+            { connect: 100, query: 200 },
+            'postgres',
+            'explore',
+        );
+
+        await expect(histogram.get()).resolves.toMatchObject({
+            values: expect.arrayContaining([
+                expect.objectContaining({
+                    metricName:
+                        'test_query_warehouse_phase_duration_by_project_seconds_sum',
+                    labels: {
+                        project_uuid: 'project-a',
+                        phase: 'connect',
+                        warehouse_type: 'postgres',
+                        context: 'interactive',
+                    },
+                    value: 0.1,
+                }),
+                expect.objectContaining({
+                    metricName:
+                        'test_query_warehouse_phase_duration_by_project_seconds_sum',
+                    labels: {
+                        project_uuid: 'project-a',
+                        phase: 'query',
+                        warehouse_type: 'postgres',
+                        context: 'interactive',
+                    },
+                    value: 0.2,
+                }),
+            ]),
+        });
+    });
+});
+
+describe('MotherDuck instance cache metrics', () => {
+    beforeEach(() => {
+        prometheus.register.clear();
+    });
+
+    afterEach(() => {
+        prometheus.register.clear();
+    });
+
+    it('exposes enough project-scoped signals to evaluate a canary', async () => {
+        const metrics = new PrometheusMetrics(lightdashConfigMock.prometheus);
+        metrics.motherduckCacheAcquisitionCounter = new prometheus.Counter({
+            name: 'test_motherduck_cache_acquisitions_total',
+            help: 'test',
+            labelNames: ['result', 'project_uuid'],
+        });
+        metrics.motherduckCacheInstanceCreatedCounter = new prometheus.Counter({
+            name: 'test_motherduck_cache_instances_created_total',
+            help: 'test',
+            labelNames: ['project_uuid'],
+        });
+        metrics.motherduckCacheEvictionCounter = new prometheus.Counter({
+            name: 'test_motherduck_cache_evictions_total',
+            help: 'test',
+            labelNames: ['reason', 'project_uuid'],
+        });
+        metrics.motherduckCacheSizeGauge = new prometheus.Gauge({
+            name: 'test_motherduck_cache_entries',
+            help: 'test',
+        });
+        metrics.motherduckCacheRetryCounter = new prometheus.Counter({
+            name: 'test_motherduck_cache_retries_total',
+            help: 'test',
+            labelNames: ['outcome'],
+        });
+        metrics.motherduckCacheAcquireDurationHistogram =
+            new prometheus.Histogram({
+                name: 'test_motherduck_cache_acquire_duration_seconds',
+                help: 'test',
+                labelNames: ['result', 'project_uuid'],
+            });
+
+        metrics.observeMotherduckCacheEvent({
+            type: 'acquire',
+            result: 'miss',
+            entryId: 'entry-a',
+            projectUuid: 'project-a',
+            waitMs: 10,
+            instanceCreateMs: 20,
+            connectMs: 30,
+        });
+        metrics.observeMotherduckCacheEvent({
+            type: 'acquire',
+            result: 'hit',
+            entryId: 'entry-a',
+            projectUuid: 'project-a',
+            waitMs: 1,
+            instanceCreateMs: 0,
+            connectMs: 2,
+        });
+        metrics.observeMotherduckCacheEvent({
+            type: 'evict',
+            entryId: 'entry-a',
+            projectUuid: 'project-a',
+            reason: 'idle_ttl',
+            ageMs: 1000,
+        });
+        metrics.observeMotherduckCacheEvent({
+            type: 'retry',
+            entryId: 'entry-a',
+            outcome: 'recovered',
+        });
+        metrics.observeMotherduckCacheEvent({ type: 'size', entries: 2 });
+
+        await expect(
+            metrics.motherduckCacheAcquisitionCounter.get(),
+        ).resolves.toMatchObject({
+            values: expect.arrayContaining([
+                expect.objectContaining({
+                    labels: { result: 'miss', project_uuid: 'project-a' },
+                    value: 1,
+                }),
+                expect.objectContaining({
+                    labels: { result: 'hit', project_uuid: 'project-a' },
+                    value: 1,
+                }),
+            ]),
+        });
+        await expect(
+            metrics.motherduckCacheInstanceCreatedCounter.get(),
+        ).resolves.toMatchObject({
+            values: [
+                expect.objectContaining({
+                    labels: { project_uuid: 'project-a' },
+                    value: 1,
+                }),
+            ],
+        });
+        await expect(
+            metrics.motherduckCacheEvictionCounter.get(),
+        ).resolves.toMatchObject({
+            values: [
+                expect.objectContaining({
+                    labels: {
+                        reason: 'idle_ttl',
+                        project_uuid: 'project-a',
+                    },
+                    value: 1,
+                }),
+            ],
+        });
+        await expect(
+            metrics.motherduckCacheRetryCounter.get(),
+        ).resolves.toMatchObject({
+            values: [
+                expect.objectContaining({
+                    labels: { outcome: 'recovered' },
+                    value: 1,
+                }),
+            ],
+        });
+        await expect(
+            metrics.motherduckCacheSizeGauge.get(),
+        ).resolves.toMatchObject({
+            values: [expect.objectContaining({ value: 2 })],
+        });
+        await expect(
+            metrics.motherduckCacheAcquireDurationHistogram.get(),
+        ).resolves.toMatchObject({
+            values: expect.arrayContaining([
+                expect.objectContaining({
+                    metricName:
+                        'test_motherduck_cache_acquire_duration_seconds_sum',
+                    labels: { result: 'miss', project_uuid: 'project-a' },
+                    value: 0.06,
+                }),
+                expect.objectContaining({
+                    metricName:
+                        'test_motherduck_cache_acquire_duration_seconds_sum',
+                    labels: { result: 'hit', project_uuid: 'project-a' },
+                    value: 0.003,
+                }),
+            ]),
+        });
+    });
+});

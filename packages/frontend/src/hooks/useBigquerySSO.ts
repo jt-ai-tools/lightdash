@@ -1,5 +1,7 @@
 import {
     type ApiBigqueryDatasets,
+    type ApiBigqueryProjectRecommendation,
+    type ApiBigqueryProjects,
     type ApiError,
     type ApiSuccessEmpty,
 } from '@lightdash/common';
@@ -17,6 +19,36 @@ export const useIsBigQueryAuthenticated = () => {
     return useQuery<ApiSuccessEmpty['results'], ApiError>({
         queryKey: [],
         queryFn: getIsAuthenticated,
+    });
+};
+
+const getProjects = async () =>
+    lightdashApi<ApiBigqueryProjects['results']>({
+        url: `/bigquery/sso/projects`,
+        method: 'GET',
+        body: undefined,
+    });
+
+export const useBigqueryProjects = (isAuthenticated: boolean) => {
+    return useQuery<ApiBigqueryProjects['results'], ApiError>({
+        queryKey: ['bigquery-projects'],
+        queryFn: getProjects,
+        enabled: isAuthenticated,
+    });
+};
+
+const getProjectRecommendation = async () =>
+    lightdashApi<ApiBigqueryProjectRecommendation['results']>({
+        url: `/bigquery/sso/projects/recommendation`,
+        method: 'GET',
+        body: undefined,
+    });
+
+export const useBigqueryProjectRecommendation = (enabled: boolean) => {
+    return useQuery<ApiBigqueryProjectRecommendation['results'], ApiError>({
+        queryKey: ['bigquery-project-recommendation'],
+        queryFn: getProjectRecommendation,
+        enabled,
     });
 };
 

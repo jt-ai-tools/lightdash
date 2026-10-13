@@ -7,15 +7,15 @@ import {
     type VizIndexLayoutOptions,
     type VizPivotLayoutOptions,
 } from '@lightdash/common';
-import { ActionIcon, Box, Group, Stack, Tooltip } from '@mantine/core';
+import { Box, Group, Stack, ActionIcon, Tooltip } from '@mantine/core';
 import { IconMinus, IconPlus, IconX } from '@tabler/icons-react';
 import { type FC } from 'react';
 import {
     useAppDispatch as useVizDispatch,
     useAppSelector as useVizSelector,
 } from '../../../features/sqlRunner/store/hooks';
-import { Config } from '../../VisualizationConfigs/common/Config';
 import MantineIcon from '../../common/MantineIcon';
+import { Config } from '../../VisualizationConfigs/common/Config';
 import { FieldReferenceSelect } from '../FieldReferenceSelect';
 import { type BarChartActionsType } from '../store/barChartSlice';
 import { type LineChartActionsType } from '../store/lineChartSlice';
@@ -41,20 +41,18 @@ const YFieldsAxisConfig: FC<{
     return (
         <>
             <Box
-                sx={(theme) => ({
-                    paddingLeft: !isSingle ? theme.spacing.xs : 0,
+                style={{
+                    paddingLeft: !isSingle ? 'var(--mantine-spacing-xs)' : 0,
                     borderLeft: !isSingle
-                        ? `1px solid ${theme.colors.ldGray[3]}`
+                        ? '1px solid var(--mantine-color-ldGray-3)'
                         : 0,
-                })}
+                }}
             >
                 <Config>
                     <Config.Section>
-                        <Group spacing="xs">
+                        <Group gap="xs">
                             <FieldReferenceSelect
-                                sx={{
-                                    flex: 1,
-                                }}
+                                flex={1}
                                 data={yLayoutOptions.map((y) => ({
                                     value: y.reference,
                                     label: y.reference,
@@ -105,10 +103,8 @@ const YFieldsAxisConfig: FC<{
                                     )
                                 }
                             />
-                            <Tooltip variant="xs" label="Remove Y axis">
+                            <Tooltip label="Remove Y axis">
                                 <ActionIcon
-                                    color="ldGray.6"
-                                    variant="subtle"
                                     onClick={() =>
                                         dispatch(
                                             actions.removeYAxisField(index),
@@ -142,11 +138,9 @@ const XFieldAxisConfig = ({
     const dispatch = useVizDispatch();
 
     return (
-        <Group spacing="xs">
+        <Group gap="xs">
             <FieldReferenceSelect
-                sx={{
-                    flex: 1,
-                }}
+                flex={1}
                 data={xLayoutOptions.map((x) => ({
                     value: x.reference,
                     label: x.reference,
@@ -183,10 +177,8 @@ const XFieldAxisConfig = ({
                     )
                 }
             />
-            <Tooltip variant="xs" label="Remove X axis">
+            <Tooltip label="Remove X axis">
                 <ActionIcon
-                    color="ldGray.6"
-                    variant="subtle"
                     onClick={() => dispatch(actions.removeXAxisField())}
                     data-testid="remove-x-axis-field"
                 >
@@ -228,7 +220,9 @@ const GroupByFieldAxisConfig = ({
                     </ActionIcon>
                 )
             }
-            clearable
+            // Only one X at a time: since Mantine 8.3 the native clear button
+            // would render next to the custom error one
+            clearable={!groupByError}
             data={groupByOptions.map((groupBy) => ({
                 value: groupBy.reference,
                 label: groupBy.reference,
@@ -300,7 +294,7 @@ export const CartesianChartFieldConfiguration = ({
     );
 
     return (
-        <Stack spacing="xl" mt="sm">
+        <Stack gap="xl" mt="sm">
             <Config>
                 <Config.Section>
                     <Config.Heading>{`X-axis`}</Config.Heading>
@@ -319,10 +313,8 @@ export const CartesianChartFieldConfiguration = ({
                 <Config.Section>
                     <Config.Group>
                         <Config.Heading>{`Y-axis`}</Config.Heading>
-                        <Tooltip variant="xs" label="Add Y axis">
+                        <Tooltip label="Add Y axis">
                             <ActionIcon
-                                color="ldGray.6"
-                                variant="subtle"
                                 onClick={() =>
                                     dispatch(actions.addYAxisField())
                                 }

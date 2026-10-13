@@ -1,11 +1,11 @@
 import { type OrganizationColorPalette } from '@lightdash/common';
 import {
-    type ModalProps,
     Center,
     ColorSwatch,
     SimpleGrid,
     Text,
-} from '@mantine-8/core';
+    type ModalProps,
+} from '@mantine/core';
 import { type FC } from 'react';
 import MantineModal from '../../common/MantineModal';
 

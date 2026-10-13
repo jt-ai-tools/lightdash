@@ -1,6 +1,5 @@
 import { type ResultValue } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
-import { Text } from '@mantine/core';
+import { Menu, Text } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import { IconArrowBarToDown, IconCopy } from '@tabler/icons-react';
 import mapValues from 'lodash/mapValues';
@@ -108,8 +107,6 @@ const BigNumberContextMenu: FC<
     return (
         <Menu
             withArrow
-            withinPortal
-            shadow="md"
             position="bottom"
             closeOnItemClick
             closeOnEscape
@@ -141,7 +138,7 @@ const BigNumberContextMenu: FC<
                         onClick={handleOpenDrillIntoModal}
                     >
                         Drill into{' '}
-                        <Text span fw={500}>
+                        <Text span fw="bold" fz="sm">
                             {value.formatted}
                         </Text>
                     </Menu.Item>

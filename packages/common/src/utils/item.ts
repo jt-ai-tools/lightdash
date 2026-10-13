@@ -2,8 +2,6 @@ import { ParameterError } from '../types/errors';
 import { type Explore } from '../types/explore';
 import {
     DimensionType,
-    MetricType,
-    TableCalculationType,
     isCustomBinDimension,
     isCustomDimension,
     isCustomSqlDimension,
@@ -11,6 +9,8 @@ import {
     isField,
     isMetric,
     isTableCalculation,
+    MetricType,
+    TableCalculationType,
     type CompiledDimension,
     type CustomDimension,
     type CustomSqlDimension,
@@ -39,6 +39,7 @@ export const isNumericType = (
         MetricType.COUNT_DISTINCT,
         MetricType.SUM,
         MetricType.SUM_DISTINCT,
+        MetricType.AVERAGE_DISTINCT,
         MetricType.MIN,
         MetricType.MAX,
         MetricType.PERCENT_OF_PREVIOUS,
@@ -109,6 +110,27 @@ export function isNumericItem(
         return false;
     }
     return isNumericType(getItemType(item));
+}
+
+export const isBooleanType = (
+    type: DimensionType | MetricType | TableCalculationType,
+) =>
+    type === DimensionType.BOOLEAN ||
+    type === MetricType.BOOLEAN ||
+    type === TableCalculationType.BOOLEAN;
+
+export function isBooleanItem(
+    item:
+        | Field
+        | AdditionalMetric
+        | TableCalculation
+        | CustomDimension
+        | undefined,
+) {
+    if (!item) {
+        return false;
+    }
+    return isBooleanType(getItemType(item));
 }
 
 export const isStringDimension = (

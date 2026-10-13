@@ -11,6 +11,7 @@ import { type MetricFilterRule } from './filter';
 import type { TimeFrames } from './timeFrames';
 
 export enum Compact {
+    AUTO = 'auto',
     THOUSANDS = 'thousands',
     MILLIONS = 'millions',
     BILLIONS = 'billions',
@@ -64,6 +65,7 @@ export enum NumberSeparator {
     SPACE_PERIOD = 'spacePeriod', // 100 000.00
     PERIOD_COMMA = 'periodComma', // 100.000,00
     NO_SEPARATOR_PERIOD = 'noSeparatorPeriod', // 100000.00
+    APOSTROPHE_PERIOD = 'apostrophePeriod', // 100'000.00
 }
 type CompactConfig = {
     compact: Compact;
@@ -77,6 +79,14 @@ type CompactConfig = {
 export type CompactOrAlias = Compact | (typeof CompactAlias)[number];
 
 export const CompactConfigMap: Record<Compact, CompactConfig> = {
+    [Compact.AUTO]: {
+        compact: Compact.AUTO,
+        alias: [],
+        orderOfMagnitude: 0,
+        convertFn: (value: number) => value,
+        label: 'Auto (K, M, B, T)',
+        suffix: '',
+    },
     [Compact.THOUSANDS]: {
         compact: Compact.THOUSANDS,
         alias: ['K', 'thousand'],
@@ -205,6 +215,7 @@ export enum BinType {
     FIXED_NUMBER = 'fixed_number',
     FIXED_WIDTH = 'fixed_width',
     CUSTOM_RANGE = 'custom_range',
+    CUSTOM_GROUP = 'custom_group',
 }
 
 export type BinRange = {
@@ -212,6 +223,25 @@ export type BinRange = {
     from: number | undefined;
     /** End value for this bin range (undefined for the last range) */
     to: number | undefined;
+};
+
+export enum GroupValueMatchType {
+    EXACT = 'exact',
+    STARTS_WITH = 'startsWith',
+    ENDS_WITH = 'endsWith',
+    INCLUDES = 'includes',
+}
+
+export type GroupValueRule = {
+    matchType: GroupValueMatchType;
+    value: string;
+};
+
+export type BinGroup = {
+    /** Display name for this group (e.g. "North America") */
+    name: string;
+    /** Rules that match values into this group */
+    values: GroupValueRule[];
 };
 
 export enum CustomDimensionType {
@@ -230,19 +260,37 @@ export interface BaseCustomDimension {
     type: CustomDimensionType;
 }
 
-export interface CustomBinDimension extends BaseCustomDimension {
+interface BaseCustomBinDimension extends BaseCustomDimension {
     type: CustomDimensionType.BIN;
     /** Field ID of the parent dimension to bin */
     dimensionId: FieldId;
-    /** Binning strategy to use */
-    binType: BinType;
-    /** Number of bins (for fixed_number bin type) */
-    binNumber?: number;
-    /** Width of each bin (for fixed_width bin type) */
-    binWidth?: number;
-    /** Custom bin ranges (for custom_range bin type) */
-    customRange?: BinRange[];
 }
+
+export interface FixedNumberBinDimension extends BaseCustomBinDimension {
+    binType: BinType.FIXED_NUMBER;
+    binNumber: number;
+}
+
+export interface FixedWidthBinDimension extends BaseCustomBinDimension {
+    binType: BinType.FIXED_WIDTH;
+    binWidth: number;
+}
+
+export interface CustomRangeBinDimension extends BaseCustomBinDimension {
+    binType: BinType.CUSTOM_RANGE;
+    customRange: BinRange[];
+}
+
+export interface CustomGroupBinDimension extends BaseCustomBinDimension {
+    binType: BinType.CUSTOM_GROUP;
+    customGroups: BinGroup[];
+}
+
+export type CustomBinDimension =
+    | FixedNumberBinDimension
+    | FixedWidthBinDimension
+    | CustomRangeBinDimension
+    | CustomGroupBinDimension;
 
 export interface CustomSqlDimension extends BaseCustomDimension {
     type: CustomDimensionType.SQL;
@@ -393,6 +441,7 @@ export type FrameClause = {
 
 export enum TableCalculationTemplateType {
     PERCENT_CHANGE_FROM_PREVIOUS = 'percent_change_from_previous',
+    DIFFERENCE_FROM_PREVIOUS = 'difference_from_previous',
     PERCENT_OF_PREVIOUS_VALUE = 'percent_of_previous_value',
     PERCENT_OF_COLUMN_TOTAL = 'percent_of_column_total',
     RANK_IN_COLUMN = 'rank_in_column',
@@ -401,6 +450,18 @@ export enum TableCalculationTemplateType {
 }
 
 export type TableCalculationTemplate =
+    | {
+          /** Type of template calculation */
+          type: TableCalculationTemplateType.DIFFERENCE_FROM_PREVIOUS;
+          /** Field ID to apply the template to */
+          fieldId: string;
+          /** Fields to order by for window functions */
+          orderBy: {
+              fieldId: string;
+              order: 'asc' | 'desc' | null;
+          }[];
+          partitionBy?: string[];
+      }
     | {
           /** Type of template calculation */
           type: TableCalculationTemplateType.PERCENT_CHANGE_FROM_PREVIOUS;
@@ -444,6 +505,13 @@ export type TableCalculationTemplate =
           type: TableCalculationTemplateType.RUNNING_TOTAL;
           /** Field ID to apply the template to */
           fieldId: string;
+          // undefined = legacy: follows the results-table sort at query time; [] = explicitly unordered.
+          // Never normalize undefined to [] — it changes the SQL of every pre-existing running total.
+          /** Fields to order by for the running total */
+          orderBy?: {
+              fieldId: string;
+              order: 'asc' | 'desc' | null;
+          }[];
       }
     | {
           /** Type of template calculation */
@@ -463,7 +531,16 @@ export type TableCalculationTemplate =
           frame?: FrameClause;
       };
 
-export type TableCalculation = {
+export enum TableCalculationTotalMode {
+    /** Apply the calculation to the aggregated totals row (default) — right for ratios */
+    FORMULA = 'formula',
+    /** Sum the calculation's row-level values — right for row-level transformations */
+    SUM_OF_ROWS = 'sum_of_rows',
+    /** Show no total for this calculation */
+    NONE = 'none',
+}
+
+export type TableCalculationBase = {
     /** Display order index */
     index?: number;
     /** Internal name of the table calculation */
@@ -474,16 +551,29 @@ export type TableCalculation = {
     format?: CustomFormat;
     /** Data type of the calculation result */
     type?: TableCalculationType;
-} & (
-    | {
-          /** SQL expression for the calculation (can reference fields with ${table.field}) */
-          sql: string;
-      }
-    | {
-          /** Template-based calculation (alternative to sql) */
-          template: TableCalculationTemplate;
-      }
-);
+    /** How column totals are computed for this calculation */
+    totalMode?: TableCalculationTotalMode;
+};
+
+export type SqlTableCalculation = TableCalculationBase & {
+    /** SQL expression for the calculation (can reference fields with ${table.field}) */
+    sql: string;
+};
+
+export type TemplateTableCalculation = TableCalculationBase & {
+    /** Template-based calculation (alternative to sql) */
+    template: TableCalculationTemplate;
+};
+
+export type FormulaTableCalculation = TableCalculationBase & {
+    /** Spreadsheet-like formula compiled to SQL at query time */
+    formula: string;
+};
+
+export type TableCalculation =
+    | SqlTableCalculation
+    | TemplateTableCalculation
+    | FormulaTableCalculation;
 
 export type TableCalculationMetadata = {
     oldName: string;
@@ -503,7 +593,8 @@ export const isTableCalculation = (
     item
         ? !isCustomDimension(item) &&
           (!!('sql' in item && item.sql) ||
-              !!('template' in item && item.template)) &&
+              !!('template' in item && item.template) ||
+              !!('formula' in item && item.formula)) &&
           !('description' in item) &&
           !('tableName' in item) &&
           'displayName' in item
@@ -511,13 +602,18 @@ export const isTableCalculation = (
 
 export const isSqlTableCalculation = (
     calc: TableCalculation,
-): calc is TableCalculation & { sql: string } =>
+): calc is SqlTableCalculation =>
     !!calc && 'sql' in calc && !!calc.sql && calc.sql.length > 0;
 
 export const isTemplateTableCalculation = (
     calc: TableCalculation,
-): calc is TableCalculation & { template: TableCalculationTemplate } =>
+): calc is TemplateTableCalculation =>
     !!calc && 'template' in calc && !!calc.template;
+
+export const isFormulaTableCalculation = (
+    calc: TableCalculation,
+): calc is FormulaTableCalculation =>
+    !!calc && 'formula' in calc && !!calc.formula && calc.formula.length > 0;
 
 export type CompiledTableCalculation = TableCalculation & {
     compiledSql: string;
@@ -546,6 +642,12 @@ export interface Field {
     // @deprecated Use format expression instead
     round?: number;
     format?: Format | string; // Format type is deprecated, use format expression(string) instead
+    /**
+     * Number separator style for grouping/decimal characters. Composes with
+     * `format` (including ECMA-376 expressions) and `formatOptions` — it only
+     * controls the separator characters, not the format shape.
+     */
+    separator?: NumberSeparator;
     /**
      * @deprecated Use groups property instead.
      */
@@ -607,6 +709,101 @@ export enum DimensionType {
     BOOLEAN = 'boolean',
 }
 
+/**
+ * Whether a TIMESTAMP column stores an instant ('aware') or a bare wall clock
+ * ('naive'). Absent means unknown — never assume 'aware' for a missing value.
+ */
+export type TimestampDomain = 'aware' | 'naive';
+
+export const isTimestampDomain = (value: unknown): value is TimestampDomain =>
+    value === 'aware' || value === 'naive';
+
+export type FilterAutocompleteValue = {
+    value: string;
+    label?: string;
+};
+
+export type FilterAutocompleteConfig = {
+    values?: FilterAutocompleteValue[];
+    fetchFromWarehouse: boolean;
+    labelDimension?: string;
+    optionsFromDimension?: {
+        model: string;
+        dimension: string;
+        labelDimension?: string;
+    };
+};
+
+/**
+ * The label source follows the value source: when values come from another
+ * model, only that lookup's own label dimension is in scope.
+ */
+export const getFilterAutocompleteLabelDimension = (
+    filterAutocomplete: FilterAutocompleteConfig | undefined,
+): string | undefined =>
+    filterAutocomplete?.optionsFromDimension
+        ? filterAutocomplete.optionsFromDimension.labelDimension
+        : filterAutocomplete?.labelDimension;
+
+/**
+ * There is nothing to autocomplete: warehouse fetching is off and no curated
+ * values are provided, so filter inputs fall back to plain manual entry.
+ */
+export const isFilterAutocompleteManualOnly = (
+    filterAutocomplete: FilterAutocompleteConfig | undefined,
+): boolean =>
+    filterAutocomplete !== undefined &&
+    !filterAutocomplete.fetchFromWarehouse &&
+    (filterAutocomplete.values?.length ?? 0) === 0;
+
+/**
+ * Whether a dimension's curated `filter_autocomplete` values can answer a value
+ * search without querying the warehouse. Mirrors the Explore filter UI
+ * (`useFieldValues`): always use curated values when the warehouse fetch is
+ * turned off; otherwise only as the fast path for an empty ("list all") search.
+ */
+export const shouldUseStaticFilterAutocomplete = (
+    filterAutocomplete: FilterAutocompleteConfig | undefined,
+    search: string,
+): boolean => {
+    if (!filterAutocomplete) return false;
+    const hasValues = (filterAutocomplete.values?.length ?? 0) > 0;
+    return (
+        !filterAutocomplete.fetchFromWarehouse ||
+        (hasValues && search.trim().length === 0)
+    );
+};
+
+export const searchFilterAutocompleteValues = (
+    values: FilterAutocompleteValue[],
+    search: string,
+): FilterAutocompleteValue[] => {
+    const normalizedSearch = search.trim().toLowerCase();
+    const matched =
+        normalizedSearch.length === 0
+            ? values
+            : values.filter(
+                  ({ value, label }) =>
+                      value.toLowerCase().includes(normalizedSearch) ||
+                      (label?.toLowerCase().includes(normalizedSearch) ??
+                          false),
+              );
+    const seen = new Set<string>();
+    return matched
+        .filter(({ value }) => {
+            if (seen.has(value)) return false;
+            seen.add(value);
+            return true;
+        })
+        .sort((a, b) => a.value.localeCompare(b.value));
+};
+
+export const filterStaticFilterAutocompleteValues = (
+    values: FilterAutocompleteValue[],
+    search: string,
+): string[] =>
+    searchFilterAutocompleteValues(values, search).map(({ value }) => value);
+
 export interface Dimension extends Field {
     fieldType: FieldType.DIMENSION;
     type: DimensionType;
@@ -617,18 +814,29 @@ export interface Dimension extends Field {
     requiredAttributes?: Record<string, string | string[]>;
     anyAttributes?: Record<string, string | string[]>;
     timeInterval?: TimeFrames;
+    /** Overridden display label for this dimension's grain (project
+     *  `granularity_labels`); undefined when no override — callers fall back
+     *  to `timeFrameConfigs[timeInterval].getLabel()`. */
+    timeIntervalLabel?: string;
     timeIntervalBaseDimensionName?: string;
+    timeIntervalBaseDimensionType?: DimensionType;
+    customTimeInterval?: string;
     isAdditionalDimension?: boolean;
+    skipTimezoneConversion?: boolean;
+    timestampDomain?: TimestampDomain;
     colors?: Record<string, string>;
     isIntervalBase?: boolean;
     aiHint?: string | string[];
     formatOptions?: CustomFormat;
+    caseSensitive?: boolean; // When false, string filters on this dimension will be case insensitive. Default is true
     image?: {
         url: string;
         width?: number;
         height?: number;
         fit?: string;
     };
+    richText?: string; // The markdown/HTML template with LiquidJS variables
+    filterAutocomplete?: FilterAutocompleteConfig;
     spotlight?: {
         filterBy?: boolean;
         segmentBy?: boolean;
@@ -658,7 +866,26 @@ type CompiledProperties = {
     compilationError?: FieldCompilationError;
     compiledValueSql?: string; // raw value expression before aggregation (for sum_distinct CTE)
     compiledDistinctKeys?: string[]; // compiled SQL for distinct keys (sum_distinct only)
+    // Metric-only: compile-time SQL for each metric filter that uses a relative
+    // date operator (inThePast/inTheNext/...). The query builder re-evaluates
+    // these boundaries at query time by swapping the stored predicate for a
+    // freshly rendered one, so the window is no longer frozen to compile time.
+    compiledRelativeDateFilters?: CompiledMetricRelativeDateFilter[];
+    // Metric-only: compile-time SQL for each metric filter with an absolute
+    // operator targeting a TIMESTAMP dimension. Baked without any data
+    // timezone or timestamp-domain context, so the query builder re-renders
+    // the predicate with the query-time domain context and swaps it in when
+    // the target is classified.
+    compiledTimestampFilters?: CompiledMetricTimestampFilter[];
 };
+
+export type CompiledMetricRelativeDateFilter = {
+    id: string; // metric filter rule id, maps back to Metric.filters
+    fieldId: string; // resolved dimension id the filter targets
+    compiledSql: string; // compile-time predicate, used as the query-time swap anchor
+};
+
+export type CompiledMetricTimestampFilter = CompiledMetricRelativeDateFilter;
 export type CompiledDimension = Dimension & CompiledProperties;
 export type CompiledMetric = Metric & CompiledProperties;
 
@@ -675,6 +902,10 @@ export const isDimension = (
     field: ItemsMap[string] | AdditionalMetric | undefined, // NOTE: `ItemsMap converts AdditionalMetric to Metric
 ): field is Dimension =>
     isField(field) && field.fieldType === FieldType.DIMENSION;
+
+export const isCompiledDimension = (
+    field: ItemsMap[string] | AdditionalMetric | undefined,
+): field is CompiledDimension => isDimension(field) && 'compiledSql' in field;
 
 export const isTimeBasedDimension = (
     item: ItemsMap[string] | AdditionalMetric | undefined,
@@ -705,6 +936,7 @@ export enum MetricType {
     COUNT_DISTINCT = 'count_distinct',
     SUM = 'sum',
     SUM_DISTINCT = 'sum_distinct',
+    AVERAGE_DISTINCT = 'average_distinct',
     MIN = 'min',
     MAX = 'max',
     PERCENT_OF_PREVIOUS = 'percent_of_previous',
@@ -721,6 +953,7 @@ export enum MetricType {
 export enum Format {
     KM = 'km',
     MI = 'mi',
+    SI = 'si',
     USD = 'usd',
     GBP = 'gbp',
     EUR = 'eur',
@@ -749,6 +982,8 @@ export const parseMetricType = (metricType: string): MetricType => {
             return MetricType.SUM;
         case 'sum_distinct':
             return MetricType.SUM_DISTINCT;
+        case 'average_distinct':
+            return MetricType.AVERAGE_DISTINCT;
         case 'min':
             return MetricType.MIN;
         case 'max':
@@ -800,6 +1035,23 @@ export const isMetric = (
 export const isNonAggregateMetric = (field: Field): boolean =>
     isMetric(field) && NonAggregateMetricTypes.includes(field.type);
 
+export const AggregateMetricTypes = [
+    MetricType.SUM,
+    MetricType.COUNT,
+    MetricType.COUNT_DISTINCT,
+    MetricType.AVERAGE,
+    MetricType.MIN,
+    MetricType.MAX,
+    MetricType.MEDIAN,
+    MetricType.PERCENTILE,
+] as const;
+
+export const isAggregateMetricType = (type: MetricType): boolean =>
+    (AggregateMetricTypes as readonly MetricType[]).includes(type);
+
+export const isNonAggregateMetricType = (type: MetricType): boolean =>
+    NonAggregateMetricTypes.includes(type);
+
 export const isPostCalculationMetricType = (type: MetricType): boolean =>
     PostCalculationMetricTypes.includes(type);
 
@@ -819,6 +1071,11 @@ export interface Metric extends Field {
     distinctKeys?: string[]; // dimension references for sum_distinct deduplication key
     formatOptions?: CustomFormat;
     dimensionReference?: string; // field id of the dimension this metric is based on
+    // Temporal base of a MIN/MAX metric over a single DATE/TIMESTAMP dimension,
+    // set at compile time so the formatter and query builder can tell a calendar
+    // DATE aggregation from a TIMESTAMP instant. Undefined for arbitrary-SQL metrics.
+    baseDimensionType?: DimensionType;
+    baseDimensionTimeInterval?: TimeFrames;
     requiredAttributes?: Record<string, string | string[]>; // Required attributes for the dimension this metric is based on
     anyAttributes?: Record<string, string | string[]>; // Any of these attributes must match (OR logic)
     defaultTimeDimension?: DefaultTimeDimension; // Default time dimension for the metric when the user has not specified a time dimension
@@ -827,11 +1084,34 @@ export interface Metric extends Field {
         categories?: string[]; // yaml_reference
         filterBy?: string[]; // dimension IDs allowlist
         segmentBy?: string[]; // dimension IDs allowlist
+        defaultSegment?: string; // dimension name pre-selected in Segment by
+        defaultFilter?: MetricFilterRule; // parsed single default filter
         owner?: string; // metric owner email
     };
     drivers?: string[]; // metrics that drive this metric (same-table: 'name', cross-table: 'table.name')
     aiHint?: string | string[];
+    richText?: string; // The markdown/HTML template with LiquidJS variables
 }
+
+// The base-type metadata a MIN/MAX metric carries when it aggregates a single
+// DATE/TIMESTAMP dimension. Returns an empty object for any other metric type or
+// a non-temporal base, so callers can spread it unconditionally. See the
+// baseDimensionType field on Metric for why this is denormalized at compile time.
+export const getMinMaxBaseDimensionMetadata = (
+    metricType: MetricType,
+    base: { type: DimensionType; timeInterval?: TimeFrames } | undefined,
+): Pick<Metric, 'baseDimensionType' | 'baseDimensionTimeInterval'> => {
+    const isMinMax =
+        metricType === MetricType.MIN || metricType === MetricType.MAX;
+    const isTemporalBase =
+        base?.type === DimensionType.DATE ||
+        base?.type === DimensionType.TIMESTAMP;
+    if (!isMinMax || !base || !isTemporalBase) return {};
+    return {
+        baseDimensionType: base.type,
+        baseDimensionTimeInterval: base.timeInterval,
+    };
+};
 
 export const isFilterableDimension = (
     dimension: Dimension | undefined,
@@ -844,6 +1124,8 @@ export const isFilterableDimension = (
         DimensionType.TIMESTAMP,
         DimensionType.BOOLEAN,
     ].includes(dimension.type);
+
+export type DashboardFilterableField = FilterableDimension | Metric;
 
 // TODO: FilterableField === FilterableItem, we should remove one of them, as well as one of the type guards
 export type FilterableField =
@@ -938,10 +1220,19 @@ export function getCompactOptionsForFormatType(
 ): Compact[] {
     if (type === CustomFormatType.BYTES_IEC) return IECByteCompacts;
     if (type === CustomFormatType.BYTES_SI) return SIByteCompacts;
-    return [
+    const numericCompacts = [
         Compact.THOUSANDS,
         Compact.MILLIONS,
         Compact.BILLIONS,
         Compact.TRILLIONS,
     ];
+
+    if (
+        type === CustomFormatType.NUMBER ||
+        type === CustomFormatType.CURRENCY
+    ) {
+        return [Compact.AUTO, ...numericCompacts];
+    }
+
+    return numericCompacts;
 }

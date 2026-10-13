@@ -1,8 +1,19 @@
-import { List, TextInput } from '@mantine-8/core';
+import { FeatureFlags } from '@lightdash/common';
+import { Group, Skeleton, Text, TextInput } from '@mantine/core';
+import {
+    IconAppWindow,
+    IconChartBar,
+    IconFolder,
+    IconFileText,
+    IconLayoutDashboard,
+} from '@tabler/icons-react';
 import { useState, type FC } from 'react';
 import { type DeleteSpaceModalBody } from '.';
+import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
+import { useSpaceDeleteImpact } from '../../../hooks/useSpaces';
 import useApp from '../../../providers/App/useApp';
 import Callout from '../Callout';
+import MantineIcon from '../MantineIcon';
 import MantineModal from '../MantineModal';
 
 const DeleteSpaceTextInputConfirmation: FC<{
@@ -31,46 +42,134 @@ const DeleteSpaceTextInputConfirmation: FC<{
 const DeleteSpaceModalContent: FC<
     Pick<DeleteSpaceModalBody, 'data'> & { softDeleteEnabled: boolean }
 > = ({ data, softDeleteEnabled }) => {
+    const { data: impact, isLoading: isLoadingImpact } = useSpaceDeleteImpact(
+        data?.projectUuid,
+        data?.uuid,
+    );
+    const dataAppsFlag = useServerFeatureFlag(FeatureFlags.EnableDataApps);
+    const dataAppsEnabled = dataAppsFlag.data?.enabled ?? false;
+    const documentsFlag = useServerFeatureFlag(FeatureFlags.Documents);
+    const documentsEnabled =
+        !documentsFlag.isError && documentsFlag.data?.enabled;
+
+    if (isLoadingImpact) {
+        return <Skeleton height={40} radius="sm" />;
+    }
+
+    if (!impact) {
+        return null;
+    }
+
+    const descendantCount = impact.spaces.filter(
+        (s) => s.uuid !== data?.uuid,
+    ).length;
+
     const hasContent =
-        data &&
-        (data.queries.length > 0 ||
-            data.dashboards.length > 0 ||
-            data.childSpaces.length > 0);
+        descendantCount > 0 ||
+        impact.chartCount > 0 ||
+        impact.dashboardCount > 0 ||
+        (documentsEnabled && impact.documentCount > 0) ||
+        (dataAppsEnabled && impact.appCount > 0);
 
     if (!hasContent) {
         return null;
     }
 
     const title = softDeleteEnabled
-        ? 'This will also delete:'
-        : 'This will permanently delete:';
+        ? 'This will also delete content within this space:'
+        : 'This will permanently delete content within this space:';
 
     return (
         <Callout
             variant={softDeleteEnabled ? 'warning' : 'danger'}
             title={title}
         >
-            <List size="sm">
-                {data.queries.length > 0 && (
-                    <List.Item>
-                        {data.queries.length} chart
-                        {data.queries.length === 1 ? '' : 's'}
-                    </List.Item>
+            <Group gap="lg">
+                <Group gap={4}>
+                    <MantineIcon
+                        icon={IconFolder}
+                        size="sm"
+                        color={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                        stroke={1.5}
+                    />
+                    <Text
+                        size="sm"
+                        fw={600}
+                        c={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                    >
+                        {descendantCount} space
+                        {descendantCount !== 1 ? 's' : ''}
+                    </Text>
+                </Group>
+                <Group gap={4}>
+                    <MantineIcon
+                        icon={IconChartBar}
+                        size="sm"
+                        color={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                        stroke={1.5}
+                    />
+                    <Text
+                        size="sm"
+                        fw={600}
+                        c={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                    >
+                        {impact.chartCount} chart
+                        {impact.chartCount !== 1 ? 's' : ''}
+                    </Text>
+                </Group>
+                <Group gap={4}>
+                    <MantineIcon
+                        icon={IconLayoutDashboard}
+                        size="sm"
+                        color={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                        stroke={1.5}
+                    />
+                    <Text
+                        size="sm"
+                        fw={600}
+                        c={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                    >
+                        {impact.dashboardCount} dashboard
+                        {impact.dashboardCount !== 1 ? 's' : ''}
+                    </Text>
+                </Group>
+                {dataAppsEnabled && (
+                    <Group gap={4}>
+                        <MantineIcon
+                            icon={IconAppWindow}
+                            size="sm"
+                            color={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                            stroke={1.5}
+                        />
+                        <Text
+                            size="sm"
+                            fw={600}
+                            c={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                        >
+                            {impact.appCount} data app
+                            {impact.appCount !== 1 ? 's' : ''}
+                        </Text>
+                    </Group>
                 )}
-                {data.dashboards.length > 0 && (
-                    <List.Item>
-                        {data.dashboards.length} dashboard
-                        {data.dashboards.length === 1 ? '' : 's'}
-                    </List.Item>
+                {documentsEnabled && (
+                    <Group gap={4}>
+                        <MantineIcon
+                            icon={IconFileText}
+                            size="sm"
+                            color={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                            stroke={1.5}
+                        />
+                        <Text
+                            size="sm"
+                            fw={600}
+                            c={softDeleteEnabled ? 'yellow.7' : 'red.7'}
+                        >
+                            {impact.documentCount} document
+                            {impact.documentCount !== 1 ? 's' : ''}
+                        </Text>
+                    </Group>
                 )}
-                {data.childSpaces.length > 0 && (
-                    <List.Item>
-                        {data.childSpaces.length} nested space
-                        {data.childSpaces.length === 1 ? '' : 's'} (and all its
-                        contents)
-                    </List.Item>
-                )}
-            </List>
+            </Group>
         </Callout>
     );
 };
@@ -89,28 +188,47 @@ export const DeleteSpaceModal: FC<DeleteSpaceModalBody> = ({
 
     const [canDelete, setCanDelete] = useState(false);
 
-    const description = softDeleteEnabled
-        ? `Are you sure you want to delete the space "${data?.name}"? This space and its contents will be moved to Recently deleted and permanently removed after ${retentionDays} days.`
-        : undefined;
-
     return (
         <MantineModal
             opened
             onClose={onClose}
             title={title}
             variant="delete"
-            resourceType="space"
-            resourceLabel={data?.name}
-            description={description}
             size="lg"
             onConfirm={form.onSubmit(handleSubmit)}
             confirmDisabled={!canDelete || isLoading}
             confirmLoading={isLoading}
+            cancelDisabled={isLoading}
         >
+            <Text fz="sm">
+                {softDeleteEnabled ? (
+                    <>
+                        Are you sure you want to delete the space{' '}
+                        <Text span fw={600} fz="sm">
+                            &ldquo;{data?.name}&rdquo;
+                        </Text>
+                        ?
+                    </>
+                ) : (
+                    <>
+                        Are you sure you want to delete the space{' '}
+                        <Text span fw={600}>
+                            &ldquo;{data?.name}&rdquo;
+                        </Text>
+                        ?
+                    </>
+                )}
+            </Text>
             <DeleteSpaceModalContent
                 data={data}
                 softDeleteEnabled={softDeleteEnabled}
             />
+            {softDeleteEnabled && (
+                <Text fz="sm">
+                    This space and its contents will be moved to Recently
+                    deleted and permanently removed after {retentionDays} days.
+                </Text>
+            )}
             <DeleteSpaceTextInputConfirmation
                 data={data}
                 setCanDelete={setCanDelete}

@@ -1,18 +1,24 @@
-import { ProjectType } from '@lightdash/common';
-import { Box } from '@mantine-8/core';
-import { clsx } from '@mantine/core';
+import { OrganizationAccessStatus, ProjectType } from '@lightdash/common';
+import { Box } from '@mantine/core';
+import { clsx } from 'clsx';
 import { memo } from 'react';
-import { useParams } from 'react-router';
 import useDashboardStorage from '../../hooks/dashboard/useDashboardStorage';
+import { useOrganizationAccess } from '../../hooks/organization/useOrganizationAccess';
 import { useActiveProjectUuid } from '../../hooks/useActiveProject';
 import { useProject } from '../../hooks/useProject';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
+import { useImpersonation } from '../../hooks/user/useImpersonation';
 import useFullscreen from '../../providers/Fullscreen/useFullscreen';
-import Mantine8Provider from '../../providers/Mantine8Provider';
+import MantineBaseProvider from '../../providers/MantineBaseProvider';
+import { isPlaygroundProvisioningSource } from '../../utils/playgroundProject';
+import { getProjectUrlIdentifier } from '../../utils/projectUrl';
 import { BANNER_HEIGHT, NAVBAR_HEIGHT } from '../common/Page/constants';
 import { DashboardExplorerBanner } from './DashboardExplorerBanner';
+import { ImpersonationBanner } from './ImpersonationBanner';
+import classes from './index.module.css';
 import { MainNavBarContent } from './MainNavBarContent';
 import { PreviewBanner } from './PreviewBanner';
-import classes from './index.module.css';
+import { TrialWarningBanner } from './TrialWarningBanner';
 
 enum NavBarMode {
     DEFAULT = 'default',
@@ -36,13 +42,15 @@ interface NavBarProps {
 const NavBarContent = ({
     navBarMode,
     activeProjectUuid,
+    activeProjectUrlIdentifier,
     isLoadingActiveProject,
 }: {
     navBarMode: NavBarMode;
     activeProjectUuid: string | undefined;
+    activeProjectUrlIdentifier: string | undefined;
     isLoadingActiveProject: boolean;
 }) => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
     if (navBarMode === NavBarMode.EDITING_DASHBOARD_CHART) {
         return <DashboardExplorerBanner projectUuid={projectUuid} />;
     }
@@ -50,40 +58,98 @@ const NavBarContent = ({
     return (
         <MainNavBarContent
             activeProjectUuid={activeProjectUuid}
+            activeProjectUrlIdentifier={activeProjectUrlIdentifier}
             isLoadingActiveProject={isLoadingActiveProject}
         />
     );
 };
 
+const getNavBarRootElement = () =>
+    document.getElementById('navbar-header') ?? undefined;
+
 const NavBar = memo(({ isFixed = true }: NavBarProps) => {
     const { isFullscreen } = useFullscreen();
+    const routeProjectUuid = useProjectUuid();
 
     const { activeProjectUuid, isLoading: isLoadingActiveProject } =
-        useActiveProjectUuid({ refetchOnMount: true });
+        useActiveProjectUuid({
+            refetchOnMount: true,
+            projectUuid: routeProjectUuid,
+        });
     const { data: project } = useProject(activeProjectUuid);
 
     const isCurrentProjectPreview = project?.type === ProjectType.PREVIEW;
+    const isCurrentProjectPlayground = isPlaygroundProvisioningSource(
+        project?.provisioningSource,
+    );
+    const upstreamProjectUuid = isCurrentProjectPreview
+        ? project?.upstreamProjectUuid
+        : undefined;
+    const { data: upstreamProject } = useProject(upstreamProjectUuid);
+    // A learner's copy of the training project is not a preview in the
+    // engineering sense: no branch, no upstream to promote to. No banner.
+    const isTrainingCopy =
+        isCurrentProjectPreview &&
+        upstreamProject?.type === ProjectType.TRAINING;
+    const { isImpersonating } = useImpersonation();
+    const { data: organizationAccess } = useOrganizationAccess();
 
     const { navBarMode } = useNavBarMode();
 
-    // Calculate placeholder height: navbar + banner (if preview project)
-    const headerContainerHeight =
-        NAVBAR_HEIGHT + (isCurrentProjectPreview ? BANNER_HEIGHT : 0);
+    const showTrialWarning =
+        !isImpersonating &&
+        !isCurrentProjectPreview &&
+        !isCurrentProjectPlayground &&
+        (organizationAccess?.status ===
+            OrganizationAccessStatus.TRIAL_WARNING ||
+            organizationAccess?.status ===
+                OrganizationAccessStatus.TRIAL_EXPIRED);
 
-    // Scoped dark theme for the navbar using Mantine 8's cssVariablesSelector + getRootElement.
+    const hasBanner =
+        isImpersonating ||
+        (isCurrentProjectPreview && !isTrainingCopy) ||
+        showTrialWarning;
+
+    // Calculate placeholder height: navbar + banner.
+    const headerContainerHeight =
+        NAVBAR_HEIGHT + (hasBanner ? BANNER_HEIGHT : 0);
+
+    // Scoped dark theme for the navbar using Mantine's cssVariablesSelector + getRootElement.
     // This is the recommended approach for scoped theming, though it has known CSS specificity
     // limitations (see: https://github.com/orgs/mantinedev/discussions/4803).
     // The manual `data-mantine-color-scheme="dark"` attribute helps CSS selectors match correctly.
     return (
-        <Box id="navbar-header" data-mantine-color-scheme="dark">
-            <Mantine8Provider
+        <Box
+            id="navbar-header"
+            data-mantine-color-scheme="dark"
+            data-has-visible-fixed-navbar={isFixed && !isFullscreen}
+            data-has-banner={hasBanner}
+        >
+            <MantineBaseProvider
                 forceColorScheme="dark"
                 cssVariablesSelector="#navbar-header"
-                getRootElement={() =>
-                    document.getElementById('navbar-header') ?? undefined
-                }
+                getRootElement={getNavBarRootElement}
             >
-                {isCurrentProjectPreview && <PreviewBanner />}
+                {isImpersonating ? (
+                    <ImpersonationBanner />
+                ) : isCurrentProjectPreview && !isTrainingCopy ? (
+                    <PreviewBanner
+                        expiresAt={project?.expiresAt ?? null}
+                        upstreamProject={
+                            upstreamProject
+                                ? {
+                                      projectUuid: upstreamProject.projectUuid,
+                                      slug: upstreamProject.slug,
+                                      name: upstreamProject.name,
+                                  }
+                                : null
+                        }
+                    />
+                ) : (
+                    organizationAccess && (
+                        <TrialWarningBanner access={organizationAccess} />
+                    )
+                )}
                 <Box
                     component="header"
                     h={NAVBAR_HEIGHT}
@@ -93,19 +159,24 @@ const NavBar = memo(({ isFixed = true }: NavBarProps) => {
                         navBarMode === NavBarMode.EDITING_DASHBOARD_CHART &&
                             classes.headerEditingDashboardChart,
                     )}
-                    mt={isCurrentProjectPreview ? BANNER_HEIGHT : 0}
+                    mt={hasBanner ? BANNER_HEIGHT : 0}
                     display={isFullscreen ? 'none' : 'flex'}
                     px="md"
                 >
                     <NavBarContent
                         navBarMode={navBarMode}
                         activeProjectUuid={activeProjectUuid}
+                        activeProjectUrlIdentifier={
+                            project
+                                ? getProjectUrlIdentifier(project)
+                                : activeProjectUuid
+                        }
                         isLoadingActiveProject={isLoadingActiveProject}
                     />
                 </Box>
                 {/* Placeholder to reserve space when navbar is fixed */}
                 {isFixed && !isFullscreen && <Box h={headerContainerHeight} />}
-            </Mantine8Provider>
+            </MantineBaseProvider>
         </Box>
     );
 });

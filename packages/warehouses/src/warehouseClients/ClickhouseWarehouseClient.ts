@@ -1,17 +1,26 @@
-import { createClient, Row, type ClickHouseClient } from '@clickhouse/client';
+import {
+    createClient,
+    Row,
+    type ClickHouseClient,
+    type ClickHouseSettings,
+} from '@clickhouse/client';
 import {
     AnyType,
     CreateClickhouseCredentials,
     DimensionType,
     getErrorMessage,
+    getWarehouseTableType,
     Metric,
     MetricType,
+    setCatalogTimestampDomain,
     SupportedDbtAdapter,
     TimeIntervalUnit,
     WarehouseConnectionError,
     WarehouseQueryError,
     WarehouseResults,
     WarehouseTypes,
+    type ResultNumericKind,
+    type TimestampDomain,
 } from '@lightdash/common';
 import { WarehouseCatalog } from '../types';
 import {
@@ -21,6 +30,9 @@ import {
 import { normalizeUnicode } from '../utils/sql';
 import WarehouseBaseClient from './WarehouseBaseClient';
 import WarehouseBaseSqlBuilder from './WarehouseBaseSqlBuilder';
+
+// Cannot be `import` as it's not under TS root dir
+const { version: LIGHTDASH_VERSION } = require('../../package.json');
 
 export enum ClickhouseTypes {
     UINT8 = 'UInt8',
@@ -63,14 +75,70 @@ interface TableInfo {
     table: string;
 }
 
-const convertDataTypeToDimensionType = (
+const cleanClickhouseType = (type: ClickhouseTypes | string): string => {
+    // Iteratively unwrap Nullable/LowCardinality wrappers in any nesting order
+    // e.g. LowCardinality(Nullable(Int32)) -> Nullable(Int32) -> Int32
+    let cleanType = type;
+    let prev = '';
+    while (cleanType !== prev) {
+        prev = cleanType;
+        cleanType = cleanType
+            .replace(/^Nullable\((.+)\)$/, '$1')
+            .replace(/^LowCardinality\((.+)\)$/, '$1');
+    }
+    // Strip all parenthesized arguments (handles Decimal(18,2), DateTime64(3,'UTC'), FixedString(N), etc.)
+    return cleanType.replace(/\(.*\)$/, '');
+};
+
+// ClickHouse has no naive timestamp type: DateTime/DateTime64 store epoch
+// instants and their zone is display metadata, so they are always aware.
+export const getClickhouseTimestampDomain = (
+    type: ClickhouseTypes | string,
+): TimestampDomain | undefined => {
+    switch (cleanClickhouseType(type)) {
+        case ClickhouseTypes.DATETIME:
+        case ClickhouseTypes.DATETIME64:
+            return 'aware';
+        default:
+            return undefined;
+    }
+};
+
+// The server names every decimal Decimal(P, S); one wider than 38 digits exceeds a DuckDB decimal
+export const getClickhouseNumericKind = (
+    type: ClickhouseTypes | string,
+): ResultNumericKind | null => {
+    const cleanType = cleanClickhouseType(type);
+    switch (cleanType) {
+        case ClickhouseTypes.UINT8:
+        case ClickhouseTypes.UINT16:
+        case ClickhouseTypes.UINT32:
+        case ClickhouseTypes.UINT64:
+        case ClickhouseTypes.INT8:
+        case ClickhouseTypes.INT16:
+        case ClickhouseTypes.INT32:
+        case ClickhouseTypes.INT64:
+            return { kind: 'integer' };
+        case ClickhouseTypes.FLOAT32:
+        case ClickhouseTypes.FLOAT64:
+            return { kind: 'float' };
+        case ClickhouseTypes.DECIMAL: {
+            const params = type.match(/Decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)/);
+            if (!params) return null;
+            const [, precision, scale] = params;
+            return Number(precision) <= 38
+                ? { kind: 'decimal', scale: Number(scale) }
+                : null;
+        }
+        default:
+            return null;
+    }
+};
+
+export const convertDataTypeToDimensionType = (
     type: ClickhouseTypes | string,
 ): DimensionType => {
-    // Remove nullable wrapper and low cardinality wrapper
-    const cleanType = type
-        .replace(/^Nullable\((.+)\)$/, '$1')
-        .replace(/^LowCardinality\((.+)\)$/, '$1')
-        .replace(/\(\d+\)/, ''); // Remove precision from decimals and fixed strings
+    const cleanType = cleanClickhouseType(type);
 
     switch (cleanType) {
         case ClickhouseTypes.BOOL:
@@ -128,6 +196,14 @@ const catalogToSchema = (
             warehouseCatalog[database][tableSchema || 'default'][tableName][
                 columnName
             ] = convertDataTypeToDimensionType(dataType);
+            setCatalogTimestampDomain(
+                warehouseCatalog,
+                database,
+                tableSchema || 'default',
+                tableName,
+                columnName,
+                getClickhouseTimestampDomain(dataType),
+            );
         });
     });
     return warehouseCatalog;
@@ -197,23 +273,66 @@ export class ClickhouseSqlBuilder extends WarehouseBaseSqlBuilder {
         // ClickHouse has a native median function
         return `median(${valueSql})`;
     }
+
+    getNullSafeEqualJoinSql(left: string, right: string): string {
+        // ClickHouse's analyzer can't determine join keys from the generic
+        // `a = b OR (a IS NULL AND b IS NULL)` form in deep CTE chains; its
+        // native `<=>` (isNotDistinctFrom) operator is accepted as a join key.
+        return `${left} <=> ${right}`;
+    }
+
+    buildArray(elements: string[]): string {
+        // ClickHouse rejects the `ARRAY[...]` form; arrays are `[...]`.
+        return `[${elements.join(', ')}]`;
+    }
 }
+
+const DEFAULT_MAX_OPEN_CONNECTIONS = 10;
+
+// The client is cached per project and shared by all concurrent query jobs;
+// when jobs outnumber sockets they queue and report inflated exec times.
+export const getMaxOpenConnections = (maxOpenConnections?: number): number =>
+    Number.isInteger(maxOpenConnections)
+        ? Math.max(maxOpenConnections as number, DEFAULT_MAX_OPEN_CONNECTIONS)
+        : DEFAULT_MAX_OPEN_CONNECTIONS;
+
+export type ClickhouseWarehouseClientOptions = {
+    agentSession?: boolean;
+    agentJobControls?: boolean;
+    /** Upper bound of concurrent queries sharing this client; sizes the HTTP socket pool. */
+    maxOpenConnections?: number;
+};
 
 export class ClickhouseWarehouseClient extends WarehouseBaseClient<CreateClickhouseCredentials> {
     client: ClickHouseClient;
 
-    constructor(credentials: CreateClickhouseCredentials) {
-        super(credentials, new ClickhouseSqlBuilder(credentials.startOfWeek));
+    constructor(
+        credentials: CreateClickhouseCredentials,
+        options?: ClickhouseWarehouseClientOptions,
+    ) {
+        super(
+            credentials,
+            new ClickhouseSqlBuilder(credentials.startOfWeek),
+            options,
+        );
 
         const protocol = credentials.secure ? 'https' : 'http';
         const url = `${protocol}://${credentials.host}:${credentials.port}`;
 
         this.client = createClient({
             url,
+            // Sent as User-Agent prefix: lightdash/<version> clickhouse-js/<version> (...)
+            application: `lightdash/${LIGHTDASH_VERSION}`,
             username: credentials.user,
             password: credentials.password,
             database: credentials.schema, // In clickhouse schema = database
             request_timeout: (credentials.timeoutSeconds || 30) * 1000,
+            ...(options?.agentJobControls
+                ? { clickhouse_settings: { use_query_cache: 0 as const } }
+                : {}),
+            max_open_connections: getMaxOpenConnections(
+                options?.maxOpenConnections,
+            ),
         });
     }
 
@@ -227,24 +346,28 @@ export class ClickhouseWarehouseClient extends WarehouseBaseClient<CreateClickho
         },
     ): Promise<void> {
         try {
-            let alteredQuery = sql;
+            // Build clickhouse_settings with optional timezone and log_comment for query tags
+            const clickhouseSettings: ClickHouseSettings = {};
+            if (options?.timezone) {
+                clickhouseSettings.session_timezone = options.timezone;
+            }
             if (options?.tags) {
-                alteredQuery = `${alteredQuery}\n-- ${JSON.stringify(
-                    options?.tags,
-                )}`;
+                // Use native log_comment setting - persists in system.query_log
+                clickhouseSettings.log_comment = JSON.stringify(options.tags);
             }
 
             const resultSet = await this.client.query({
-                query: alteredQuery,
+                query: sql,
                 format: 'JSONCompactEachRowWithNamesAndTypes',
                 query_params: options?.queryParams,
-                clickhouse_settings: options?.timezone
-                    ? { timezone: options.timezone }
-                    : undefined,
+                clickhouse_settings:
+                    Object.keys(clickhouseSettings).length > 0
+                        ? clickhouseSettings
+                        : undefined,
             });
 
             const columnNames: string[] = [];
-            const fields: Record<string, { type: DimensionType }> = {};
+            const fields: WarehouseResults['fields'] = {};
 
             const stream = resultSet.stream();
 
@@ -269,10 +392,12 @@ export class ClickhouseWarehouseClient extends WarehouseBaseClient<CreateClickho
                     } else if (Object.keys(fields).length === 0) {
                         // handle second row with column types
                         columnNames.forEach((c, index) => {
+                            const rawType = String(row[index]);
+                            const numericKind =
+                                getClickhouseNumericKind(rawType);
                             fields[c] = {
-                                type: convertDataTypeToDimensionType(
-                                    String(row[index]),
-                                ),
+                                type: convertDataTypeToDimensionType(rawType),
+                                ...(numericKind ? { numericKind } : {}),
                             };
                         });
                         // eslint-disable-next-line no-await-in-loop
@@ -326,7 +451,9 @@ export class ClickhouseWarehouseClient extends WarehouseBaseClient<CreateClickho
                 stream.on('error', reject);
             });
         } catch (e: unknown) {
-            throw new WarehouseQueryError(getErrorMessage(e));
+            const translatedError = new WarehouseQueryError(getErrorMessage(e));
+            translatedError.cause = e;
+            throw translatedError;
         }
     }
 
@@ -361,7 +488,9 @@ export class ClickhouseWarehouseClient extends WarehouseBaseClient<CreateClickho
                 },
             );
         } catch (e: unknown) {
-            throw new WarehouseQueryError(getErrorMessage(e));
+            const translatedError = new WarehouseQueryError(getErrorMessage(e));
+            translatedError.cause = e;
+            throw translatedError;
         }
 
         return catalogToSchema(results);
@@ -390,7 +519,11 @@ export class ClickhouseWarehouseClient extends WarehouseBaseClient<CreateClickho
                 databaseName,
             },
         );
-        return this.parseWarehouseCatalog(rows, convertDataTypeToDimensionType);
+        return this.parseWarehouseCatalog(
+            rows,
+            convertDataTypeToDimensionType,
+            getClickhouseTimestampDomain,
+        );
     }
 
     async getFields(
@@ -422,27 +555,31 @@ export class ClickhouseWarehouseClient extends WarehouseBaseClient<CreateClickho
                 tableName,
             },
         );
-        return this.parseWarehouseCatalog(rows, convertDataTypeToDimensionType);
+        return this.parseWarehouseCatalog(
+            rows,
+            convertDataTypeToDimensionType,
+            getClickhouseTimestampDomain,
+        );
     }
 
     async getAllTables() {
-        const databaseName = this.credentials.schema; // In clickhouse schema = database
+        // In clickhouse schema = database; list every non-system database
         const query = `
             SELECT 
                 '' as "table_catalog",
                 database as "table_schema",
-                name as "table_name"
+                name as "table_name",
+                engine as "table_type"
             FROM system.tables
-            WHERE database = {databaseName: String}
+            WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
             ORDER BY database, name
         `;
-        const { rows } = await this.runQuery(query, {}, undefined, undefined, {
-            databaseName,
-        });
+        const { rows } = await this.runQuery(query, {}, undefined);
         return rows.map((row) => ({
             database: row.table_catalog,
             schema: row.table_schema || 'default',
             table: row.table_name,
+            tableType: getWarehouseTableType(row.table_type),
         }));
     }
 
@@ -453,7 +590,11 @@ export class ClickhouseWarehouseClient extends WarehouseBaseClient<CreateClickho
                 format: 'JSON',
             });
         } catch (e: unknown) {
-            throw new WarehouseConnectionError(getErrorMessage(e));
+            const translatedError = new WarehouseConnectionError(
+                getErrorMessage(e),
+            );
+            translatedError.cause = e;
+            throw translatedError;
         }
     }
 }

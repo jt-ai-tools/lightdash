@@ -8,6 +8,9 @@ import { LightdashConfig } from './parseConfig';
 export const lightdashConfigMock: LightdashConfig = {
     allowMultiOrgs: false,
     auth: {
+        mobileLogin: {
+            enabled: true,
+        },
         pat: {
             enabled: false,
             allowedOrgRoles: Object.values(OrganizationMemberRole),
@@ -25,6 +28,7 @@ export const lightdashConfigMock: LightdashConfig = {
             googleDriveApiKey: undefined,
             enableGCloudADC: false,
             enabled: false,
+            includeBigqueryScope: false,
         },
         okta: {
             loginPath: '',
@@ -55,6 +59,10 @@ export const lightdashConfigMock: LightdashConfig = {
             privateKeyFile: undefined,
             openIdConnectMetadataEndpoint: undefined,
         },
+        microsoftManagedSignIn: {
+            iosClientId: undefined,
+            androidClientId: undefined,
+        },
         oidc: {
             authMethod: undefined,
             authSigningAlg: undefined,
@@ -77,6 +85,11 @@ export const lightdashConfigMock: LightdashConfig = {
             clientId: undefined,
             clientSecret: undefined,
         },
+        snowflakeAi: {
+            loginPath: '/login/snowflake-ai',
+            callbackPath: '/oauth/redirect/snowflake-ai',
+            testAccountUrlOrigin: null,
+        },
         databricks: {
             loginPath: '/login/databricks',
             callbackPath: '/oauth/redirect/databricks',
@@ -87,6 +100,13 @@ export const lightdashConfigMock: LightdashConfig = {
         },
     },
     lightdashCloudInstance: 'test-instance',
+    mobileAppAssociation: {
+        appleTeamId: 'TEAMID',
+        appleBundleId: 'com.lightdash.mobile',
+        androidPackageName: 'com.lightdash.mobile',
+        androidCertificateFingerprints: [],
+    },
+    openaiAppsChallengeToken: undefined,
     k8s: {
         podNamespace: undefined,
         podName: undefined,
@@ -96,17 +116,30 @@ export const lightdashConfigMock: LightdashConfig = {
         enabled: false,
         port: 9090,
         path: '/metrics',
+        eventMetricsEnabled: false,
+        allQueryMetricsEnabled: false,
+        extendedMetricsEnabled: false,
+        httpMetricsEnabled: false,
     },
-    chart: { versionHistory: { daysLimit: 0 } },
+    queryPhaseMetrics: {
+        projectUuids: [],
+    },
+    dbt: {
+        environmentVariableAllowlist: [],
+        sourceFetchConcurrency: undefined,
+    },
     dashboard: {
         maxTilesPerTab: 50,
         maxTabsPerDashboard: 20,
-        versionHistory: { daysLimit: 0 },
+        disableSentryTracking: false,
     },
     database: {
         connectionUri: undefined,
         maxConnections: undefined,
         minConnections: undefined,
+        acquireConnectionTimeout: undefined,
+        readinessProbeTtlMs: 10_000,
+        allowMissingMigrations: false,
     },
     intercom: {
         appId: '',
@@ -118,7 +151,15 @@ export const lightdashConfigMock: LightdashConfig = {
     headway: {
         enabled: false,
     },
+    carto: {
+        apiKey: null,
+    },
     lightdashSecret: 'look away this is a secret',
+    lightdashSecrets: {
+        active: 'look away this is a secret',
+        fallbacks: [],
+        all: ['look away this is a secret'],
+    },
     logging: {
         level: 'debug',
         format: 'pretty',
@@ -128,10 +169,14 @@ export const lightdashConfigMock: LightdashConfig = {
         fileFormat: undefined,
         fileLevel: undefined,
         filePath: '',
+        auditActorAsString: false,
     },
     maxPayloadSize: '',
+    httpServer: {
+        keepAliveTimeoutMs: 620_000,
+    },
     pivotTable: { maxColumnLimit: 0 },
-    posthog: undefined,
+    enableImprovedExcelDates: false,
     s3: {
         endpoint: 'mock_endpoint',
         bucket: 'mock_bucket',
@@ -147,15 +192,31 @@ export const lightdashConfigMock: LightdashConfig = {
             region: 'mock_region',
         },
     },
+    staticAssets: {},
+    natsWorker: {
+        enabled: false,
+        url: undefined,
+        workerConcurrency: 1,
+        queueTimeoutMs: 180000,
+    },
     rudder: {
         writeKey: '',
         dataPlaneUrl: '',
     },
     scheduler: {
         concurrency: 0,
+        dailyJobGenerationConcurrency: 10,
         enabled: false,
+        pollInterval: 1000,
         jobTimeout: 0,
+        shutdownTimeout: 60_000,
         tasks: ALL_TASK_NAMES,
+        quiesce: {
+            pollInterval: 2_000,
+            gracePeriod: 180_000,
+            resumeJitter: 60_000,
+            resumeRampPeriod: 180_000,
+        },
         queryHistory: {
             cleanup: {
                 enabled: true,
@@ -164,6 +225,15 @@ export const lightdashConfigMock: LightdashConfig = {
                 delayMs: 100,
                 maxBatches: 100,
                 schedule: '0 2 * * *',
+            },
+        },
+        scimRequestLogs: {
+            cleanup: {
+                enabled: true,
+                retentionDays: 30,
+                batchSize: 1000,
+                delayMs: 100,
+                maxBatches: 100,
             },
         },
     },
@@ -179,6 +249,7 @@ export const lightdashConfigMock: LightdashConfig = {
         release: '',
         environment: '',
         tracesSampleRate: 0,
+        queryTracesSampleRate: null,
         profilesSampleRate: 0,
         anr: {
             enabled: false,
@@ -190,8 +261,26 @@ export const lightdashConfigMock: LightdashConfig = {
     helpMenuUrl: undefined,
     trustProxy: false,
     mode: LightdashMode.DEFAULT,
+    mobile: {
+        minimumSupportedVersion: {
+            android: null,
+            ios: null,
+        },
+    },
+    mobilePushNotifications: {
+        enabled: false,
+        bundleId: 'com.lightdash.mobile',
+        teamId: undefined,
+        sandbox: undefined,
+        production: undefined,
+        fcm: undefined,
+    },
     license: {
         licenseKey: null,
+        licenseCertificate: null,
+    },
+    roadmap: {
+        baseUrl: 'https://roadmap.lightdash.com',
     },
     groups: {
         enabled: false,
@@ -200,36 +289,71 @@ export const lightdashConfigMock: LightdashConfig = {
         enabled: false,
     },
     smtp: undefined,
+    postmark: {
+        accountToken: undefined,
+        returnPathSubdomain: 'pm-bounces',
+    },
     siteUrl: 'https://test.lightdash.cloud',
     query: {
+        underlyingDataMaxDimensions: 50,
         maxPageSize: 2500,
         maxLimit: 5000,
         defaultLimit: 500,
         csvCellsLimit: 100000,
+        csvMaxLimit: 5000000,
         timezone: undefined,
-        useSqlPivotResults: false,
-        showExecutionTime: false,
+        retryQueryOnTransientErrors: true,
+        enableTimezoneSupport: undefined,
+        exploreSummaryProjectionMinStoredBytesPerExplore: 2048,
     },
     ai: {
+        agentResultIdentityCheckEnabled: true,
+        decisions: {
+            provider: 'jev',
+            apiKey: null,
+            model: 'jev-1.13.0',
+            timeoutMs: 900,
+        },
+        lunaDecisions: {
+            provider: 'luna',
+            apiKey: null,
+            model: 'gpt-6-luna',
+            timeoutMs: 900,
+        },
+        lunaShadowEnabled: false,
         copilot: {
             enabled: false,
             debugLoggingEnabled: false,
             maxQueryLimit: 10000,
+            runSqlMaxLimit: 5000,
             telemetryEnabled: false,
+            threadDumpEnabled: false,
             requiresFeatureFlag: false,
             askAiButtonEnabled: false,
             embeddingEnabled: true,
             defaultProvider: 'openai',
+            lightdashManagedProviders: [],
             providers: {
                 openai: {
                     apiKey: 'mock_api_key',
-                    modelName: 'gpt-5.2-2025-12-11',
+                    modelName: 'gpt-5.4',
                     embeddingModelName: 'text-embedding-3-small',
                     zeroDataRetention: false,
+                    customHeaders: {},
+                    supportsStreaming: true,
                 },
             },
             verifiedAnswerSimilarityThreshold: 0.6,
+            mcpConnectionTimeoutMs: 20_000,
+            mcpAllowPrivateAddresses: false,
+            toolDescriptionMaxChars: 600,
             defaultEmbeddingModelProvider: 'openai',
+        },
+        agentMemory: {
+            consolidationDryRun: false,
+        },
+        promptInputRequestClassifier: {
+            enabled: false,
         },
     },
     embedding: {
@@ -237,11 +361,9 @@ export const lightdashConfigMock: LightdashConfig = {
         allowAll: {
             dashboards: false,
             charts: false,
+            apps: false,
         },
         events: undefined,
-    },
-    scim: {
-        enabled: false,
     },
     security: {
         contentSecurityPolicy: {
@@ -250,7 +372,7 @@ export const lightdashConfigMock: LightdashConfig = {
             frameAncestors: [],
         },
         crossOriginResourceSharingPolicy: {
-            enabled: false,
+            enabled: true,
             allowedDomains: [],
         },
     },
@@ -265,9 +387,11 @@ export const lightdashConfigMock: LightdashConfig = {
     },
     headlessBrowser: {
         internalLightdashHost: 'https://test.lightdash.cloud',
+        internalLightdashHostIgnoreHttpsErrors: false,
         browserEndpoint: 'ws://headless-browser:3000',
         maxScreenshotRetries: 5,
         retryBaseDelayMs: 3000,
+        screenshotTimeoutMs: 180000,
     },
     contentAsCode: {
         maxDownloads: 100,
@@ -291,40 +415,27 @@ export const lightdashConfigMock: LightdashConfig = {
     googleCloudPlatform: {
         projectId: 'test-project-id',
     },
+    managedAgent: {
+        validatedModels: [],
+        schedule: '0 0 * * *',
+        sessionTimeoutMs: 300000,
+        maxSteps: 120,
+    },
+    aiWriteback: {
+        legacyAnthropicApiKey: null,
+        codingAgentMaxRepoSizeMb: 500,
+    },
     mcp: {
         enabled: true,
+        runSqlMaxLimit: 5000,
     },
     customRoles: {
-        enabled: false,
-    },
-    dashboardComments: {
-        enabled: true,
-    },
-    echarts6: {
         enabled: false,
     },
     editYamlInUi: {
         enabled: false,
     },
-    partialCompilation: {
-        enabled: false,
-    },
     funnelBuilder: {
-        enabled: false,
-    },
-    maps: {
-        enabled: false,
-    },
-    savedMetricsTree: {
-        enabled: undefined,
-    },
-    nestedSpacesPermissions: {
-        enabled: false,
-    },
-    defaultUserSpaces: {
-        enabled: false,
-    },
-    adminChangeNotifications: {
         enabled: false,
     },
     persistentDownloadUrls: {
@@ -337,5 +448,149 @@ export const lightdashConfigMock: LightdashConfig = {
     softDelete: {
         enabled: false,
         retentionDays: 30,
+    },
+    pgWire: {
+        port: undefined,
+        host: undefined,
+        ssl: {
+            mode: 'require',
+            certPath: undefined,
+            keyPath: undefined,
+        },
+    },
+    dashboardComments: {
+        enabled: true,
+    },
+    externalSources: {
+        maxFileSizeBytes: 100 * 1024 * 1024,
+        maxRows: 1_000_000,
+        maxOrganizationBytes: 5 * 1024 * 1024 * 1024,
+        maxConcurrentIngestsPerOrganization: 2,
+        maxConcurrentDuckdbQueriesPerOrganization: 2,
+        googleSheetsBatchRows: 5_000,
+        stagedUploadTtlHours: 24,
+        ingestLeaseMs: 35 * 60 * 1000,
+        garbageCollectionBatchSize: 100,
+    },
+    preAggregates: {
+        enabled: false,
+        parquetEnabled: false,
+        materializationMaxRows: null,
+        duckdbQueryMemoryLimit: null,
+        s3: {
+            endpoint: 'mock_endpoint',
+            bucket: 'mock_preagg_bucket',
+            region: 'mock_region',
+        },
+    },
+    warehouseClient: {
+        releaseSshTunnelOnScopeExit: true,
+        resolveCompileCredentials: true,
+        resolveDbtCloudPreviewCredentials: true,
+        resolveTimezonePreviewCredentials: true,
+        resolveTestAndCompileCredentials: true,
+    },
+    motherduckInstanceCache: {
+        enabled: false,
+        projectUuids: [],
+        idleTtlMs: 600000,
+        maxAgeMs: 3600000,
+        maxEntries: 8,
+        maxConsecutiveFailures: 3,
+    },
+    usageEvents: {
+        enabled: false,
+        flushIntervalMs: 60000,
+        flushBatchSize: 1000,
+        bufferMaxSize: 10000,
+        s3: null,
+    },
+    appRuntime: {
+        enabled: false,
+        dataAppCodingAgent: 'claude',
+        dataAppGatewayBaseUrls: {
+            anthropic: null,
+            bedrock: null,
+            openai: null,
+        },
+        lightdashOrigin: 'https://test.lightdash.cloud',
+        cdnOrigin: null,
+        previewOrigin: null,
+        cspAllowedOrigins: [],
+        s3: null,
+        e2bApiKey: null,
+        sampleDataEnabled: true,
+        externalConnectionAllowedPrivateHostCidrs: {},
+        e2bTemplateName: 'lightdash-data-app',
+        e2bTemplateTag: '',
+        e2bAiWritebackTemplateName: 'lightdash-ai-writeback',
+        e2bAiWritebackTemplateTag: '',
+        sandboxProvider: 'e2b',
+        sandboxDockerImage: 'lightdash-sandbox:local',
+        sandboxAiWritebackDockerImage: 'lightdash-ai-writeback:local',
+        sandboxAgentOnboardingDockerImage: 'lightdash-agent-onboarding:local',
+        sandboxIdleTimeoutMs: 30 * 60 * 1000,
+        sandboxSnapshotRetentionMs: 7 * 24 * 60 * 60 * 1000,
+        lambdaMicroVm: {
+            region: 'eu-west-1',
+            executionRoleArn: null,
+            ingressConnectorArn:
+                'arn:aws:lambda:eu-west-1:aws:network-connector:aws-network-connector:ALL_INGRESS',
+            egressConnectorArn:
+                'arn:aws:lambda:eu-west-1:aws:network-connector:aws-network-connector:INTERNET_EGRESS',
+            maxIdleDurationSeconds: 30 * 60,
+            suspendedDurationSeconds: 7 * 24 * 60 * 60,
+        },
+        lambdaMicroVmDataAppImageArn: null,
+        lambdaMicroVmAiWritebackImageArn: null,
+        azureSandboxes: {
+            subscriptionId: null,
+            resourceGroup: null,
+            region: 'eastus2',
+            apiVersion: '2026-02-01-preview',
+            tokenScope: 'https://management.azuredevcompute.io/.default',
+            resourceTier: 'M',
+        },
+        azureSandboxesDataAppGroup: null,
+        azureSandboxesDataAppDiskImage: null,
+        azureSandboxesAiWritebackGroup: null,
+        azureSandboxesAiWritebackDiskImage: null,
+        gcpCloudRun: {
+            sandboxUrl: null,
+            sandboxSecret: null,
+        },
+        e2bAgentOnboardingTemplateName: 'lightdash-agent-onboarding',
+        e2bAgentOnboardingTemplateTag: 'test',
+        e2bCodingAgentTemplateName: 'lightdash-ai-coding-agent',
+        e2bCodingAgentTemplateTag: '',
+        otel: {
+            enabled: false,
+            endpoint: '',
+            protocol: 'http/protobuf',
+            exportIntervalMs: 1000,
+            auth: { type: 'none' },
+        },
+        dependencyRegistryHosts: ['registry.npmjs.org'],
+        dependencyInstallTimeoutMs: 120_000,
+        dependencyMinReleaseAgeDays: 0,
+        // Off in the test fixture (real default is `true`) so tests never make
+        // a live OSV call.
+        dependencyMalwareCheckEnabled: false,
+        chartRegistry: { url: null, allowInsecure: false, channel: 'stable' },
+    },
+    enabledFeatureFlags: new Set<string>(),
+    disabledFeatureFlags: new Set<string>(),
+    previewFeatureFlags: { enabled: false },
+};
+
+export const lightdashConfigWithGoogleOAuthMock: LightdashConfig = {
+    ...lightdashConfigMock,
+    auth: {
+        ...lightdashConfigMock.auth,
+        google: {
+            ...lightdashConfigMock.auth.google,
+            oauth2ClientId: 'test-google-client-id',
+            oauth2ClientSecret: 'test-google-client-secret',
+        },
     },
 };

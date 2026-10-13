@@ -6,76 +6,118 @@ import { type AnyValidateFunction } from 'ajv/dist/types';
 import { type AnyType } from '../types/any';
 import {
     type DbtManifestVersion,
-    type DbtMetric,
     type DbtModelNode,
     type DbtRawModelNode,
 } from '../types/dbt';
 import { ParseError } from '../types/errors';
 import lightdashMetadataSchema from './schemas/lightdashMetadata.json';
+import lightdashSchemaV7 from './schemas/lightdashV7.json';
+import lightdashSchemaV8 from './schemas/lightdashV8.json';
+import lightdashSchemaV9 from './schemas/lightdashV9.json';
 import lightdashSchemaV10 from './schemas/lightdashV10.json';
 import lightdashSchemaV11 from './schemas/lightdashV11.json';
 import lightdashSchemaV12 from './schemas/lightdashV12.json';
 import lightdashSchemaV20 from './schemas/lightdashV20.json';
-import lightdashSchemaV7 from './schemas/lightdashV7.json';
-import lightdashSchemaV8 from './schemas/lightdashV8.json';
-import lightdashSchemaV9 from './schemas/lightdashV9.json';
+import dbtManifestSchemaV7 from './schemas/manifestV7.json';
+import dbtManifestSchemaV8 from './schemas/manifestV8.json';
+import dbtManifestSchemaV9 from './schemas/manifestV9.json';
 import dbtManifestSchemaV10 from './schemas/manifestV10.json';
 import dbtManifestSchemaV11 from './schemas/manifestV11.json';
 import dbtManifestSchemaV12 from './schemas/manifestV12.json';
 import dbtManifestSchemaV20 from './schemas/manifestV20.json';
-import dbtManifestSchemaV7 from './schemas/manifestV7.json';
-import dbtManifestSchemaV8 from './schemas/manifestV8.json';
-import dbtManifestSchemaV9 from './schemas/manifestV9.json';
 
-const ajv = new Ajv2020();
-ajv.addMetaSchema(draft7MetaSchema); // add backward compatibility with draft-07
-ajv.addSchema([
-    dbtManifestSchemaV7,
-    dbtManifestSchemaV8,
-    dbtManifestSchemaV9,
-    dbtManifestSchemaV10,
-    dbtManifestSchemaV11,
-    dbtManifestSchemaV12,
-    dbtManifestSchemaV20,
-    lightdashMetadataSchema,
-    lightdashSchemaV7,
-    lightdashSchemaV8,
-    lightdashSchemaV9,
-    lightdashSchemaV10,
-    lightdashSchemaV11,
-    lightdashSchemaV12,
-    lightdashSchemaV20,
-]);
-addFormats(ajv);
+// Lazily constructed so that merely importing this module does NOT trigger Ajv
+// schema compilation. Ajv validates each added schema against the meta-schema
+// using `new Function`, which violates a strict CSP (no `unsafe-eval`). dbt
+// manifest validation only runs on the backend/CLI, never in the browser SDK —
+// so deferring construction keeps the SDK bundle from compiling validators at
+// load time. See issue #21276.
+let ajvInstance: Ajv2020 | undefined;
+type AjvErrorContext = {
+    modelName?: string;
+    sourceName?: string;
+};
+
+const getAjv = (): Ajv2020 => {
+    if (ajvInstance === undefined) {
+        const ajv = new Ajv2020();
+        ajv.addMetaSchema(draft7MetaSchema); // add backward compatibility with draft-07
+        ajv.addSchema([
+            dbtManifestSchemaV7,
+            dbtManifestSchemaV8,
+            dbtManifestSchemaV9,
+            dbtManifestSchemaV10,
+            dbtManifestSchemaV11,
+            dbtManifestSchemaV12,
+            dbtManifestSchemaV20,
+            lightdashMetadataSchema,
+            lightdashSchemaV7,
+            lightdashSchemaV8,
+            lightdashSchemaV9,
+            lightdashSchemaV10,
+            lightdashSchemaV11,
+            lightdashSchemaV12,
+            lightdashSchemaV20,
+        ]);
+        addFormats(ajv);
+        ajvInstance = ajv;
+    }
+    return ajvInstance;
+};
 
 export class ManifestValidator {
     private readonly lightdashSchemaId: string;
 
-    private readonly dbtSchemaId: string;
-
     constructor(manifestVersion: DbtManifestVersion) {
         this.lightdashSchemaId = `https://schemas.lightdash.com/lightdash/${manifestVersion}.json`;
-        this.dbtSchemaId = `https://schemas.getdbt.com/dbt/manifest/${manifestVersion}.json`;
     }
 
     static isValid = (
         validator: ValidateFunction<AnyType>,
         data: AnyType,
+        context?: AjvErrorContext,
     ): [true, undefined] | [false, string] => {
         const isValid = validator(data);
         if (!isValid) {
-            return [false, ManifestValidator.formatAjvErrors(validator)];
+            return [
+                false,
+                ManifestValidator.formatAjvErrors(validator, context),
+            ];
         }
         return [true, undefined];
     };
 
-    static formatAjvErrors = (validator: AnyValidateFunction): string =>
+    static formatAjvErrors = (
+        validator: AnyValidateFunction,
+        context?: AjvErrorContext,
+    ): string =>
         (validator.errors || [])
-            .map((err) => `Field at "${err.instancePath}" ${err.message}`)
+            .map((error) => {
+                const location = error.instancePath || 'model root';
+                const modelContext = context?.modelName
+                    ? `Model "${context.modelName}"${
+                          context.sourceName
+                              ? ` from dbt source "${context.sourceName}"`
+                              : ''
+                      }: `
+                    : '';
+
+                if (
+                    error.keyword === 'additionalProperties' &&
+                    typeof error.params.additionalProperty === 'string'
+                ) {
+                    return `${modelContext}Property "${error.params.additionalProperty}" at ${location} is not allowed. Remove or update it in your dbt model, then deploy again.`;
+                }
+
+                const action = context?.modelName
+                    ? 'Update this field in your dbt model, then deploy again.'
+                    : 'Update this field and try again.';
+                return `${modelContext}Field at ${location} ${error.message}. ${action}`;
+            })
             .join('\n');
 
     static getValidator = <T>(schemaRef: string) => {
-        const validator = ajv.getSchema<T>(schemaRef);
+        const validator = getAjv().getSchema<T>(schemaRef);
         if (validator === undefined) {
             throw new ParseError(
                 `Could not find schema with reference: ${schemaRef}`,
@@ -87,18 +129,21 @@ export class ManifestValidator {
     isModelValid = (
         model: DbtRawModelNode,
     ): [true, undefined] | [false, string] => {
+        // Seeds are only used as join targets and don't need full model
+        // schema validation (which enforces resource_type: "model").
+        // They just need valid Lightdash metadata and columns.
+        if (model.resource_type === 'seed') {
+            return [true, undefined];
+        }
         const validator = ManifestValidator.getValidator<DbtModelNode>(
             `${this.lightdashSchemaId}#/definitions/LightdashCompiledModelNode`,
         );
-        return ManifestValidator.isValid(validator, model);
-    };
-
-    isDbtMetricValid = (
-        metric: DbtMetric,
-    ): [true, undefined] | [false, string] => {
-        const validator = ManifestValidator.getValidator<DbtMetric>(
-            `${this.dbtSchemaId}#/definitions/Metric`,
-        );
-        return ManifestValidator.isValid(validator, metric);
+        const modelToValidate = { ...model };
+        delete modelToValidate.lightdash_source_name;
+        delete modelToValidate.lightdash_source_uuid;
+        return ManifestValidator.isValid(validator, modelToValidate, {
+            modelName: model.name,
+            sourceName: model.lightdash_source_name,
+        });
     };
 }

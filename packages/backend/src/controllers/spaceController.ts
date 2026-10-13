@@ -2,10 +2,20 @@ import {
     AddSpaceGroupAccess,
     AddSpaceUserAccess,
     ApiErrorPayload,
+    ApiPersonalSpaceResponse,
+    ApiSpaceAccessListResponse,
+    ApiSpaceAsCodeListResponse,
+    ApiSpaceAsCodeUpsertResponse,
+    ApiSpaceDeleteImpactResponse,
     ApiSpaceResponse,
+    ApiSpaceServiceAccountCandidatesResponse,
     ApiSuccessEmpty,
+    assertRegisteredAccount,
     CreateSpace,
+    SpaceAsCode,
     UpdateSpace,
+    type KnexPaginateArgs,
+    type UUID,
 } from '@lightdash/common';
 import {
     Body,
@@ -16,6 +26,7 @@ import {
     Patch,
     Path,
     Post,
+    Query,
     Request,
     Response,
     Route,
@@ -23,6 +34,8 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -35,13 +48,73 @@ import { BaseController } from './baseController';
 @Tags('Spaces')
 export class SpaceController extends BaseController {
     /**
+     * List service accounts eligible for direct access to this space.
+     * @summary List service account candidates
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'SpaceController.getSpaceServiceAccountCandidates',
+        ),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Get('{spaceUuid}/share/service-accounts')
+    @OperationId('GetSpaceServiceAccountCandidates')
+    @Tags('Roles & Permissions')
+    async getSpaceServiceAccountCandidates(
+        @Path() projectUuid: UUID,
+        @Path() spaceUuid: UUID,
+        @Request() req: express.Request,
+    ): Promise<ApiSpaceServiceAccountCandidatesResponse> {
+        assertRegisteredAccount(req.account);
+        const results = await this.services
+            .getSpaceService()
+            .getSpaceServiceAccountCandidates(
+                req.account,
+                projectUuid,
+                spaceUuid,
+            );
+        return { status: 'ok', results };
+    }
+
+    /**
+     * Get the current user's personal space in a project, if they have one
+     * @summary Get personal space
+     * @param projectUuid The uuid of the project
+     * @param req
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('personal')
+    @OperationId('GetPersonalSpace')
+    async getPersonalSpace(
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiPersonalSpaceResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const results = await this.services
+            .getSpaceService()
+            .getPersonalSpace(projectUuid, toSessionUser(req.account));
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
      * Get details for a space in a project
      * @summary Get space
      * @param projectUuid The uuid of the space's parent project
      * @param spaceUuid The uuid of the space to get
      * @param req
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('SpaceController.getSpace'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('{spaceUuid}')
     @OperationId('GetSpace')
@@ -50,13 +123,94 @@ export class SpaceController extends BaseController {
         @Path() spaceUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiSpaceResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         const results = await this.services
             .getSpaceService()
-            .getSpace(projectUuid, req.user!, spaceUuid);
+            .getSpace(projectUuid, toSessionUser(req.account), spaceUuid);
         return {
             status: 'ok',
             results,
+        };
+    }
+
+    /**
+     * Get the resolved user access list for a space
+     * @summary List space access
+     * @param projectUuid The uuid of the space's parent project
+     * @param spaceUuid The uuid of the space
+     * @param req
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('SpaceController.getSpaceAccessList'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Get('{spaceUuid}/access')
+    @OperationId('GetSpaceAccessList')
+    @Tags('Roles & Permissions')
+    async getSpaceAccessList(
+        @Path() projectUuid: UUID,
+        @Path() spaceUuid: UUID,
+        @Request() req: express.Request,
+        @Query() page?: number,
+        @Query() pageSize?: number,
+        @Query() searchQuery?: string,
+        @Query() userUuids?: string[],
+        @Query() directOnly?: boolean,
+    ): Promise<ApiSpaceAccessListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        let paginateArgs: KnexPaginateArgs | undefined;
+
+        if (page && pageSize) {
+            paginateArgs = { page, pageSize };
+        }
+
+        return {
+            status: 'ok',
+            results: await this.services
+                .getSpaceService()
+                .getSpaceAccessList(
+                    projectUuid,
+                    toSessionUser(req.account),
+                    spaceUuid,
+                    {
+                        paginateArgs,
+                        filters: { searchQuery, userUuids, directOnly },
+                    },
+                ),
+        };
+    }
+
+    /**
+     * Get the impact of deleting a space (affected child spaces, charts, dashboards)
+     * @summary Get delete impact
+     * @param projectUuid The uuid of the space's parent project
+     * @param spaceUuid The uuid of the space to check
+     * @param req
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('SpaceController.getDeleteImpact'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Get('{spaceUuid}/delete-impact')
+    @OperationId('GetSpaceDeleteImpact')
+    async getDeleteImpact(
+        @Path() projectUuid: string,
+        @Path() spaceUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiSpaceDeleteImpactResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getSpaceService()
+                .getDeleteImpact(toSessionUser(req.account), spaceUuid),
         };
     }
 
@@ -81,10 +235,11 @@ export class SpaceController extends BaseController {
         @Body() body: CreateSpace,
         @Request() req: express.Request,
     ): Promise<ApiSpaceResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         const results = await this.services
             .getSpaceService()
-            .createSpace(projectUuid, req.user!, body);
+            .createSpace(projectUuid, toSessionUser(req.account), body);
         return {
             status: 'ok',
             results,
@@ -102,6 +257,7 @@ export class SpaceController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('SpaceController.deleteSpace'),
     ])
     @SuccessResponse('204', 'Deleted')
     @Delete('{spaceUuid}')
@@ -111,8 +267,11 @@ export class SpaceController extends BaseController {
         @Path() spaceUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
-        await this.services.getSpaceService().deleteSpace(req.user!, spaceUuid);
+        await this.services
+            .getSpaceService()
+            .delete(toSessionUser(req.account), spaceUuid);
         return {
             status: 'ok',
             results: undefined,
@@ -131,6 +290,7 @@ export class SpaceController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('SpaceController.updateSpace'),
     ])
     @SuccessResponse('200', 'Updated')
     @Patch('{spaceUuid}')
@@ -142,10 +302,11 @@ export class SpaceController extends BaseController {
         @Body() body: UpdateSpace,
         @Request() req: express.Request,
     ): Promise<ApiSpaceResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         const results = await this.services
             .getSpaceService()
-            .updateSpace(req.user!, spaceUuid, body);
+            .updateSpace(toSessionUser(req.account), spaceUuid, body);
         return {
             status: 'ok',
             results,
@@ -164,6 +325,7 @@ export class SpaceController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('SpaceController.addSpaceUserAccess'),
     ])
     @SuccessResponse('200', 'Success')
     @Post('{spaceUuid}/share')
@@ -175,11 +337,12 @@ export class SpaceController extends BaseController {
         @Body() body: AddSpaceUserAccess,
         @Request() req: express.Request,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         await this.services
             .getSpaceService()
             .addSpaceUserAccess(
-                req.user!,
+                toSessionUser(req.account),
                 spaceUuid,
                 body.userUuid,
                 body.spaceRole,
@@ -202,6 +365,7 @@ export class SpaceController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('SpaceController.revokeSpaceAccessForUser'),
     ])
     @SuccessResponse('200', 'Success')
     @Delete('{spaceUuid}/share/{userUuid}')
@@ -213,10 +377,15 @@ export class SpaceController extends BaseController {
         @Path() userUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         await this.services
             .getSpaceService()
-            .removeSpaceUserAccess(req.user!, spaceUuid, userUuid);
+            .removeSpaceUserAccess(
+                toSessionUser(req.account),
+                spaceUuid,
+                userUuid,
+            );
         return {
             status: 'ok',
             results: undefined,
@@ -236,6 +405,7 @@ export class SpaceController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('SpaceController.addSpaceGroupAccess'),
     ])
     @SuccessResponse('200', 'Success')
     @Post('{spaceUuid}/group/share')
@@ -247,11 +417,12 @@ export class SpaceController extends BaseController {
         @Body() body: AddSpaceGroupAccess,
         @Request() req: express.Request,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         await this.services
             .getSpaceService()
             .addSpaceGroupAccess(
-                req.user!,
+                toSessionUser(req.account),
                 spaceUuid,
                 body.groupUuid,
                 body.spaceRole,
@@ -274,6 +445,7 @@ export class SpaceController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('SpaceController.revokeGroupSpaceAccess'),
     ])
     @SuccessResponse('200', 'Success')
     @Delete('{spaceUuid}/group/share/{groupUuid}')
@@ -285,10 +457,15 @@ export class SpaceController extends BaseController {
         @Path() groupUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         await this.services
             .getSpaceService()
-            .removeSpaceGroupAccess(req.user!, spaceUuid, groupUuid);
+            .removeSpaceGroupAccess(
+                toSessionUser(req.account),
+                spaceUuid,
+                groupUuid,
+            );
         return {
             status: 'ok',
             results: undefined,

@@ -1,12 +1,12 @@
 import {
-    DimensionType,
-    MetricType,
-    TableCalculationType,
     assertUnreachable,
+    DimensionType,
     getItemType,
     isDimension,
     isField,
     isMetric,
+    MetricType,
+    TableCalculationType,
     type CustomDimension,
     type Field,
     type SortField,
@@ -90,6 +90,7 @@ export const getSortLabel = (
         case MetricType.COUNT_DISTINCT:
         case MetricType.SUM:
         case MetricType.SUM_DISTINCT:
+        case MetricType.AVERAGE_DISTINCT:
         case MetricType.MIN:
         case MetricType.MAX:
         case MetricType.NUMBER:

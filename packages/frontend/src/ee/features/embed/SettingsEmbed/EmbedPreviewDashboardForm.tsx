@@ -1,4 +1,5 @@
 import {
+    FeatureFlags,
     FilterInteractivityValues,
     type ApiError,
     type CreateEmbedJwt,
@@ -10,6 +11,7 @@ import {
 } from '@lightdash/common';
 import {
     ActionIcon,
+    Badge,
     Button,
     Divider,
     Flex,
@@ -23,18 +25,28 @@ import {
     Text,
     TextInput,
     Title,
-} from '@mantine-8/core';
+    Tooltip,
+    useComputedColorScheme,
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
-import { IconEye, IconLink, IconPlus, IconTrash } from '@tabler/icons-react';
+import {
+    IconEye,
+    IconFlask2Filled,
+    IconInfoCircle,
+    IconLink,
+    IconPlus,
+    IconTrash,
+} from '@tabler/icons-react';
 import { useMutation } from '@tanstack/react-query';
-import { useCallback, type FC } from 'react';
+import { useCallback, useState, type FC, type ReactNode } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { lightdashApi } from '../../../../api';
 import MantineIcon from '../../../../components/common/MantineIcon';
 import useToaster from '../../../../hooks/toaster/useToaster';
 import { useAsyncClipboard } from '../../../../hooks/useAsyncClipboard';
 import useUser from '../../../../hooks/user/useUser';
-import EmbedCodeSnippet from './EmbedCodeSnippet';
+import { useServerFeatureFlag } from '../../../../hooks/useServerOrClientFeatureFlag';
+import EmbedCodeSnippet, { type EmbedMethod } from './EmbedCodeSnippet';
 import EmbedFiltersInteractivity from './EmbedFiltersInteractivity';
 
 const useEmbedUrlCreateMutation = (projectUuid: string) => {
@@ -69,22 +81,39 @@ type FormValues = {
     dashboardFiltersInteractivity: DashboardFilterInteractivityOptions;
     parameterInteractivity: ParameterInteractivityOptions;
     canExportCsv?: boolean;
+    canExportDashboardCsv?: boolean;
     canExportImages?: boolean;
     externalId?: string;
     canExportPagePdf?: boolean;
     canDateZoom?: boolean;
     canExplore?: boolean;
     canViewUnderlyingData?: boolean;
+    canViewDataApps?: boolean;
+    stickyHeader?: boolean;
 } & IntrinsicUserAttributes;
 
 const EmbedPreviewDashboardForm: FC<{
     projectUuid: string;
     siteUrl: string;
     dashboards: DashboardBasicDetails[];
-}> = ({ projectUuid, siteUrl, dashboards }) => {
+    writeActions?: CreateEmbedJwt['writeActions'];
+    writeActionsPanel?: ReactNode;
+    onDashboardSpaceChange?: (spaceUuid: string | undefined) => void;
+}> = ({
+    projectUuid,
+    siteUrl,
+    dashboards,
+    writeActions,
+    writeActionsPanel,
+    onDashboardSpaceChange,
+}) => {
     const { mutateAsync: createEmbedUrl } =
         useEmbedUrlCreateMutation(projectUuid);
+    const colorScheme = useComputedColorScheme();
     const { data: user } = useUser(true);
+    const [embedMethod, setEmbedMethod] = useState<EmbedMethod>('iframe');
+    const dataAppsFlag = useServerFeatureFlag(FeatureFlags.EnableDataApps);
+    const dataAppsEnabled = dataAppsFlag.data?.enabled === true;
 
     const form = useForm<FormValues>({
         initialValues: {
@@ -98,16 +127,21 @@ const EmbedPreviewDashboardForm: FC<{
             email: user?.email,
             dashboardFiltersInteractivity: {
                 enabled: FilterInteractivityValues.none,
+                hidden: false,
+                canAddFilters: false,
             },
             parameterInteractivity: {
                 enabled: false,
             },
             canExportCsv: false,
+            canExportDashboardCsv: false,
             canExportImages: false,
             canDateZoom: false,
             canExportPagePdf: true,
             canExplore: false,
             canViewUnderlyingData: false,
+            canViewDataApps: false,
+            stickyHeader: false,
         },
         validate: {
             dashboardUuid: (value: undefined | string) => {
@@ -129,6 +163,12 @@ const EmbedPreviewDashboardForm: FC<{
                     dashboardUuid: values.dashboardUuid!,
                     dashboardFiltersInteractivity: {
                         enabled: values.dashboardFiltersInteractivity?.enabled,
+                        hidden:
+                            values.dashboardFiltersInteractivity?.hidden ??
+                            false,
+                        canAddFilters:
+                            values.dashboardFiltersInteractivity
+                                ?.canAddFilters ?? false,
                         ...(values.dashboardFiltersInteractivity?.enabled ===
                         FilterInteractivityValues.some
                             ? {
@@ -140,13 +180,17 @@ const EmbedPreviewDashboardForm: FC<{
                     },
                     parameterInteractivity: values.parameterInteractivity,
                     canExportCsv: values.canExportCsv,
+                    canExportDashboardCsv: values.canExportDashboardCsv,
                     canExportImages: values.canExportImages,
                     isPreview,
                     canDateZoom: values.canDateZoom,
                     canExportPagePdf: values.canExportPagePdf ?? true,
                     canExplore: values.canExplore,
                     canViewUnderlyingData: values.canViewUnderlyingData,
+                    canViewDataApps: values.canViewDataApps,
+                    stickyHeader: values.stickyHeader,
                 },
+                writeActions,
                 userAttributes: values.userAttributes.reduce(
                     (acc, item) => ({
                         ...acc,
@@ -160,7 +204,7 @@ const EmbedPreviewDashboardForm: FC<{
                 },
             };
         },
-        [projectUuid],
+        [writeActions, projectUuid],
     );
 
     const handlePreview = useCallback(async () => {
@@ -172,16 +216,32 @@ const EmbedPreviewDashboardForm: FC<{
         const data = await createEmbedUrl(
             convertFormValuesToCreateEmbedJwt(formValues, true),
         );
-        //Open data.url on new tab
-        window.open(data.url, '_blank');
-    }, [formValues, form, convertFormValuesToCreateEmbedJwt, createEmbedUrl]);
+        // Open data.url in a new tab, matching the current app color scheme
+        const previewUrl = new URL(data.url);
+        previewUrl.searchParams.set('theme', colorScheme);
+        window.open(previewUrl.toString(), '_blank', 'noopener,noreferrer');
+    }, [
+        formValues,
+        form,
+        convertFormValuesToCreateEmbedJwt,
+        createEmbedUrl,
+        colorScheme,
+    ]);
 
     const generateUrl = useCallback(async () => {
         const data = await createEmbedUrl(
             convertFormValuesToCreateEmbedJwt(form.values),
         );
-        return data.url;
-    }, [convertFormValuesToCreateEmbedJwt, createEmbedUrl, form.values]);
+        // Match the current app color scheme
+        const url = new URL(data.url);
+        url.searchParams.set('theme', colorScheme);
+        return url.toString();
+    }, [
+        convertFormValuesToCreateEmbedJwt,
+        createEmbedUrl,
+        form.values,
+        colorScheme,
+    ]);
 
     const { handleCopy } = useAsyncClipboard(generateUrl);
     const handleCopySubmit = onSubmit(handleCopy);
@@ -199,6 +259,17 @@ const EmbedPreviewDashboardForm: FC<{
                     placeholder="Select a dashboard..."
                     searchable
                     {...form.getInputProps('dashboardUuid')}
+                    onChange={(dashboardUuid) => {
+                        form.setFieldValue(
+                            'dashboardUuid',
+                            dashboardUuid ?? undefined,
+                        );
+                        onDashboardSpaceChange?.(
+                            dashboards.find(
+                                (dashboard) => dashboard.uuid === dashboardUuid,
+                            )?.spaceUuid,
+                        );
+                    }}
                 />
 
                 <Stack gap="xs">
@@ -207,7 +278,6 @@ const EmbedPreviewDashboardForm: FC<{
                     </Text>
                     <SegmentedControl
                         value={form.values.expiresIn}
-                        radius="md"
                         onChange={(value) =>
                             form.setFieldValue('expiresIn', value)
                         }
@@ -222,7 +292,7 @@ const EmbedPreviewDashboardForm: FC<{
                     />
                 </Stack>
 
-                <Paper p="md" withBorder>
+                <Paper p="md">
                     <Stack gap="md">
                         <Title order={6}>Identification & Security</Title>
                         <Stack gap="xs">
@@ -254,7 +324,7 @@ const EmbedPreviewDashboardForm: FC<{
                                                 <TextInput
                                                     size="xs"
                                                     placeholder="E.g. user_country"
-                                                    style={{ flex: 1 }}
+                                                    flex={1}
                                                     {...form.getInputProps(
                                                         `userAttributes.${index}.key`,
                                                     )}
@@ -262,7 +332,7 @@ const EmbedPreviewDashboardForm: FC<{
                                                 <TextInput
                                                     size="xs"
                                                     placeholder="E.g. US"
-                                                    style={{ flex: 1 }}
+                                                    flex={1}
                                                     {...form.getInputProps(
                                                         `userAttributes.${index}.value`,
                                                     )}
@@ -309,7 +379,7 @@ const EmbedPreviewDashboardForm: FC<{
                     </Stack>
                 </Paper>
 
-                <Paper p="md" withBorder>
+                <Paper p="md">
                     <Stack gap="sm">
                         <Title order={6}>Interactivity & Permissions</Title>
                         <Stack gap="md">
@@ -352,7 +422,16 @@ const EmbedPreviewDashboardForm: FC<{
                                     {...form.getInputProps('canExportCsv', {
                                         type: 'checkbox',
                                     })}
-                                    label="Export CSV"
+                                    label="Export CSV (per tile)"
+                                />
+                                <Switch
+                                    {...form.getInputProps(
+                                        'canExportDashboardCsv',
+                                        {
+                                            type: 'checkbox',
+                                        },
+                                    )}
+                                    label="Export all tiles (CSV/XLSX ZIP)"
                                 />
                                 <Switch
                                     {...form.getInputProps('canExportImages', {
@@ -388,10 +467,70 @@ const EmbedPreviewDashboardForm: FC<{
                                     )}
                                     label="View underlying data"
                                 />
+                                {dataAppsEnabled && (
+                                    <Switch
+                                        {...form.getInputProps(
+                                            'canViewDataApps',
+                                            { type: 'checkbox' },
+                                        )}
+                                        label={
+                                            <Group gap="xs">
+                                                <Text inherit>
+                                                    View data apps
+                                                </Text>
+                                                <Tooltip
+                                                    label="Lets data apps run project-wide metric queries and use external connections linked by an admin."
+                                                    maw="300px"
+                                                    position="right"
+                                                >
+                                                    <MantineIcon
+                                                        icon={IconInfoCircle}
+                                                        size="sm"
+                                                    />
+                                                </Tooltip>
+                                            </Group>
+                                        }
+                                    />
+                                )}
+                            </Stack>
+
+                            <Stack gap="xs">
+                                <Text size="sm" fw={500}>
+                                    Appearance:
+                                </Text>
+                                <Switch
+                                    {...form.getInputProps('stickyHeader', {
+                                        type: 'checkbox',
+                                    })}
+                                    label="Sticky header (keep tabs & filters visible when scrolling)"
+                                />
                             </Stack>
                         </Stack>
                     </Stack>
                 </Paper>
+
+                {writeActionsPanel && (
+                    <Paper p="md">
+                        <Stack gap="xs" mb="md">
+                            <Group gap="sm">
+                                <Title order={6}>Write actions</Title>
+                                <Badge
+                                    color="violet"
+                                    size="sm"
+                                    leftSection={<IconFlask2Filled size={12} />}
+                                >
+                                    Experimental
+                                </Badge>
+                            </Group>
+                            <Text c="dimmed" fz="sm">
+                                Choose which Lightdash actor should power
+                                embedded actions like creating scheduled
+                                deliveries or saving charts.
+                            </Text>
+                        </Stack>
+                        {writeActionsPanel}
+                    </Paper>
+                )}
 
                 <Flex justify="flex-end" gap="sm">
                     <Button
@@ -415,13 +554,34 @@ const EmbedPreviewDashboardForm: FC<{
 
             <Stack gap="md" mb="md">
                 <Stack gap="xs">
-                    <Title order={5}>Code snippet</Title>
+                    <Text size="sm" fw={500}>
+                        Embed method
+                    </Text>
+                    <SegmentedControl
+                        value={embedMethod}
+                        onChange={(value) =>
+                            setEmbedMethod(value as EmbedMethod)
+                        }
+                        data={[
+                            { label: 'Iframe', value: 'iframe' },
+                            { label: 'SDK', value: 'sdk' },
+                        ]}
+                    />
+                </Stack>
+                <Stack gap="xs">
+                    <Title order={5}>
+                        {embedMethod === 'iframe'
+                            ? 'Iframe embed code'
+                            : 'React SDK code'}
+                    </Title>
                     <Text c="dimmed" fz="sm">
-                        Copy and paste this code snippet into your application
-                        to generate embed URLs.
+                        {embedMethod === 'iframe'
+                            ? 'Use this for iframe or direct embedding with a full embed URL.'
+                            : 'Use this for React SDK embedding with a backend-generated JWT.'}
                     </Text>
                 </Stack>
                 <EmbedCodeSnippet
+                    mode={embedMethod}
                     projectUuid={projectUuid}
                     siteUrl={siteUrl}
                     data={convertFormValuesToCreateEmbedJwt(formValues)}

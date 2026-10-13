@@ -1,31 +1,50 @@
 import {
-    convertFormattedValue,
-    getItemLabel,
-    isCustomDimension,
-    isDimension,
-    isField,
-    isMetric,
-    isNumericItem,
-    isTableCalculation,
-    itemsInMetricQuery,
+    getMergeColumnTotals,
+    QueryHistoryStatus,
     type ColumnProperties,
     type ConditionalFormattingConfig,
     type ConditionalFormattingMinMaxMap,
-    type DashboardFilters,
-    type DateZoom,
     type ItemsMap,
     type MetricQuery,
     type ParametersValuesMap,
-    type PivotConfig,
     type PivotData,
+    type RowLimit,
     type TableChart,
 } from '@lightdash/common';
+import {
+    buildTablePivotInput,
+    calculateConditionalFormattingMinMaxMap,
+    canUseTableSubtotals,
+    getFieldsNeedingMinMax,
+    getNumUnpivotedDimensions,
+    getRowTotalIndexFieldIds,
+    getTableColumnWidth,
+    getTableDimensions,
+    getTableFieldLabelDefault,
+    getTableFieldLabelOverride,
+    getTableSelectedItemIds,
+    hasTotalableColumns as getHasTotalableColumns,
+    isPivotResultStale as getIsPivotResultStale,
+    isPivotTableEnabled as getIsPivotTableEnabled,
+    isTableColumnFrozen,
+    isTableColumnVisible,
+    pruneTableColumnProperties,
+    resolvePivotRowFieldIds,
+    shouldDefaultShowTableNames,
+    shouldDisableMetricsAsRows,
+    shouldDisableSubtotals,
+} from '@lightdash/visualization/editor';
 import { createWorkerFactory, useWorker } from '@shopify/react-web-worker';
-import uniq from 'lodash/uniq';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import useEmbed from '../../ee/providers/Embed/useEmbed';
-import { useCalculateSubtotals } from '../useCalculateSubtotals';
-import { useCalculateTotal } from '../useCalculateTotal';
+import { useMergeSafe } from '../../features/mergeQuery/context/useMerge';
+import {
+    useAsyncCalculateGrandTotal,
+    useAsyncCalculateRowSubtotals,
+    useAsyncCalculateRowTotal,
+    useAsyncCalculateSubtotals,
+    useAsyncCalculateTotal,
+} from '../useAsyncCalculateTotal';
+import { useProjectUuid } from '../useProjectUuid';
 import { type InfiniteQueryResults } from '../useQueryResults';
 import getDataAndColumns from './getDataAndColumns';
 
@@ -39,20 +58,17 @@ const useTableConfig = (
         | (InfiniteQueryResults & {
               metricQuery?: MetricQuery;
               fields?: ItemsMap;
+              resolvedTimezone?: string;
           })
         | undefined,
     itemsMap: ItemsMap | undefined,
     columnOrder: string[],
     pivotDimensions: string[] | undefined,
-    pivotTableMaxColumnLimit: number,
-    savedChartUuid?: string,
-    dashboardFilters?: DashboardFilters,
+    pivotRows: string[] | undefined,
+    onPivotRowsChange?: (value: string[] | undefined) => void,
     invalidateCache?: boolean,
     parameters?: ParametersValuesMap,
-    dateZoom?: DateZoom,
 ) => {
-    const { embedToken } = useEmbed();
-
     const [showColumnCalculation, setShowColumnCalculation] = useState<boolean>(
         !!tableChartConfig?.showColumnCalculation,
     );
@@ -74,18 +90,24 @@ const useTableConfig = (
     const [showSubtotals, setShowSubtotals] = useState<boolean>(
         tableChartConfig?.showSubtotals ?? false,
     );
+    const [showSubtotalsExpanded, setShowSubtotalsExpanded] = useState<boolean>(
+        tableChartConfig?.showSubtotalsExpanded ?? false,
+    );
+    const [showRowGrouping, setShowRowGrouping] = useState<boolean>(
+        tableChartConfig?.showRowGrouping ?? false,
+    );
     const [hideRowNumbers, setHideRowNumbers] = useState<boolean>(
         tableChartConfig?.hideRowNumbers === undefined
             ? false
             : tableChartConfig.hideRowNumbers,
     );
 
-    const [wrapColumnTitles, setWrapColumnTitles] = useState<boolean>(
-        tableChartConfig?.wrapColumnTitles ?? true,
-    );
-
     const [metricsAsRows, setMetricsAsRows] = useState<boolean>(
         tableChartConfig?.metricsAsRows || false,
+    );
+
+    const [rowLimit, setRowLimit] = useState<RowLimit | undefined>(
+        tableChartConfig?.rowLimit,
     );
 
     useEffect(() => {
@@ -94,12 +116,7 @@ const useTableConfig = (
             itemsMap !== undefined
         ) {
             const hasItemsFromMultipleTables =
-                Object.values(itemsMap).reduce<string[]>((acc, item) => {
-                    if (isField(item)) {
-                        acc.push(item.table);
-                    }
-                    return uniq(acc);
-                }, []).length > 0;
+                shouldDefaultShowTableNames(itemsMap);
             if (hasItemsFromMultipleTables) {
                 setShowTableNames(true);
             }
@@ -110,32 +127,46 @@ const useTableConfig = (
         Record<string, ColumnProperties>
     >(tableChartConfig?.columns === undefined ? {} : tableChartConfig?.columns);
 
-    const selectedItemIds = useMemo(() => {
-        return resultsData?.metricQuery
-            ? itemsInMetricQuery(resultsData.metricQuery)
-            : undefined;
-    }, [resultsData?.metricQuery]);
+    const selectedItemIds = useMemo(
+        () => getTableSelectedItemIds(resultsData?.metricQuery),
+        [resultsData?.metricQuery],
+    );
+
+    const rowFieldIds = useMemo(
+        () =>
+            resolvePivotRowFieldIds({
+                selectedItemIds,
+                itemsMap,
+                pivotDimensions,
+                columnOrder,
+                pivotRows,
+            }),
+        [selectedItemIds, itemsMap, pivotDimensions, columnOrder, pivotRows],
+    );
+
+    const disableMetricsAsRows = shouldDisableMetricsAsRows({
+        metricsAsRows,
+        selectedItemIds: selectedItemIds?.filter(
+            (fieldId) => columnProperties[fieldId]?.visible !== false,
+        ),
+        rowFieldIds,
+        itemsMap,
+    });
+    const effectiveMetricsAsRows = metricsAsRows && !disableMetricsAsRows;
+
+    useEffect(() => {
+        if (disableMetricsAsRows) setMetricsAsRows(false);
+    }, [disableMetricsAsRows]);
 
     const getFieldLabelDefault = useCallback(
-        (fieldId: string | null | undefined) => {
-            if (!fieldId || !itemsMap || !(fieldId in itemsMap))
-                return undefined;
-
-            const item = itemsMap[fieldId];
-
-            if (isField(item) && !showTableNames) {
-                return item.label;
-            } else {
-                return getItemLabel(item);
-            }
-        },
+        (fieldId: string | null | undefined) =>
+            getTableFieldLabelDefault(itemsMap, showTableNames, fieldId),
         [itemsMap, showTableNames],
     );
 
     const getFieldLabelOverride = useCallback(
-        (fieldId: string | null | undefined) => {
-            return fieldId ? columnProperties[fieldId]?.name : undefined;
-        },
+        (fieldId: string | null | undefined) =>
+            getTableFieldLabelOverride(columnProperties, fieldId),
         [columnProperties],
     );
 
@@ -153,112 +184,186 @@ const useTableConfig = (
         [getFieldLabelOverride, getFieldLabelDefault],
     );
 
-    // This is controlled by the state in this component.
-    // User configures the names and visibilty of these in the config panel
     const isColumnVisible = useCallback(
-        (fieldId: string) => {
-            // we should always show dimensions when pivoting
-            // hiding a dimension randomly removes values from all metrics
-            if (
-                pivotDimensions &&
-                pivotDimensions.length > 0 &&
-                isDimension(getField(fieldId))
-            ) {
-                return true;
-            }
-
-            return columnProperties[fieldId]?.visible ?? true;
-        },
-        [pivotDimensions, getField, columnProperties],
+        (fieldId: string) => isTableColumnVisible(columnProperties, fieldId),
+        [columnProperties],
     );
     const isColumnFrozen = useCallback(
-        (fieldId: string) => columnProperties[fieldId]?.frozen === true,
+        (fieldId: string) => isTableColumnFrozen(columnProperties, fieldId),
         [columnProperties],
     );
 
     const getColumnWidth = useCallback(
-        (fieldId: string) => columnProperties[fieldId]?.width,
+        (fieldId: string) => getTableColumnWidth(columnProperties, fieldId),
         [columnProperties],
     );
 
-    const isPivotTableEnabled =
-        resultsData?.metricQuery &&
-        resultsData.metricQuery.metrics.length > 0 &&
-        resultsData.rows.length &&
-        pivotDimensions &&
-        pivotDimensions.length > 0;
+    const isPivotTableEnabled = getIsPivotTableEnabled(
+        resultsData,
+        pivotDimensions,
+    );
 
-    const dimensions = useMemo(() => {
-        if (!itemsMap) return [];
+    // True when the configured pivot dimensions differ from the ones the current
+    // results were computed with (warehouse pivots key on groupByColumns). Mirrors
+    // the mismatch check in VisualizationWarning so a re-run is needed.
+    const isPivotResultStale = useMemo(
+        () =>
+            getIsPivotResultStale(
+                pivotDimensions,
+                resultsData?.pivotDetails?.groupByColumns,
+                isColumnVisible,
+            ),
+        [
+            pivotDimensions,
+            resultsData?.pivotDetails?.groupByColumns,
+            isColumnVisible,
+        ],
+    );
 
-        return columnOrder.filter((fieldId) => {
-            const item = itemsMap[fieldId];
-            return item && (isDimension(item) || isCustomDimension(item));
-        });
-    }, [columnOrder, itemsMap]);
+    const dimensions = useMemo(
+        () => getTableDimensions(columnOrder, itemsMap),
+        [columnOrder, itemsMap],
+    );
 
-    const numUnpivotedDimensions =
-        dimensions.length - (pivotDimensions?.length || 0);
+    const numUnpivotedDimensions = getNumUnpivotedDimensions(
+        dimensions,
+        pivotDimensions,
+    );
 
-    const canUseSubtotals = useMemo(() => {
-        return !metricsAsRows && numUnpivotedDimensions > 1;
-    }, [metricsAsRows, numUnpivotedDimensions]);
+    // Subtotals re-derive from the metric query behind the source query. A
+    // merge has no such query — its metric query describes the merged result
+    // rather than anything the warehouse can be asked to group again.
+    const mergeResults = useMergeSafe()?.mergeResults ?? null;
+    const isMerged = !!mergeResults;
+    const mergeColumnTotals = useMemo(
+        () =>
+            mergeResults
+                ? getMergeColumnTotals({
+                      mergeQuery: mergeResults.mergeQuery,
+                      fieldIds: mergeResults.columnOrder,
+                      itemsMap: mergeResults.fields,
+                  })
+                : {},
+        [mergeResults],
+    );
+    const canUseSubtotals = useMemo(
+        () => canUseTableSubtotals(numUnpivotedDimensions, isMerged),
+        [numUnpivotedDimensions, isMerged],
+    );
 
-    // Once dimensions are loaded, if there are not enough dimensions to use subtotals then
-    // turn off "Show subtotals" so that "Show metrics as rows" can be enabled.
+    // Once dimensions are loaded, turn off subtotals if there are not enough dimensions.
     useEffect(() => {
-        if (dimensions.length > 0 && numUnpivotedDimensions < 2)
+        if (shouldDisableSubtotals(dimensions.length, numUnpivotedDimensions))
             setShowSubtotals(false);
     }, [dimensions.length, numUnpivotedDimensions]);
 
-    const { data: totalCalculations } = useCalculateTotal(
-        savedChartUuid
-            ? {
-                  savedChartUuid,
-                  fieldIds: selectedItemIds,
-                  dashboardFilters,
-                  invalidateCache,
-                  itemsMap,
-                  showColumnCalculation:
-                      tableChartConfig?.showColumnCalculation,
-                  embedToken,
-                  parameters,
-              }
-            : {
-                  metricQuery: resultsData?.metricQuery,
-                  explore: resultsData?.metricQuery?.exploreName,
-                  fieldIds: selectedItemIds,
-                  itemsMap,
-                  showColumnCalculation:
-                      tableChartConfig?.showColumnCalculation,
-                  embedToken,
-                  parameters,
-              },
+    const projectUuid = useProjectUuid();
+    // Only request totals once the initial query has succeeded — a queryUuid can
+    // exist for a query that errored, and totals against that are meaningless.
+    const isInitialQueryReady =
+        resultsData?.queryStatus === QueryHistoryStatus.READY;
+    // A dimension-only table has nothing the warehouse can total; skip the
+    // request instead of letting the backend refuse it.
+    const hasTotalableColumns = useMemo(
+        () => getHasTotalableColumns(columnOrder, itemsMap),
+        [columnOrder, itemsMap],
     );
+    const canFetchAsyncTotals =
+        isInitialQueryReady &&
+        !!resultsData?.queryUuid &&
+        hasTotalableColumns &&
+        !!tableChartConfig?.showColumnCalculation;
+    const {
+        data: asyncTotals,
+        error: columnTotalsError,
+        isFetching: isCalculatingColumnTotals,
+    } = useAsyncCalculateTotal({
+        projectUuid,
+        sourceQueryUuid: resultsData?.queryUuid,
+        enabled: canFetchAsyncTotals,
+        invalidateCache,
+    });
 
-    const { data: groupedSubtotals } = useCalculateSubtotals(
-        embedToken && savedChartUuid
-            ? {
-                  savedChartUuid,
-                  dashboardFilters,
-                  invalidateCache,
-                  showSubtotals,
-                  columnOrder,
-                  pivotDimensions,
-                  embedToken,
-                  dateZoom,
-              }
-            : {
-                  metricQuery: resultsData?.metricQuery,
-                  explore: resultsData?.metricQuery?.exploreName,
-                  showSubtotals,
-                  columnOrder,
-                  pivotDimensions,
-                  embedToken,
-                  parameters,
-                  dateZoom,
-              },
+    // Index dimension field ids the warehouse row-total query groups by — the
+    // worker keys each rendered row's total by these. Row totals are exclusively
+    // warehouse-computed (no client-side fallback) for SQL pivots, in both the
+    // metrics-as-columns and metrics-as-rows layouts.
+    const rowTotalIndexFieldIds = useMemo<string[]>(
+        () => getRowTotalIndexFieldIds(resultsData?.pivotDetails?.indexColumn),
+        [resultsData?.pivotDetails?.indexColumn],
     );
+    const canFetchAsyncRowTotals =
+        isInitialQueryReady &&
+        !!resultsData?.queryUuid &&
+        hasTotalableColumns &&
+        !!tableChartConfig?.showRowCalculation &&
+        !!resultsData?.pivotDetails;
+    const {
+        data: asyncRowTotals,
+        error: rowTotalsError,
+        isFetching: isCalculatingRowTotals,
+    } = useAsyncCalculateRowTotal({
+        projectUuid,
+        sourceQueryUuid: resultsData?.queryUuid,
+        indexFieldIds: rowTotalIndexFieldIds,
+        enabled: canFetchAsyncRowTotals,
+        invalidateCache,
+    });
+
+    const canFetchAsyncGrandTotals =
+        isInitialQueryReady &&
+        !!resultsData?.queryUuid &&
+        hasTotalableColumns &&
+        !!resultsData?.pivotDetails &&
+        !!tableChartConfig?.showColumnCalculation &&
+        !!tableChartConfig?.showRowCalculation;
+    const {
+        data: asyncGrandTotals,
+        error: grandTotalsError,
+        isFetching: isCalculatingGrandTotals,
+    } = useAsyncCalculateGrandTotal({
+        projectUuid,
+        sourceQueryUuid: resultsData?.queryUuid,
+        enabled: canFetchAsyncGrandTotals,
+        invalidateCache,
+    });
+
+    const {
+        data: groupedSubtotals,
+        error: columnSubtotalsError,
+        isFetching: isCalculatingSubtotals,
+    } = useAsyncCalculateSubtotals({
+        projectUuid,
+        sourceQueryUuid: resultsData?.queryUuid,
+        dimensions: resultsData?.metricQuery?.dimensions,
+        columnOrder,
+        pivotDimensions,
+        enabled:
+            isInitialQueryReady &&
+            hasTotalableColumns &&
+            showSubtotals &&
+            canUseSubtotals,
+        invalidateCache,
+    });
+    const {
+        data: groupedRowSubtotals,
+        error: rowSubtotalsError,
+        isFetching: isCalculatingRowSubtotals,
+    } = useAsyncCalculateRowSubtotals({
+        projectUuid,
+        sourceQueryUuid: resultsData?.queryUuid,
+        dimensions: resultsData?.metricQuery?.dimensions,
+        columnOrder,
+        pivotDimensions,
+        enabled:
+            isInitialQueryReady &&
+            hasTotalableColumns &&
+            showSubtotals &&
+            canUseSubtotals &&
+            !!tableChartConfig?.showRowCalculation &&
+            (pivotDimensions?.length ?? 0) > 0,
+        invalidateCache,
+    });
 
     const columns = useMemo(() => {
         if (!selectedItemIds || !itemsMap) {
@@ -278,8 +383,15 @@ const useTableConfig = (
             isColumnFrozen,
             getColumnWidth,
             columnOrder,
-            totals: totalCalculations,
+            totals: asyncTotals,
+            totalsLoading: isCalculatingColumnTotals,
+            totalsError: columnTotalsError,
+            isMergedResult:
+                isMerged && !!tableChartConfig?.showColumnCalculation,
+            mergeColumnTotals,
             groupedSubtotals,
+            subtotalsLoading: isCalculatingSubtotals,
+            subtotalsError: columnSubtotalsError,
             parameters,
         });
     }, [
@@ -292,8 +404,15 @@ const useTableConfig = (
         isColumnFrozen,
         getColumnWidth,
         getFieldLabelOverride,
-        totalCalculations,
+        asyncTotals,
+        isMerged,
+        mergeColumnTotals,
+        tableChartConfig?.showColumnCalculation,
+        isCalculatingColumnTotals,
+        columnTotalsError,
         groupedSubtotals,
+        isCalculatingSubtotals,
+        columnSubtotalsError,
         parameters,
     ]);
     const worker = useWorker(createWorker);
@@ -306,31 +425,72 @@ const useTableConfig = (
         data: undefined,
         error: undefined,
     });
+    const pivotWorkerRequestIdRef = useRef(0);
+
+    const pivotWorkerInput = useMemo(
+        () =>
+            buildTablePivotInput({
+                pivotDimensions,
+                rows: resultsData?.rows,
+                metricQuery: resultsData?.metricQuery,
+                pivotDetails: resultsData?.pivotDetails,
+                selectedItemIds,
+                getField,
+                getFieldLabel,
+                isColumnVisible,
+                metricsAsRows: effectiveMetricsAsRows,
+                rowFieldIds,
+                columnOrder,
+                showColumnCalculation: tableChartConfig?.showColumnCalculation,
+                showRowCalculation: tableChartConfig?.showRowCalculation,
+                groupedSubtotals,
+                groupedRowSubtotals,
+                warehouseRowTotals: asyncRowTotals,
+                warehouseColumnTotals: asyncTotals,
+                warehouseGrandTotals: asyncGrandTotals,
+                parameters,
+            }),
+        [
+            pivotDimensions,
+            resultsData?.metricQuery,
+            resultsData?.rows,
+            resultsData?.pivotDetails,
+            effectiveMetricsAsRows,
+            rowFieldIds,
+            columnOrder,
+            selectedItemIds,
+            getField,
+            getFieldLabel,
+            isColumnVisible,
+            tableChartConfig?.showColumnCalculation,
+            tableChartConfig?.showRowCalculation,
+            groupedSubtotals,
+            groupedRowSubtotals,
+            asyncRowTotals,
+            asyncTotals,
+            asyncGrandTotals,
+            parameters,
+        ],
+    );
 
     useEffect(() => {
-        if (
-            !pivotDimensions ||
-            pivotDimensions.length === 0 ||
-            !resultsData?.metricQuery ||
-            resultsData.rows.length === 0
-        ) {
-            setPivotTableData((prevState) => {
-                // Only update if values are different
-                if (
-                    prevState.loading !== false ||
-                    prevState.data !== undefined ||
-                    prevState.error !== undefined
-                ) {
-                    return {
-                        loading: false,
-                        data: undefined,
-                        error: undefined,
-                    };
-                }
-                // Return previous state if no changes needed
-                return prevState;
-            });
+        const currentRequestId = ++pivotWorkerRequestIdRef.current;
 
+        if (!pivotWorkerInput) {
+            setPivotTableData((prevState) => {
+                if (
+                    !prevState.loading &&
+                    prevState.data === undefined &&
+                    prevState.error === undefined
+                ) {
+                    return prevState;
+                }
+                return {
+                    loading: false,
+                    data: undefined,
+                    error: undefined,
+                };
+            });
             return;
         }
 
@@ -340,108 +500,38 @@ const useTableConfig = (
             error: undefined,
         }));
 
-        const hiddenMetricFieldIds = selectedItemIds?.filter((fieldId) => {
-            const field = getField(fieldId);
-
-            return (
-                !isColumnVisible(fieldId) &&
-                field &&
-                ((isField(field) && isMetric(field)) ||
-                    isTableCalculation(field))
-            );
-        });
-
-        const pivotConfig: PivotConfig = {
-            pivotDimensions,
-            metricsAsRows,
-            columnOrder,
-            hiddenMetricFieldIds,
-            columnTotals: tableChartConfig?.showColumnCalculation,
-            rowTotals: tableChartConfig?.showRowCalculation,
-        };
-
-        if (resultsData.pivotDetails) {
-            worker
-                .convertSqlPivotedRowsToPivotData({
-                    rows: resultsData.rows,
-                    pivotDetails: resultsData.pivotDetails,
-                    pivotConfig,
-                    getField,
-                    getFieldLabel,
-                    groupedSubtotals,
-                })
-                .then((data) => {
+        worker
+            .convertSqlPivotedRowsToPivotData(pivotWorkerInput)
+            .then((data) => {
+                if (currentRequestId === pivotWorkerRequestIdRef.current) {
                     setPivotTableData({
                         loading: false,
-                        data: data,
+                        data,
                         error: undefined,
                     });
-                })
-                .catch((e) => {
+                }
+            })
+            .catch((e) => {
+                if (currentRequestId === pivotWorkerRequestIdRef.current) {
                     setPivotTableData({
                         loading: false,
                         data: undefined,
                         error: e.message,
                     });
-                });
-        } else {
-            worker
-                .pivotQueryResults({
-                    pivotConfig,
-                    metricQuery: resultsData.metricQuery,
-                    rows: resultsData.rows,
-                    groupedSubtotals,
-                    options: {
-                        maxColumns: pivotTableMaxColumnLimit,
-                    },
-                    getField,
-                    getFieldLabel,
-                })
-                .then((data) => {
-                    setPivotTableData({
-                        loading: false,
-                        data: data,
-                        error: undefined,
-                    });
-                })
-                .catch((e) => {
-                    setPivotTableData({
-                        loading: false,
-                        data: undefined,
-                        error: e.message,
-                    });
-                });
-        }
-    }, [
-        resultsData,
-        pivotDimensions,
-        columnOrder,
-        metricsAsRows,
-        selectedItemIds,
-        isColumnVisible,
-        getField,
-        getFieldLabel,
-        tableChartConfig?.showColumnCalculation,
-        tableChartConfig?.showRowCalculation,
-        worker,
-        pivotTableMaxColumnLimit,
-        groupedSubtotals,
-    ]);
+                }
+            });
+    }, [worker, pivotWorkerInput]);
+
+    // Unlike isPivotTableEnabled, true for pivots without metrics (e.g. only
+    // table calculations), which still render PivotTable and its totals.
+    const rendersPivotTable = pivotWorkerInput !== null;
 
     // Remove columnProperties from map if the column has been removed from results
     useEffect(() => {
         if (Object.keys(columnProperties).length > 0 && selectedItemIds) {
-            const newColumnProperties = Object.keys(columnProperties).reduce<
-                Record<string, ColumnProperties>
-            >(
-                (acc, field) =>
-                    selectedItemIds.includes(field)
-                        ? {
-                              ...acc,
-                              [field]: columnProperties[field],
-                          }
-                        : acc,
-                {},
+            const newColumnProperties = pruneTableColumnProperties(
+                columnProperties,
+                selectedItemIds,
             );
             // only update if something changed, otherwise we get into an infinite loop
             if (
@@ -455,18 +545,17 @@ const useTableConfig = (
 
     const updateColumnProperty = useCallback(
         (field: string, properties: Partial<ColumnProperties>) => {
-            const newProperties =
-                field in columnProperties
-                    ? { ...columnProperties[field], ...properties }
-                    : {
-                          ...properties,
-                      };
-            setColumnProperties({
-                ...columnProperties,
-                [field]: newProperties,
-            });
+            // functional setter so consecutive calls compose correctly
+
+            setColumnProperties((prev) => ({
+                ...prev,
+                [field]:
+                    field in prev
+                        ? { ...prev[field], ...properties }
+                        : { ...properties },
+            }));
         },
-        [columnProperties],
+        [],
     );
 
     const handleSetConditionalFormattings = useCallback(
@@ -488,19 +577,10 @@ const useTableConfig = (
         }
 
         // Step 1: Identify which fields need min/max calculation
-        const fieldsNeedingMinMax = new Set<string>();
-
-        conditionalFormattings?.forEach((config) => {
-            if (config.target) {
-                fieldsNeedingMinMax.add(config.target.fieldId);
-            }
-        });
-
-        Object.entries(columnProperties).forEach(([fieldId, props]) => {
-            if (props.displayStyle === 'bar') {
-                fieldsNeedingMinMax.add(fieldId);
-            }
-        });
+        const fieldsNeedingMinMax = getFieldsNeedingMinMax(
+            conditionalFormattings,
+            columnProperties,
+        );
 
         if (fieldsNeedingMinMax.size === 0) {
             prevMinMaxQueryUuidRef.current = resultsData.queryUuid;
@@ -524,78 +604,13 @@ const useTableConfig = (
             return cachedMinMaxMapRef.current;
         }
 
-        // Step 3: Build field-to-columns mapping
-        // For SQL pivots: Maps base field (e.g., "revenue") to pivot columns (e.g., ["revenue_bank", "revenue_paypal"])
-        // For non-pivots: Direct 1:1 mapping (e.g., "revenue" → ["revenue"])
-        const fieldColumnMapping = new Map<string, string[]>();
-
-        for (const fieldId of fieldsNeedingMinMax) {
-            if (!isColumnVisible(fieldId)) continue;
-
-            const field = itemsMap[fieldId];
-            if (!field || !isNumericItem(field)) continue;
-
-            if (!resultsData.pivotDetails) {
-                fieldColumnMapping.set(fieldId, [fieldId]);
-            } else {
-                const pivotColumnNames = resultsData.pivotDetails.valuesColumns
-                    .filter((col) => col.referenceField === fieldId)
-                    .map((col) => col.pivotColumnName);
-                if (pivotColumnNames.length > 0) {
-                    fieldColumnMapping.set(fieldId, pivotColumnNames);
-                }
-            }
-        }
-
-        if (fieldColumnMapping.size === 0) {
-            prevMinMaxQueryUuidRef.current = currentQueryUuid;
-            prevMinMaxFieldsRef.current = currentFieldsKey;
-            cachedMinMaxMapRef.current = undefined;
-            return undefined;
-        }
-
-        // Step 4: Single-pass collection of all values
-        const fieldValues = new Map<string, number[]>();
-        for (const fieldId of fieldColumnMapping.keys()) {
-            fieldValues.set(fieldId, []);
-        }
-
-        for (const row of resultsData.rows) {
-            for (const [fieldId, columnNames] of fieldColumnMapping.entries()) {
-                const values = fieldValues.get(fieldId) ?? [];
-                const field = itemsMap[fieldId];
-
-                for (const columnName of columnNames) {
-                    const rawValue = row[columnName]?.value?.raw;
-                    if (
-                        rawValue !== undefined &&
-                        rawValue !== null &&
-                        rawValue !== ''
-                    ) {
-                        const numValue = Number(rawValue);
-                        if (!Number.isNaN(numValue)) {
-                            values.push(convertFormattedValue(numValue, field));
-                        }
-                    }
-                }
-
-                // Update the values for the field
-                fieldValues.set(fieldId, values);
-            }
-        }
-
-        // Step 5: Calculate min/max for each field
-        const result: ConditionalFormattingMinMaxMap = {};
-        for (const [fieldId, values] of fieldValues.entries()) {
-            if (values.length > 0) {
-                result[fieldId] = {
-                    min: Math.min(...values),
-                    max: Math.max(...values),
-                };
-            }
-        }
-
-        const finalResult = Object.keys(result).length > 0 ? result : undefined;
+        // Steps 3-5: map fields to their result columns, collect values, min/max
+        const finalResult = calculateConditionalFormattingMinMaxMap({
+            fieldsNeedingMinMax,
+            itemsMap,
+            resultsData,
+            isColumnVisible,
+        });
 
         // Step 6: Update cache
         prevMinMaxQueryUuidRef.current = currentQueryUuid;
@@ -611,6 +626,8 @@ const useTableConfig = (
         resultsData,
     ]);
 
+    const exposedColumnProperties = columnProperties;
+
     const validConfig: TableChart = useMemo(
         () => ({
             showColumnCalculation,
@@ -618,11 +635,13 @@ const useTableConfig = (
             showTableNames,
             showResultsTotal,
             showSubtotals,
+            showSubtotalsExpanded,
+            showRowGrouping,
             columns: columnProperties,
             hideRowNumbers,
-            wrapColumnTitles,
             conditionalFormattings,
-            metricsAsRows,
+            metricsAsRows: effectiveMetricsAsRows,
+            rowLimit,
         }),
         [
             showColumnCalculation,
@@ -631,10 +650,12 @@ const useTableConfig = (
             showTableNames,
             showResultsTotal,
             showSubtotals,
+            showSubtotalsExpanded,
+            showRowGrouping,
             columnProperties,
             conditionalFormattings,
-            metricsAsRows,
-            wrapColumnTitles,
+            effectiveMetricsAsRows,
+            rowLimit,
         ],
     );
 
@@ -655,9 +676,12 @@ const useTableConfig = (
             setShowResultsTotal,
             showSubtotals,
             setShowSubtotals,
-            wrapColumnTitles,
-            setWrapColumnTitles,
-            columnProperties,
+            showSubtotalsExpanded,
+            setShowSubtotalsExpanded,
+            showRowGrouping,
+            setShowRowGrouping,
+
+            columnProperties: exposedColumnProperties,
             setColumnProperties,
             updateColumnProperty,
             columns,
@@ -671,11 +695,28 @@ const useTableConfig = (
             conditionalFormattings,
             onSetConditionalFormattings: handleSetConditionalFormattings,
             pivotTableData,
-            metricsAsRows,
+            metricsAsRows: effectiveMetricsAsRows,
             setMetricsAsRows,
+            rowFieldIds,
+            configuredRowFieldIds: pivotRows,
+            setRowFieldIds: onPivotRowsChange,
             isPivotTableEnabled,
+            rendersPivotTable,
+            isPivotResultStale,
             canUseSubtotals,
             groupedSubtotals,
+            columnTotalsError,
+            rowTotalsError,
+            grandTotalsError,
+            columnSubtotalsError,
+            rowSubtotalsError,
+            isCalculatingColumnTotals,
+            isCalculatingRowTotals,
+            isCalculatingRowSubtotals,
+            isCalculatingGrandTotals,
+            isCalculatingSubtotals,
+            rowLimit,
+            setRowLimit,
         }),
         [
             selectedItemIds,
@@ -693,10 +734,13 @@ const useTableConfig = (
             setShowResultsTotal,
             showSubtotals,
             setShowSubtotals,
-            columnProperties,
+            showSubtotalsExpanded,
+            setShowSubtotalsExpanded,
+            showRowGrouping,
+            setShowRowGrouping,
+
+            exposedColumnProperties,
             setColumnProperties,
-            wrapColumnTitles,
-            setWrapColumnTitles,
             updateColumnProperty,
             columns,
             getFieldLabelOverride,
@@ -709,11 +753,28 @@ const useTableConfig = (
             conditionalFormattings,
             handleSetConditionalFormattings,
             pivotTableData,
-            metricsAsRows,
+            effectiveMetricsAsRows,
             setMetricsAsRows,
+            rowFieldIds,
+            pivotRows,
+            onPivotRowsChange,
             isPivotTableEnabled,
+            rendersPivotTable,
+            isPivotResultStale,
             canUseSubtotals,
             groupedSubtotals,
+            columnTotalsError,
+            rowTotalsError,
+            grandTotalsError,
+            columnSubtotalsError,
+            rowSubtotalsError,
+            isCalculatingColumnTotals,
+            isCalculatingRowTotals,
+            isCalculatingRowSubtotals,
+            isCalculatingGrandTotals,
+            isCalculatingSubtotals,
+            rowLimit,
+            setRowLimit,
         ],
     );
 };

@@ -1,5 +1,4 @@
 import { type ApiError, type GitRepo } from '@lightdash/common';
-
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { lightdashApi } from '../../../../api';
 import useToaster from '../../../../hooks/toaster/useToaster';
@@ -11,13 +10,14 @@ const getGitlabRepositories = async (): Promise<GitRepo[]> =>
         body: undefined,
     });
 
-export const useGitlabRepositories = () => {
+export const useGitlabRepositories = (options?: { enabled?: boolean }) => {
     const { showToastApiError } = useToaster();
 
     return useQuery<GitRepo[], ApiError>({
         queryKey: ['gitlab_repositories'],
         queryFn: () => getGitlabRepositories(),
         retry: false,
+        enabled: options?.enabled ?? true,
         onError: ({ error }) => {
             if (error.statusCode === 404 || error.statusCode === 401) return; // Ignore missing installation errors or unauthorized in demo
 

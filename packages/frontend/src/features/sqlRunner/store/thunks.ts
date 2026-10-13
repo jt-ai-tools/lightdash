@@ -1,13 +1,12 @@
-// FIXES ts2742 issue with configureStore
-// eslint-disable-next-line @typescript-eslint/no-unused-vars, no-unused-vars
-import type * as rtk from '@reduxjs/toolkit';
-
 import {
     ChartKind,
     isApiError,
     type ApiErrorDetail,
     type ParametersValuesMap,
 } from '@lightdash/common';
+// FIXES ts2742 issue with configureStore
+// eslint-disable-next-line @typescript-eslint/no-unused-vars, no-unused-vars
+import type * as rtk from '@reduxjs/toolkit';
 import { createAsyncThunk } from '@reduxjs/toolkit';
 import { type RootState } from '.';
 import {
@@ -16,7 +15,11 @@ import {
     selectCompleteConfigByKind,
 } from '../../../components/DataViz/store/selectors';
 import getChartDataModel from '../../../components/DataViz/transformers/getChartDataModel';
-import { executeSqlQuery } from '../../queryRunner/executeQuery';
+import { reportSharedSignInQueryFailure } from '../../../hooks/useReconnectSharedSignIn';
+import {
+    cancelAsyncQuery,
+    executeSqlQuery,
+} from '../../queryRunner/executeQuery';
 import { type ResultsAndColumns } from '../hooks/useSqlQueryRun';
 import { selectSqlRunnerResultsRunner } from './sqlRunnerSlice';
 
@@ -27,8 +30,11 @@ import { selectSqlRunnerResultsRunner } from './sqlRunnerSlice';
  * @param projectUuid - The project uuid to run the query on
  * @returns The results and the results runner
  */
+const isAbortError = (error: unknown): boolean =>
+    error instanceof DOMException && error.name === 'AbortError';
+
 export const runSqlQuery = createAsyncThunk<
-    ResultsAndColumns,
+    ResultsAndColumns & { warehouseConnectionUuid: string | null | undefined },
     {
         sql: string;
         limit: number;
@@ -40,16 +46,54 @@ export const runSqlQuery = createAsyncThunk<
     'sqlRunner/runSqlQuery',
     async (
         { sql, limit, projectUuid, parameterValues },
-        { rejectWithValue },
+        { rejectWithValue, getState, signal },
     ) => {
+        const connectionRoute = (getState() as RootState).sqlRunner
+            .connectionRoute ?? { route: 'pending' };
+        if (connectionRoute.route === 'pending') {
+            return rejectWithValue({
+                statusCode: 400,
+                name: 'ParameterError',
+                message: 'The project is still loading. Run the query again.',
+                data: {},
+            });
+        }
+        const connection =
+            connectionRoute.route === 'multi'
+                ? connectionRoute.connection
+                : undefined;
+        if (connection === null) {
+            return rejectWithValue({
+                statusCode: 400,
+                name: 'ParameterError',
+                message: 'Choose a connection before you run this query.',
+                data: {},
+            });
+        }
+        const warehouseConnectionUuid = connection?.warehouseConnectionUuid;
         try {
-            return await executeSqlQuery(
+            // SQL Runner is edit-only — always skip cache, matching explore edit mode.
+            const results = await executeSqlQuery(
                 projectUuid,
                 sql,
                 limit,
                 parameterValues,
+                true,
+                warehouseConnectionUuid,
+                {
+                    signal,
+                    onQueryStarted: (queryUuid) => {
+                        // Aborting the thunk also tells the warehouse to stop
+                        signal.addEventListener('abort', () => {
+                            void cancelAsyncQuery(projectUuid, queryUuid);
+                        });
+                    },
+                },
             );
+            return { ...results, warehouseConnectionUuid };
         } catch (error) {
+            if (isAbortError(error)) throw error;
+            reportSharedSignInQueryFailure(projectUuid, error);
             if (isApiError(error)) {
                 return rejectWithValue(error.error);
             }

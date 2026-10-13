@@ -3,6 +3,7 @@ import {
     getExpandedRowModel,
     useReactTable,
     type ColumnOrderState,
+    type ExpandedState,
     type GroupingState,
 } from '@tanstack/react-table';
 import React, { useEffect, useMemo, useState, type FC } from 'react';
@@ -46,6 +47,7 @@ export const TableProvider: FC<React.PropsWithChildren<ProviderProps>> = ({
     hideRowNumbers,
     showColumnCalculation,
     showSubtotals,
+    showSubtotalsExpanded,
     children,
     ...rest
 }) => {
@@ -60,7 +62,18 @@ export const TableProvider: FC<React.PropsWithChildren<ProviderProps>> = ({
         minMaxMap,
     } = rest;
     const [grouping, setGrouping] = useState<GroupingState>([]);
+    const [expanded, setExpanded] = useState<ExpandedState>(
+        showSubtotalsExpanded ? true : {},
+    );
+    const [prevShowSubtotalsExpanded, setPrevShowSubtotalsExpanded] = useState(
+        showSubtotalsExpanded,
+    );
+    if (showSubtotalsExpanded !== prevShowSubtotalsExpanded) {
+        setPrevShowSubtotalsExpanded(showSubtotalsExpanded);
+        setExpanded(showSubtotalsExpanded ? true : {});
+    }
     const [columnVisibility, setColumnVisibility] = useState({});
+
     const [isInfiniteScrollEnabled, setIsInfiniteScrollEnabled] = useState(
         !pagination?.show || !!pagination?.defaultScroll,
     );
@@ -164,11 +177,32 @@ export const TableProvider: FC<React.PropsWithChildren<ProviderProps>> = ({
         return data.slice(start, end);
     }, [data, paginationState]);
 
+    // Widest formatted label per column. "Bars in cells" reserves a label
+    // gutter this wide so every row's bar is sized against the same remaining
+    // track — otherwise wider labels (more digits) shrink the bar (PROD-8457).
+    const barLabelMaxMap = useMemo(() => {
+        if (!minMaxMap) return undefined;
+        const result: Record<string, string> = {};
+        for (const row of data) {
+            for (const columnId of Object.keys(row)) {
+                const formatted = row[columnId]?.value?.formatted;
+                if (
+                    typeof formatted === 'string' &&
+                    formatted.length > (result[columnId]?.length ?? 0)
+                ) {
+                    result[columnId] = formatted;
+                }
+            }
+        }
+        return result;
+    }, [data, minMaxMap]);
+
     const table = useReactTable({
         data: isInfiniteScrollEnabled ? data : pageRows,
         columns: visibleColumns,
         state: {
             grouping,
+            expanded,
             columnVisibility,
             columnOrder: tempColumnOrder,
             columnPinning: {
@@ -179,9 +213,11 @@ export const TableProvider: FC<React.PropsWithChildren<ProviderProps>> = ({
             },
             pagination: paginationState,
         },
+        onExpandedChange: setExpanded,
         meta: {
             columnProperties,
             minMaxMap,
+            barLabelMaxMap,
         },
         enableColumnPinning: true,
         onColumnVisibilityChange: setColumnVisibility,

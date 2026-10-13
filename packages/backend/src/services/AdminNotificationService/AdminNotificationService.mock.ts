@@ -34,6 +34,9 @@ export const mockTargetUser: LightdashUser = {
     organizationCreatedAt: new Date('2024-01-01'),
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
+    timezone: null,
     isSetupComplete: true,
     isActive: true,
     createdAt: new Date(),
@@ -52,6 +55,8 @@ export const mockOrgAdmin1: OrganizationMemberProfile = {
     roleUuid: undefined,
     isActive: true,
     isInviteExpired: false,
+    avatarUrl: null,
+    avatarGradient: null,
 };
 
 export const mockOrgAdmin2: OrganizationMemberProfile = {
@@ -66,6 +71,8 @@ export const mockOrgAdmin2: OrganizationMemberProfile = {
     roleUuid: undefined,
     isActive: true,
     isInviteExpired: false,
+    avatarUrl: null,
+    avatarGradient: null,
 };
 
 export const mockProjectAdmin: ProjectMemberProfile = {
@@ -113,7 +120,9 @@ const createMockAccount = (
             ? {
                   type: 'service-account' as const,
                   source: 'mock-service-account-token',
-                  description: overrides.serviceAccountDescription,
+                  serviceAccountUuid: 'mock-service-account-uuid',
+                  serviceAccountDescription:
+                      overrides.serviceAccountDescription ?? '',
               }
             : { type: 'session' as const, source: 'mock-session-cookie' },
         user: {
@@ -129,6 +138,9 @@ const createMockAccount = (
             organizationCreatedAt: new Date('2024-01-01'),
             isTrackingAnonymized: false,
             isMarketingOptedIn: false,
+            avatarUrl: null,
+            avatarGradient: null,
+            timezone: null,
             isSetupComplete: true,
             isActive: true,
             ability: new Ability<PossibleAbilities>([]),

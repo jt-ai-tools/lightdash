@@ -2,6 +2,7 @@
 import {
     CreateEmbedJwt,
     EmbedJwtSchema,
+    EmbedSourceSpaceUuidsSchema,
     ForbiddenError,
     getErrorMessage,
     isDashboardUuidContent,
@@ -50,6 +51,21 @@ export function decodeLightdashJwt(
                 : Buffer.from(encodedSecret),
         );
         const decodedToken = verify(token, secret) as CreateEmbedJwt;
+
+        // Unknown authorization modes must not fall back to default permissions.
+        if (
+            decodedToken.content?.type === 'aiAgent' ||
+            decodedToken.content?.type === 'dashboard'
+        ) {
+            z.enum(['default', 'roles'])
+                .optional()
+                .parse(decodedToken.writeActions?.permissionsMode);
+        }
+
+        // EmbedJwtSchema below only logs failures, so this authorization claim is enforced here.
+        EmbedSourceSpaceUuidsSchema.optional().parse(
+            decodedToken.writeActions?.sourceSpaceUuids,
+        );
 
         // Alert if the token is not in the expected format so we can inform the org before enforcing validation
         try {

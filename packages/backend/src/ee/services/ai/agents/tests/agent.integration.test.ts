@@ -1,5 +1,6 @@
 import { AiAgent, SEED_PROJECT } from '@lightdash/common';
 import { beforeAll, describe, expect, it } from 'vitest';
+import type { AiKeyManagement } from '../../../../../analytics/aiUsage';
 import { aiCopilotConfigSchema } from '../../../../../config/aiConfigSchema';
 import { getAiConfig } from '../../../../../config/parseConfig';
 import {
@@ -44,12 +45,16 @@ describeOrSkip.concurrent('agent integration tests', () => {
     const { model: judge, callOptions } = getOpenaiGptmodel(
         {
             apiKey: process.env.OPENAI_API_KEY!,
-            modelName: 'gpt-5.2',
+            modelName: 'gpt-5.4',
             embeddingModelName: 'text-embedding-3-small',
             zeroDataRetention: false,
+            customHeaders: {},
+            supportsStreaming: true,
         },
-        getModelPreset('openai', 'gpt-5.2')!,
+        getModelPreset('openai', 'gpt-5.4')!,
     );
+    // The judge runs on the developer's own OPENAI_API_KEY.
+    const judgeKeyManagement: AiKeyManagement = 'self-managed';
 
     beforeAll(async () => {
         if (!process.env.OPENAI_API_KEY) {
@@ -58,8 +63,6 @@ describeOrSkip.concurrent('agent integration tests', () => {
 
         context = getTestContext();
         const services = getServices(context.app);
-
-        const enableReasoning = process.env.OPENAI_REASONING_ENABLED === 'true';
 
         // Create specialized agent with tags
         const specialized = await services.aiAgentService.createAgent(
@@ -74,10 +77,10 @@ describeOrSkip.concurrent('agent integration tests', () => {
                 groupAccess: [],
                 userAccess: [],
                 spaceAccess: [],
+                mcpServerUuids: [],
                 imageUrl: null,
                 enableDataAccess: true,
                 enableSelfImprovement: false,
-                enableReasoning,
                 version: 2,
             },
         );
@@ -95,10 +98,10 @@ describeOrSkip.concurrent('agent integration tests', () => {
                 groupAccess: [],
                 userAccess: [],
                 spaceAccess: [],
+                mcpServerUuids: [],
                 imageUrl: null,
                 enableDataAccess: true,
                 enableSelfImprovement: false,
-                enableReasoning,
                 version: 2,
                 description: null,
             },
@@ -108,8 +111,9 @@ describeOrSkip.concurrent('agent integration tests', () => {
 
     describe('specialized agent tests', () => {
         testCases.forEach((testCase) => {
+            const testName = testCase.name ?? testCase.prompt;
             it.concurrent(
-                testCase.name ?? testCase.prompt,
+                testName,
                 async (test) => {
                     const services = getServices(context.app);
                     if (!specializedAgent) {
@@ -148,6 +152,7 @@ describeOrSkip.concurrent('agent integration tests', () => {
                             expectedAnswer,
                             judge,
                             callOptions,
+                            keyManagement: judgeKeyManagement,
                             scorerType: 'factuality',
                         });
 
@@ -164,13 +169,14 @@ describeOrSkip.concurrent('agent integration tests', () => {
                                 testCase.expectedArgsValidation,
                             judge,
                             callOptions,
+                            keyManagement: judgeKeyManagement,
                         });
 
                         report.addLlmToolJudgeResult(toolsEvaluation);
 
                         // RunQuery efficiency evaluation
                         const runQueryCount = toolCalls.filter(
-                            (tc) => tc.tool_name === 'runQuery',
+                            (tc) => tc.tool_name === 'generateVisualization',
                         ).length;
                         const runQueryEfficiencyScore =
                             calculateRunQueryEfficiencyScore(runQueryCount);
@@ -209,6 +215,7 @@ describeOrSkip.concurrent('agent integration tests', () => {
                                 context: contextForEval,
                                 judge,
                                 callOptions,
+                                keyManagement: judgeKeyManagement,
                                 scorerType: 'contextRelevancy',
                                 contextRelevancyThreshold:
                                     testCase.contextRelevancy.threshold,
@@ -289,8 +296,9 @@ describeOrSkip.concurrent('agent integration tests', () => {
 
     describe('generic agent tests', () => {
         genericTestCases.forEach((testCase) => {
+            const testName = testCase.name ?? testCase.prompt;
             it.concurrent(
-                testCase.name ?? testCase.prompt,
+                testName,
                 async (test) => {
                     const services = getServices(context.app);
                     if (!genericAgent) {
@@ -329,6 +337,7 @@ describeOrSkip.concurrent('agent integration tests', () => {
                             expectedAnswer,
                             judge,
                             callOptions,
+                            keyManagement: judgeKeyManagement,
                             scorerType: 'factuality',
                         });
 
@@ -345,13 +354,14 @@ describeOrSkip.concurrent('agent integration tests', () => {
                                 testCase.expectedArgsValidation,
                             judge,
                             callOptions,
+                            keyManagement: judgeKeyManagement,
                         });
 
                         report.addLlmToolJudgeResult(toolsEvaluation);
 
                         // RunQuery efficiency evaluation
                         const runQueryCount = toolCalls.filter(
-                            (tc) => tc.tool_name === 'runQuery',
+                            (tc) => tc.tool_name === 'generateVisualization',
                         ).length;
                         const runQueryEfficiencyScore =
                             calculateRunQueryEfficiencyScore(runQueryCount);
@@ -390,6 +400,7 @@ describeOrSkip.concurrent('agent integration tests', () => {
                                 context: contextForEval,
                                 judge,
                                 callOptions,
+                                keyManagement: judgeKeyManagement,
                                 scorerType: 'contextRelevancy',
                                 contextRelevancyThreshold:
                                     testCase.contextRelevancy.threshold,

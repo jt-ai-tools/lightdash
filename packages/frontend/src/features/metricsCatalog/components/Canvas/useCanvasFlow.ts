@@ -1,7 +1,7 @@
 import { TimeFrames, type CatalogMetricsTreeEdge } from '@lightdash/common';
 import {
-    MarkerType,
     addEdge,
+    MarkerType,
     useEdgesState,
     useNodesInitialized,
     useNodesState,
@@ -24,10 +24,12 @@ import {
     buildAllNodes,
     buildInitialEdges,
     buildInitialNodes,
+    buildNodeMetricData,
     getNodeLayout,
     getPersistedPositionIds,
     type CanvasMetric,
 } from './canvasLayoutUtils';
+import type { YamlDriverInfo } from './CanvasYamlDriversContext';
 import type { ExpandedNodeData } from './TreeComponents/nodes/ExpandedNode';
 
 type UseCanvasFlowArgs = {
@@ -118,10 +120,6 @@ export const useCanvasFlow = ({
 
     // Track whether the canvas has been initialized (used to prevent resets in draft mode)
     const isCanvasInitializedRef = useRef(false);
-
-    // Track reset cycles to avoid stale time-propagation writes (Fix 3)
-    const resetCountRef = useRef(0);
-    const lastSeenResetRef = useRef(0);
 
     // --- Reactive YAML edge injection (edit mode only) ---
     // Stable string of sorted canvas node IDs — avoids re-running on every drag/reposition
@@ -346,10 +344,10 @@ export const useCanvasFlow = ({
         (event: React.DragEvent) => {
             event.preventDefault();
 
-            const data = event.dataTransfer.getData('application/reactflow');
-            if (!data) return;
-
-            const { catalogSearchUuid } = JSON.parse(data);
+            const catalogSearchUuid = event.dataTransfer.getData(
+                'application/reactflow',
+            );
+            if (!catalogSearchUuid) return;
 
             const nodeData = allNodes.find((n) => n.id === catalogSearchUuid);
             if (!nodeData) return;
@@ -383,6 +381,63 @@ export const useCanvasFlow = ({
         ],
     );
 
+    // Adds sidebar metrics beside existing nodes, or YAML drivers above their
+    // target so the upstream-flowing layout reads naturally before the user
+    // applies dagre. Falls back to a minimal node built from YAML edge metadata
+    // when the driver isn't in `allNodes` (e.g. it's in an unloaded catalog page).
+    const addMetricsToCanvas = useCallback(
+        (drivers: YamlDriverInfo[], anchorNodeId?: string) => {
+            if (viewOnly) return;
+            setCurrentNodes((nodes) => {
+                const existingIds = new Set(nodes.map((n) => n.id));
+                const anchor = anchorNodeId
+                    ? nodes.find((n) => n.id === anchorNodeId)
+                    : undefined;
+                const baseX = anchor
+                    ? anchor.position.x
+                    : nodes.length > 0
+                      ? Math.max(...nodes.map((node) => node.position.x)) + 320
+                      : 0;
+                const baseY = anchor
+                    ? anchor.position.y - 220
+                    : (nodes[0]?.position.y ?? 0);
+
+                const newDrivers = drivers.filter(
+                    (d) => !existingIds.has(d.catalogSearchUuid),
+                );
+                const { timeFrame: tf, rollingDays: rd } =
+                    timeValuesRef.current;
+                const toAdd = newDrivers.map<ExpandedNodeData>(
+                    (driver, idx) => {
+                        const offset =
+                            (idx - (newDrivers.length - 1) / 2) * 320;
+                        const fromAllNodes = allNodes.find(
+                            (n) => n.id === driver.catalogSearchUuid,
+                        );
+                        const baseData = fromAllNodes?.data ?? {
+                            ...buildNodeMetricData(driver),
+                            isEdgeTarget: false,
+                            isEdgeSource: false,
+                        };
+                        return {
+                            id: driver.catalogSearchUuid,
+                            type: 'expanded',
+                            position: { x: baseX + offset, y: baseY },
+                            data: {
+                                ...baseData,
+                                timeFrame: tf,
+                                rollingDays: rd,
+                            },
+                        };
+                    },
+                );
+                if (toAdd.length === 0) return nodes;
+                return [...nodes, ...toAdd];
+            });
+        },
+        [allNodes, setCurrentNodes, viewOnly],
+    );
+
     // Reset layout when initial edges or nodes change
     useEffect(() => {
         if (preventResetAfterInit && isCanvasInitializedRef.current) return;
@@ -402,7 +457,6 @@ export const useCanvasFlow = ({
         setCurrentNodes(nodesWithTimeData);
         setCurrentEdges(initialEdges);
         setIsLayoutReady(false);
-        resetCountRef.current += 1;
     }, [
         initialNodes,
         initialEdges,
@@ -437,22 +491,24 @@ export const useCanvasFlow = ({
         fitView,
     ]);
 
-    // Propagate time frame changes to all nodes.
-    // Skip when a reset just ran — the reset effect already applied current time values.
+    // Propagate period changes even when metrics loaded since the last change.
+    // A reset already uses current time values, so only update differing nodes.
     useEffect(() => {
-        if (resetCountRef.current !== lastSeenResetRef.current) {
-            lastSeenResetRef.current = resetCountRef.current;
-            return;
-        }
-        setCurrentNodes((nodes) =>
-            nodes.map((node) => ({
+        setCurrentNodes((nodes) => {
+            if (
+                nodes.every(
+                    (node) =>
+                        node.data.timeFrame === timeFrame &&
+                        node.data.rollingDays === rollingDays,
+                )
+            ) {
+                return nodes;
+            }
+            return nodes.map((node) => ({
                 ...node,
-                data:
-                    'timeFrame' in node.data
-                        ? { ...node.data, timeFrame, rollingDays }
-                        : node.data,
-            })),
-        );
+                data: { ...node.data, timeFrame, rollingDays },
+            }));
+        });
     }, [timeFrame, rollingDays, setCurrentNodes]);
 
     // Remove nodes from canvas if they no longer exist in metrics.
@@ -531,5 +587,6 @@ export const useCanvasFlow = ({
         sidebarNodes,
         canvasTimeOption,
         setCanvasTimeOption,
+        addMetricsToCanvas,
     };
 };

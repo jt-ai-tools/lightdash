@@ -5,15 +5,14 @@ import {
     type SortField,
     type TableCalculation,
 } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
-import { ActionIcon, Flex, Text } from '@mantine/core';
-import { IconCheck, IconChevronDown } from '@tabler/icons-react';
+import { ActionIcon, Flex, Menu, Text } from '@mantine/core';
+import { IconCheck, IconDots } from '@tabler/icons-react';
 import { useMemo, type FC } from 'react';
 import {
-    SortDirection,
     getSortDirectionOrder,
     getSortIcon,
     getSortLabel,
+    SortDirection,
 } from '../../utils/sortUtils';
 import MantineIcon from '../common/MantineIcon';
 import { type HeaderProps, type TableColumn } from '../common/Table/types';
@@ -112,10 +111,16 @@ const UnderlyingDataHeaderContextMenu: FC<
                 }}
             >
                 {iconSort ? <MantineIcon icon={iconSort} /> : <div />}
-                <Menu withinPortal withArrow shadow="md">
+                <Menu withArrow>
                     <Menu.Target>
-                        <ActionIcon size="xs" variant="light" bg="transparent">
-                            <MantineIcon icon={IconChevronDown} />
+                        <ActionIcon
+                            size="xs"
+                            variant="light"
+                            color="gray"
+                            bg="transparent"
+                            aria-label="Context menu"
+                        >
+                            <MantineIcon icon={IconDots} />
                         </ActionIcon>
                     </Menu.Target>
 

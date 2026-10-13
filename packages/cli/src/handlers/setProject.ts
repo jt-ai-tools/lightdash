@@ -1,8 +1,10 @@
-import { OrganizationProject } from '@lightdash/common';
-import inquirer from 'inquirer';
+import { OrganizationProject, ProjectType } from '@lightdash/common';
 import { URL } from 'url';
-import { getConfig, setProject } from '../config';
+import { assertAgentCommandAllowed } from '../agentConnections/commandPolicy';
+import { LightdashAnalytics } from '../analytics/analytics';
+import { getConfig, setProject, unsetProject } from '../config';
 import GlobalState from '../globalState';
+import { promptFuzzySearch } from '../prompts/fuzzySearchPrompt';
 import { lightdashApi } from './dbt/apiClient';
 
 type SetProjectOptions = {
@@ -11,7 +13,11 @@ type SetProjectOptions = {
     uuid: string;
 };
 
-export const setProjectCommand = async (name?: string, uuid?: string) => {
+export const setProjectCommand = async (
+    name?: string,
+    uuidOrSlug?: string,
+): Promise<'selected' | 'skipped' | 'empty'> => {
+    assertAgentCommandAllowed('config set-project');
     const projects = await lightdashApi<OrganizationProject[]>({
         method: 'GET',
         url: `/api/v1/org/projects`,
@@ -22,32 +28,58 @@ export const setProjectCommand = async (name?: string, uuid?: string) => {
         `> Set project returned response: ${JSON.stringify(projects)}`,
     );
 
-    if (projects.length === 0) return;
+    // `set-project` configures the default (production) project. Preview
+    // projects are managed separately via `start-preview`/`stop-preview`,
+    // and storing one here causes the download prompt to show the same
+    // project under both "Preview" and "Production" labels.
+    const nonPreviewProjects = projects.filter(
+        (project) => project.type !== ProjectType.PREVIEW,
+    );
+
+    if (projects.length === 0) return 'empty';
 
     let selectedProject: OrganizationProject | undefined;
 
     // --uuid or --name options
-    if (uuid !== undefined || name !== undefined) {
-        selectedProject = projects.find(
-            (project) => project.name === name || project.projectUuid === uuid,
+    if (uuidOrSlug !== undefined || name !== undefined) {
+        const matchedProject = projects.find(
+            (project) =>
+                project.name === name ||
+                project.projectUuid === uuidOrSlug ||
+                (uuidOrSlug !== undefined && project.slug === uuidOrSlug),
         );
+        if (matchedProject?.type === ProjectType.PREVIEW) {
+            throw new Error(
+                `Project "${matchedProject.name}" is a preview project and cannot be set as the default project. Use \`lightdash start-preview\` to work with preview projects.`,
+            );
+        }
+        selectedProject = matchedProject;
     } else if (GlobalState.isNonInteractive()) {
         GlobalState.debug('> Non-interactive mode: selecting first project');
-        [selectedProject] = projects;
+        [selectedProject] = nonPreviewProjects;
     } else {
-        const answers = await inquirer.prompt([
-            {
-                type: 'list',
-                name: 'project',
-                choices: projects.map((project) => ({
-                    name: project.name,
-                    value: project.projectUuid,
-                })),
-            },
-        ]);
+        const SKIP_VALUE = '__skip__';
+        const answer = await promptFuzzySearch<string>({
+            message: 'Select a project (type to search)',
+            pinnedChoices: [
+                {
+                    name: "Don't select a project",
+                    value: SKIP_VALUE,
+                },
+            ],
+            choices: nonPreviewProjects.map((project) => ({
+                name: project.name,
+                value: project.projectUuid,
+            })),
+        });
 
-        selectedProject = projects.find(
-            (project) => project.projectUuid === answers.project,
+        if (answer === SKIP_VALUE) {
+            await unsetProject();
+            return 'skipped';
+        }
+
+        selectedProject = nonPreviewProjects.find(
+            (project) => project.projectUuid === answer,
         );
     }
 
@@ -63,12 +95,13 @@ export const setProjectCommand = async (name?: string, uuid?: string) => {
         console.error(
             `\n  ✅️ Connected to Lightdash project: ${projectUrl || ''}\n`,
         );
-    } else {
-        throw new Error(`Project not found.`);
+        return 'selected';
     }
+    throw new Error(`Project not found.`);
 };
 
 export const setFirstProject = async () => {
+    assertAgentCommandAllowed('config set-project');
     const projects = await lightdashApi<OrganizationProject[]>({
         method: 'GET',
         url: `/api/v1/org/projects`,
@@ -90,6 +123,53 @@ export const setFirstProject = async () => {
 };
 
 export const setProjectHandler = async (options: SetProjectOptions) => {
+    assertAgentCommandAllowed('config set-project');
+    const startTime = Date.now();
+    let success = true;
     GlobalState.setVerbose(options.verbose);
-    return setProjectCommand(options.name, options.uuid);
+    try {
+        const result = await setProjectCommand(options.name, options.uuid);
+        if (result === 'skipped') {
+            console.error(`\n  Project unset.\n`);
+        }
+    } catch (e) {
+        success = false;
+        throw e;
+    } finally {
+        await LightdashAnalytics.track({
+            event: 'command.executed',
+            properties: {
+                command: 'set-project',
+                durationMs: Date.now() - startTime,
+                success,
+            },
+        });
+    }
+};
+
+const unsetProjectCommand = async () => {
+    await unsetProject();
+    console.error(`\n  Project unset.\n`);
+};
+
+export const unsetProjectHandler = async (options: { verbose: boolean }) => {
+    assertAgentCommandAllowed('config unset-project');
+    const startTime = Date.now();
+    let success = true;
+    GlobalState.setVerbose(options.verbose);
+    try {
+        await unsetProjectCommand();
+    } catch (e) {
+        success = false;
+        throw e;
+    } finally {
+        await LightdashAnalytics.track({
+            event: 'command.executed',
+            properties: {
+                command: 'unset-project',
+                durationMs: Date.now() - startTime,
+                success,
+            },
+        });
+    }
 };

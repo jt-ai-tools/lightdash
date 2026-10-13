@@ -5,6 +5,7 @@ import {
     ContentType,
 } from '@lightdash/common';
 import { Knex } from 'knex';
+import { ContentVerificationTableName } from '../../../database/entities/contentVerification';
 import { DashboardsTableName } from '../../../database/entities/dashboards';
 import { OrganizationTableName } from '../../../database/entities/organizations';
 import {
@@ -22,6 +23,7 @@ import {
     ContentTypePriority,
     SummaryContentRow,
 } from '../ContentModelTypes';
+import { applyContentNameSearch } from '../ContentSearchUtils';
 
 type SelectSavedChart = SummaryContentRow<{
     source: ChartSourceType.DBT_EXPLORE;
@@ -33,6 +35,8 @@ type SelectSavedChart = SummaryContentRow<{
 export const dbtExploreChartContentConfiguration: ContentConfiguration<SelectSavedChart> =
     {
         shouldQueryBeIncluded: (filters: ContentFilters) => {
+            // Only dashboards have owners
+            if (filters.ownerUserUuids) return false;
             const contentTypeMatch =
                 !filters.contentTypes ||
                 filters.contentTypes?.includes(ContentType.CHART);
@@ -87,6 +91,25 @@ export const dbtExploreChartContentConfiguration: ContentConfiguration<SelectSav
                     `${SavedChartsTableName}.last_version_updated_by_user_uuid`,
                     `updatedByUser.user_uuid`,
                 )
+                .leftJoin(
+                    ContentVerificationTableName,
+                    function verificationJoin() {
+                        this.on(
+                            `${ContentVerificationTableName}.content_uuid`,
+                            '=',
+                            `${SavedChartsTableName}.saved_query_uuid`,
+                        ).andOn(
+                            `${ContentVerificationTableName}.content_type`,
+                            '=',
+                            knex.raw('?', [ContentType.CHART]),
+                        );
+                    },
+                )
+                .leftJoin(
+                    `${UserTableName} as verifiedByUser`,
+                    `verifiedByUser.user_uuid`,
+                    `${ContentVerificationTableName}.verified_by_user_uuid`,
+                )
                 .select<SelectSavedChart[]>([
                     knex.raw(`'${ContentType.CHART}' as content_type`),
                     knex.raw(
@@ -121,6 +144,7 @@ export const dbtExploreChartContentConfiguration: ContentConfiguration<SelectSav
                     knex.raw(
                         `${SavedChartsTableName}.first_viewed_at::timestamp as first_viewed_at`,
                     ),
+                    knex.raw('null::timestamp as last_viewed_at'),
                     knex.raw(
                         `${SavedChartsTableName}.deleted_at::timestamp as deleted_at`,
                     ),
@@ -131,6 +155,14 @@ export const dbtExploreChartContentConfiguration: ContentConfiguration<SelectSav
                     knex.raw(
                         `(SELECT last_name FROM users WHERE user_uuid = ${SavedChartsTableName}.deleted_by_user_uuid) as deleted_by_user_last_name`,
                     ),
+                    `${ContentVerificationTableName}.verified_at as verified_at`,
+                    `verifiedByUser.user_uuid as verified_by_user_uuid`,
+                    `verifiedByUser.first_name as verified_by_user_first_name`,
+                    `verifiedByUser.last_name as verified_by_user_last_name`,
+                    knex.raw(`null::uuid as owner_user_uuid`),
+                    knex.raw(`null as owner_user_first_name`),
+                    knex.raw(`null as owner_user_last_name`),
+                    knex.raw(`null as owner_user_email`),
                     knex.raw(`json_build_object(
                     'source','${ChartSourceType.DBT_EXPLORE}',
                     'chart_kind', ${SavedChartsTableName}.last_version_chart_kind,
@@ -171,6 +203,13 @@ export const dbtExploreChartContentConfiguration: ContentConfiguration<SelectSav
                         );
                     }
 
+                    if (filters.uuids) {
+                        void builder.whereIn(
+                            `${SavedChartsTableName}.saved_query_uuid`,
+                            filters.uuids,
+                        );
+                    }
+
                     if (filters.spaceUuids) {
                         void builder.whereIn(
                             `${SpaceTableName}.space_uuid`,
@@ -178,9 +217,10 @@ export const dbtExploreChartContentConfiguration: ContentConfiguration<SelectSav
                         );
                     }
                     if (filters.search) {
-                        void builder.whereRaw(
-                            `LOWER(${SavedChartsTableName}.name) LIKE ?`,
-                            [`%${filters.search.toLowerCase()}%`],
+                        applyContentNameSearch(
+                            builder,
+                            `${SavedChartsTableName}.name`,
+                            filters.search,
                         );
                     }
 
@@ -201,6 +241,8 @@ export const dbtExploreChartContentConfiguration: ContentConfiguration<SelectSav
             }
             return {
                 contentType: ContentType.CHART,
+                // Filled in by ContentService for the requesting user.
+                directAccessRoles: [],
                 uuid: value.uuid,
                 slug: value.slug,
                 name: value.name,
@@ -249,6 +291,21 @@ export const dbtExploreChartContentConfiguration: ContentConfiguration<SelectSav
                     : null,
                 views: value.views,
                 firstViewedAt: value.first_viewed_at,
+                lastViewedAt: value.last_viewed_at,
+                verification:
+                    value.verified_at !== null &&
+                    value.verified_by_user_uuid !== null &&
+                    value.verified_by_user_first_name !== null &&
+                    value.verified_by_user_last_name !== null
+                        ? {
+                              verifiedBy: {
+                                  userUuid: value.verified_by_user_uuid,
+                                  firstName: value.verified_by_user_first_name,
+                                  lastName: value.verified_by_user_last_name,
+                              },
+                              verifiedAt: value.verified_at,
+                          }
+                        : null,
             };
         },
     };

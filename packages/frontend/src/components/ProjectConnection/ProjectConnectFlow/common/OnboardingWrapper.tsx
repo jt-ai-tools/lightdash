@@ -7,7 +7,7 @@ const OnboardingWrapper: FC<React.PropsWithChildren<{}>> = ({ children }) => {
             pos="relative"
             direction="column"
             w={420}
-            sx={{ flexGrow: 1 }}
+            flex={1}
             mt="6xl"
             mx="auto"
         >

@@ -1,15 +1,16 @@
 import {
+    calculateComparisonValue,
     applyCustomFormat,
     ComparisonFormatTypes,
     CustomFormatType,
     formatItemValue,
-    friendlyName,
     getDefaultMetricTreeNodeDateRange,
     getRollingPeriodDates,
     MetricTotalComparisonType,
     TimeFrames,
 } from '@lightdash/common';
 import {
+    ActionIcon,
     Badge,
     Group,
     Paper,
@@ -18,15 +19,15 @@ import {
     Text,
     Title,
     Tooltip,
-} from '@mantine-8/core';
-import { IconInfoCircle } from '@tabler/icons-react';
+} from '@mantine/core';
+import { IconHierarchy3, IconInfoCircle } from '@tabler/icons-react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import React, { useMemo, type FC } from 'react';
+import React, { useCallback, useMemo, type FC } from 'react';
 import MantineIcon from '../../../../../../components/common/MantineIcon';
-import { calculateComparisonValue } from '../../../../../../hooks/useBigNumberConfig';
 import { useAppSelector } from '../../../../../sqlRunner/store/hooks';
 import { useRunMetricTotal } from '../../../../hooks/useRunMetricExplorerQuery';
 import { MetricDetailPopover } from '../../../MetricDetailPopover';
+import { useCanvasYamlDrivers } from '../../CanvasYamlDriversContext';
 import classes from './ChangeIndicator.module.css';
 
 const getComparisonLabel = (
@@ -67,11 +68,9 @@ const ChangeIndicator: FC<{
         <Tooltip
             position="bottom"
             label={getComparisonLabel(timeFrame, rollingDays)}
-            withinPortal
         >
             <Badge
-                fz={13}
-                fw={500}
+                fz="sm"
                 size="lg"
                 radius="md"
                 py="two"
@@ -97,15 +96,31 @@ export type ExpandedNodeData = Node<{
 }>;
 
 const ExpandedNode: React.FC<NodeProps<ExpandedNodeData>> = ({
+    id,
     data,
     isConnectable,
     selected,
 }) => {
-    const title = useMemo(() => friendlyName(data.label), [data.label]);
+    const title = data.label;
 
     const projectUuid = useAppSelector(
         (state) => state.metricsCatalog.projectUuid,
     );
+
+    const yamlDrivers = useCanvasYamlDrivers();
+    const missingDrivers = useMemo(() => {
+        if (!yamlDrivers) return [];
+        const drivers = yamlDrivers.yamlDriversByTarget.get(id);
+        if (!drivers?.length) return [];
+        return drivers.filter(
+            (d) => !yamlDrivers.onCanvasMetricUuids.has(d.catalogSearchUuid),
+        );
+    }, [yamlDrivers, id]);
+
+    const handleAddDrivers = useCallback(() => {
+        if (!yamlDrivers || missingDrivers.length === 0) return;
+        yamlDrivers.addMetricsToCanvas(missingDrivers, id);
+    }, [yamlDrivers, missingDrivers, id]);
 
     // For rolling periods, we calculate a date range that covers both periods
     // The server will use rollingDays to calculate the exact periods
@@ -191,8 +206,7 @@ const ExpandedNode: React.FC<NodeProps<ExpandedNodeData>> = ({
     return (
         <Paper
             p="md"
-            fz={14}
-            withBorder
+            fz="sm"
             style={(theme) => ({
                 borderColor: selected
                     ? theme.colors.blue[5]
@@ -209,23 +223,48 @@ const ExpandedNode: React.FC<NodeProps<ExpandedNodeData>> = ({
             />
             <Stack key={data.label} gap="xs">
                 <Group justify="space-between">
-                    <Title fz={14} fw={500} c="ldGray.7">
+                    <Title fz="sm" fw={500} c="ldGray.7">
                         {title}
                     </Title>
-                    {projectUuid && (
-                        <MetricDetailPopover
-                            projectUuid={projectUuid}
-                            tableName={data.tableName}
-                            metricName={data.metricName}
-                            compiledQueryConfig={compiledQueryConfig}
-                        >
-                            <MantineIcon
-                                icon={IconInfoCircle}
-                                size={12}
-                                color="ldGray.5"
-                            />
-                        </MetricDetailPopover>
-                    )}
+                    <Group gap="xs" wrap="nowrap">
+                        {missingDrivers.length > 0 && (
+                            <Tooltip
+                                label="Add drivers from YAML"
+                                openDelay={300}
+                            >
+                                <ActionIcon
+                                    size="xs"
+                                    onClick={handleAddDrivers}
+                                    aria-label="Add YAML drivers to canvas"
+                                    data-tour-anchor="tree-add-drivers"
+                                    data-tour-hint="Add drivers from YAML"
+                                    data-tour-docs="explore/metrics-catalog/drivers.mdx#how-drivers-appear-on-the-canvas:p2:1"
+                                >
+                                    <MantineIcon
+                                        icon={IconHierarchy3}
+                                        size={12}
+                                        color="dimmed"
+                                    />
+                                </ActionIcon>
+                            </Tooltip>
+                        )}
+                        {projectUuid && (
+                            <MetricDetailPopover
+                                projectUuid={projectUuid}
+                                tableName={data.tableName}
+                                metricName={data.metricName}
+                                metricLabel={data.label}
+                                compiledQueryConfig={compiledQueryConfig}
+                                showExploreButton
+                            >
+                                <MantineIcon
+                                    icon={IconInfoCircle}
+                                    size={12}
+                                    color="ldGray.5"
+                                />
+                            </MetricDetailPopover>
+                        )}
+                    </Group>
                 </Group>
 
                 <Stack gap="xxs">

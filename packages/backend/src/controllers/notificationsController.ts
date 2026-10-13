@@ -4,6 +4,7 @@ import {
     ApiNotificationResourceType,
     ApiNotificationUpdateParams,
     ApiSuccessEmpty,
+    assertRegisteredAccount,
 } from '@lightdash/common';
 import {
     Body,
@@ -20,6 +21,8 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import { allowApiKeyAuthentication, isAuthenticated } from './authentication';
 import { BaseController } from './baseController';
 
@@ -34,7 +37,11 @@ export class NotificationsController extends BaseController {
      * @query type the type of notification to get
      * @returns the notifications for a user
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('NotificationsController.getNotifications'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/')
     @OperationId('getNotifications')
@@ -42,9 +49,10 @@ export class NotificationsController extends BaseController {
         @Request() req: express.Request,
         @Query() type: ApiNotificationResourceType,
     ): Promise<ApiGetNotifications> {
+        assertRegisteredAccount(req.account);
         const results = await this.services
             .getNotificationService()
-            .getNotifications(req.user!.userUuid, type);
+            .getNotifications(toSessionUser(req.account).userUuid, type);
 
         this.setStatus(200);
         return {
@@ -59,7 +67,13 @@ export class NotificationsController extends BaseController {
      * @param req express request
      * @param notificationId the id of the notification
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'NotificationsController.updateNotification',
+        ),
+    ])
     @SuccessResponse('200', 'Success')
     @Patch('{notificationId}')
     @OperationId('updateNotification')

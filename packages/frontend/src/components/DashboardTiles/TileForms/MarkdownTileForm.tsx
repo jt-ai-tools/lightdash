@@ -9,7 +9,7 @@ interface MarkdownTileFormProps {
 
 const MarkdownTileForm = ({ form }: MarkdownTileFormProps) => {
     return (
-        <Stack spacing="md">
+        <Stack gap="md">
             <TextInput
                 label="Title"
                 placeholder="Tile title"
@@ -26,7 +26,7 @@ const MarkdownTileForm = ({ form }: MarkdownTileFormProps) => {
                 {...form.getInputProps('content')}
             />
             <Switch
-                label={<Group spacing="xs">Show tile frame</Group>}
+                label={<Group gap="xs">Show tile frame</Group>}
                 checked={!form.values.hideFrame}
                 onChange={(e) =>
                     form.setFieldValue('hideFrame', !e.currentTarget.checked)

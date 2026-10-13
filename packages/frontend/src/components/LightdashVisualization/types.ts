@@ -2,10 +2,13 @@ import {
     ChartType,
     type CustomDimension,
     type DashboardFilters,
+    type DataAppVizChart,
+    type DataAppVizChartConfig,
     type DateZoom,
     type Dimension,
     type ItemsMap,
     type MapChart,
+    type MergeFieldOrigins,
     type Metric,
     type MetricQuery,
     type ParametersValuesMap,
@@ -19,6 +22,7 @@ import { type CartesianTypeOptions } from '../../hooks/cartesianChartConfig/useC
 import type useTableConfig from '../../hooks/tableVisualization/useTableConfig';
 import type useBigNumberConfig from '../../hooks/useBigNumberConfig';
 import type useCustomVisualizationConfig from '../../hooks/useCustomVisualizationConfig';
+import type useDataAppVizVisualizationConfig from '../../hooks/useDataAppVizVisualizationConfig';
 import type useFunnelChartConfig from '../../hooks/useFunnelChartConfig';
 import type useGaugeChartConfig from '../../hooks/useGaugeChartConfig';
 import type usePieChartConfig from '../../hooks/usePieChartConfig';
@@ -30,6 +34,8 @@ export type VisualizationConfigCommon<T extends VisualizationConfig> = {
         | (InfiniteQueryResults & {
               metricQuery?: MetricQuery;
               fields?: ItemsMap;
+              resolvedTimezone?: string;
+              fieldOrigins?: MergeFieldOrigins;
           })
         | undefined;
     initialChartConfig: T['chartConfig']['validConfig'] | undefined;
@@ -85,6 +91,7 @@ export type VisualizationCartesianConfigProps =
         >;
         colorPalette: string[];
         tableCalculationsMetadata?: TableCalculationMetadata[];
+        unsavedMetricQuery?: MetricQuery;
     };
 
 // Funnel
@@ -130,6 +137,7 @@ export type VisualizationConfigPieProps =
         itemsMap: ItemsMap | undefined;
         colorPalette: string[];
         tableCalculationsMetadata?: TableCalculationMetadata[];
+        unsavedMetricQuery?: MetricQuery;
     };
 
 // Table
@@ -150,7 +158,8 @@ export type VisualizationTableConfigProps =
         itemsMap: ItemsMap | undefined;
         columnOrder: string[];
         validPivotDimensions: string[] | undefined;
-        pivotTableMaxColumnLimit: number;
+        initialPivotRows: string[] | undefined;
+        onPivotRowsChange?: (value: string[] | undefined) => void;
         savedChartUuid: string | undefined;
         dashboardFilters: DashboardFilters | undefined;
         invalidateCache: boolean | undefined;
@@ -199,6 +208,30 @@ export type VisualizationCustomConfigProps =
         itemsMap?: ItemsMap | undefined;
     };
 
+// Data app viz
+
+export type VisualizationConfigDataAppViz = {
+    chartType: ChartType.DATA_APP_VIZ;
+    chartConfig: ReturnType<typeof useDataAppVizVisualizationConfig>;
+};
+
+export const isDataAppVizVisualizationConfig = (
+    visualizationConfig: VisualizationConfig | undefined,
+): visualizationConfig is VisualizationConfigDataAppViz => {
+    return visualizationConfig?.chartType === ChartType.DATA_APP_VIZ;
+};
+
+// Local state is null while the chart points at no viz; the saved chart
+// carries that as an absent config, so the two sides are typed apart.
+export type VisualizationDataAppVizConfigProps = Omit<
+    VisualizationConfigCommon<VisualizationConfigDataAppViz>,
+    'initialChartConfig' | 'onChartConfigChange'
+> & {
+    initialChartConfig: DataAppVizChart | undefined;
+    onChartConfigChange?: (chartConfig: DataAppVizChartConfig) => void;
+    itemsMap?: ItemsMap | undefined;
+};
+
 // Gauge
 
 export type VisualizationConfigGauge = {
@@ -243,6 +276,30 @@ export type VisualizationConfigMapProps = Omit<
     itemsMap: ItemsMap | undefined;
 };
 
+// Sankey
+
+import type useSankeyChartConfig from '../../hooks/useSankeyChartConfig';
+
+export type VisualizationConfigSankeyType = {
+    chartType: ChartType.SANKEY;
+    chartConfig: ReturnType<typeof useSankeyChartConfig>;
+    dimensions: Record<string, CustomDimension | Dimension>;
+    numericFields: Record<string, Metric | TableCalculation>;
+};
+
+export const isSankeyVisualizationConfig = (
+    visualizationConfig: VisualizationConfig | undefined,
+): visualizationConfig is VisualizationConfigSankeyType => {
+    return visualizationConfig?.chartType === ChartType.SANKEY;
+};
+
+export type VisualizationConfigSankeyProps =
+    VisualizationConfigCommon<VisualizationConfigSankeyType> & {
+        itemsMap: ItemsMap | undefined;
+        colorPalette: string[];
+        tableCalculationsMetadata?: TableCalculationMetadata[];
+    };
+
 // Union of all visualization configs
 
 export type VisualizationConfig =
@@ -254,4 +311,6 @@ export type VisualizationConfig =
     | VisualizationConfigTreemap
     | VisualizationConfigGauge
     | VisualizationConfigMap
-    | VisualizationCustomConfigType;
+    | VisualizationCustomConfigType
+    | VisualizationConfigSankeyType
+    | VisualizationConfigDataAppViz;

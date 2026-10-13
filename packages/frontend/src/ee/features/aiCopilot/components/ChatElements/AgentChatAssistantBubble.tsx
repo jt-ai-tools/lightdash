@@ -1,48 +1,61 @@
 import {
+    FeatureFlags,
     type AiAgentMessageAssistant,
-    type ToolProposeChangeArgs,
+    type AiAgentMessageUser,
+    type AiMcpServer,
+    isToolEditDbtProjectResult,
+    isToolEditRepoResult,
+    isToolDataAppBuildResult,
+    isToolSetupPreviewDeployResult,
+    type ToolEditDbtProjectOutput,
+    type ToolEditRepoOutput,
+    type ToolGenerateDataAppOutput,
 } from '@lightdash/common';
 import {
     ActionIcon,
-    Alert,
+    Box,
     Button,
-    CopyButton,
+    Code,
     Group,
-    Loader,
     Paper,
     Popover,
     Stack,
     Text,
     Textarea,
     Tooltip,
-} from '@mantine-8/core';
-import { useDisclosure } from '@mantine-8/hooks';
+} from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
 import {
     IconBug,
-    IconCheck,
-    IconCopy,
     IconExclamationCircle,
     IconMessageX,
     IconRefresh,
+    IconTerminal2,
     IconTestPipe,
     IconThumbDown,
     IconThumbDownFilled,
     IconThumbUp,
     IconThumbUpFilled,
 } from '@tabler/icons-react';
-import MDEditor from '@uiw/react-md-editor';
-import { memo, useCallback, useState, type FC } from 'react';
+import { memo, useCallback, useMemo, useState, type FC } from 'react';
+import { Link } from 'react-router';
+import { type CustomRendererProps } from 'streamdown';
+import { AiMarkdown } from '../../../../../components/common/AiMarkdown';
+import { CopyActionIcon } from '../../../../../components/common/CopyActionIcon';
 import MantineIcon from '../../../../../components/common/MantineIcon';
-import {
-    mdEditorComponents,
-    rehypeRemoveHeaderLinks,
-    useMdEditorStyle,
-} from '../../../../../utils/markdownUtils';
+import { useServerFeatureFlag } from '../../../../../hooks/useServerOrClientFeatureFlag';
+import { useAbilityContext } from '../../../../../providers/Ability/useAbilityContext';
+import useIsEmbedded from '../../../../providers/Embed/useIsEmbedded';
 import {
     useRetryAiAgentThreadMessageMutation,
     useUpdatePromptFeedbackMutation,
 } from '../../hooks/useProjectAiAgents';
-import { setArtifact } from '../../store/aiArtifactSlice';
+import { type StreamPart } from '../../store/aiAgentThreadStreamSlice';
+import {
+    clearPreview,
+    selectArtifactPreview,
+    setPreview,
+} from '../../store/aiArtifactSlice';
 import {
     useAiAgentStoreDispatch,
     useAiAgentStoreSelector,
@@ -51,39 +64,371 @@ import {
     useAiAgentThreadMessageStreaming,
     useAiAgentThreadStreamQuery,
 } from '../../streaming/useAiAgentThreadStreamQuery';
+import { useBattleMessage } from '../Battle/BattleMessageContext';
+import { isJevTurn } from '../Battle/jevDecision';
+import { JevDecisionIndicator } from '../Battle/JevDecisionIndicator';
 import styles from './AgentChatAssistantBubble.module.css';
 import AgentChatDebugDrawer from './AgentChatDebugDrawer';
+import { AiAccessCallout } from './AiAccessCallout';
+import { getAiAccessRefusal } from './aiAccessRefusal';
 import { AiArtifactInline } from './AiArtifactInline';
+import AiDocumentCards from './AiDocumentCards';
 import { AiArtifactButton } from './ArtifactButton/AiArtifactButton';
-import { ContentLink } from './ContentLink';
+import { ContentLink, type SqlRunnerLinkState } from './ContentLink';
+import {
+    AiDataAppBuildCard,
+    type DataAppBuildOrigin,
+} from './DataAppBuildCard/AiDataAppBuildCard';
+import { AiDataAppRestoreCard } from './DataAppBuildCard/AiDataAppRestoreCard';
+import { getDataAppRestoreItem } from './DataAppBuildCard/dataAppBuildCardState';
+import { isHiddenToolName } from './hiddenToolNames';
+import {
+    MEMORY_CITATION_ALLOWED_TAGS,
+    MEMORY_CITATION_COMPONENTS,
+} from './memoryCitationConfig';
+import {
+    MessageSourcesGrid,
+    MessageSourcesToggle,
+} from './MessageMemorySources';
 import { MessageModelIndicator } from './MessageModelIndicator';
-import { rehypeAiAgentContentLinks } from './rehypeContentLinks';
-import { AiChartToolCalls } from './ToolCalls/AiChartToolCalls';
-import { AiProposeChangeToolCall } from './ToolCalls/AiProposeChangeToolCall';
-import { AiReasoning } from './ToolCalls/AiReasoning';
+import { MessageTimingIndicator } from './MessageTimingIndicator';
+import { isContentType, rehypeAiAgentContentLinks } from './rehypeContentLinks';
+import { rehypeMemoryCitationIndices } from './rehypeMemoryCitations';
+import { StreamRecoveryAlert } from './StreamRecoveryAlert';
+import { AiEditDbtProjectToolCall } from './ToolCalls/AiEditDbtProjectToolCall';
+import { AiEditRepoToolCall } from './ToolCalls/AiEditRepoToolCall';
+import {
+    LiveActivityCard,
+    ReasoningHistoryRow,
+    type LiveActivityToolGroup,
+} from './ToolCalls/LiveActivityCard';
+import { toReasoningTexts } from './ToolCalls/reasoningHelpers';
+import {
+    getPendingApprovalIds,
+    requiresSqlApproval,
+} from './ToolCalls/utils/sqlApprovalPending';
+import {
+    appendToolCallToActivityGroup,
+    canAppendToolCallToActivityGroup,
+    createToolCallActivityGroup,
+    groupToolCallSummaries,
+    type ToolCallActivityGroup,
+} from './ToolCalls/utils/toolCallGrouping';
+import { type ToolCallSummary } from './ToolCalls/utils/types';
+import { TypingDots } from './TypingDots';
+import { useMessageMemorySources } from './useMessageMemorySources';
+
+type ToolGroup = ToolCallActivityGroup & {
+    kind: 'toolGroup';
+};
+type TextSegment = { kind: 'text'; text: string; idx: number };
+type StreamSegment = TextSegment | ToolGroup;
+
+const segmentStreamParts = (parts: StreamPart[]): StreamSegment[] => {
+    const segments: StreamSegment[] = [];
+    parts.forEach((part, idx) => {
+        if (part.type === 'text') {
+            segments.push({ kind: 'text', text: part.text, idx });
+            return;
+        }
+        if (isHiddenToolName(part.toolName)) {
+            return;
+        }
+        const call: ToolCallSummary = {
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            toolArgs: part.toolArgs,
+            toolOutput: part.toolResult ?? undefined,
+            isPreliminary: part.isPreliminary,
+        };
+        const last = segments[segments.length - 1];
+        if (
+            last &&
+            last.kind === 'toolGroup' &&
+            canAppendToolCallToActivityGroup(last, call)
+        ) {
+            appendToolCallToActivityGroup(last, call);
+            return;
+        }
+
+        segments.push({
+            ...createToolCallActivityGroup(call),
+            kind: 'toolGroup',
+        });
+    });
+    return segments;
+};
+
+const groupPersistedToolCalls = (
+    calls: ToolCallSummary[],
+): ToolCallActivityGroup[] => groupToolCallSummaries(calls);
+
+const getPendingPersistedApprovalIds = (
+    message: AiAgentMessageAssistant,
+): string[] => {
+    const resolvedToolCallIds = new Set(
+        message.toolResults.map((result) => result.toolCallId),
+    );
+    return message.toolCalls
+        .filter(
+            (toolCall) =>
+                !resolvedToolCallIds.has(toolCall.toolCallId) &&
+                requiresSqlApproval(toolCall.toolName, toolCall.toolArgs),
+        )
+        .map((toolCall) => toolCall.toolCallId);
+};
+
+const getToolOutputStatus = (toolOutput: unknown) => {
+    const metadata = (toolOutput as { metadata?: unknown } | undefined)
+        ?.metadata;
+
+    if (!metadata || typeof metadata !== 'object' || !('status' in metadata)) {
+        return undefined;
+    }
+
+    const status = (metadata as { status?: unknown }).status;
+    return typeof status === 'string' ? status : undefined;
+};
+
+const getRunSqlTimeoutErrorMessage = (
+    message: AiAgentMessageAssistant,
+): string | null => {
+    const hasRunSqlTimeout = message.toolResults.some(
+        (result) =>
+            result.toolName === 'runSql' &&
+            getToolOutputStatus(result) === 'timeout',
+    );
+
+    return hasRunSqlTimeout
+        ? 'SQL approval timed out before the query could run. Approve the SQL prompt or retry when ready.'
+        : null;
+};
+
+const getRunSqlLinkStateFromArgs = (
+    toolArgs: unknown,
+): SqlRunnerLinkState | null => {
+    if (!toolArgs || typeof toolArgs !== 'object' || !('sql' in toolArgs)) {
+        return null;
+    }
+
+    const { sql, limit } = toolArgs as { sql?: unknown; limit?: unknown };
+
+    if (typeof sql !== 'string') {
+        return null;
+    }
+
+    return typeof limit === 'number' ? { sql, limit } : { sql };
+};
+
+const getLatestSuccessfulRunSqlLinkState = ({
+    message,
+    streamParts,
+}: {
+    message: AiAgentMessageAssistant;
+    streamParts?: StreamPart[];
+}): SqlRunnerLinkState | null => {
+    if (streamParts) {
+        for (let idx = streamParts.length - 1; idx >= 0; idx -= 1) {
+            const part = streamParts[idx];
+
+            if (
+                part.type !== 'toolCall' ||
+                part.toolName !== 'runSql' ||
+                part.isPreliminary === true ||
+                getToolOutputStatus(part.toolResult) !== 'success'
+            ) {
+                continue;
+            }
+
+            const linkState = getRunSqlLinkStateFromArgs(part.toolArgs);
+            if (linkState) return linkState;
+        }
+    }
+
+    const successfulRunSqlToolCallIds = new Set(
+        message.toolResults
+            .filter(
+                (result) =>
+                    result.toolName === 'runSql' &&
+                    getToolOutputStatus(result) === 'success',
+            )
+            .map((result) => result.toolCallId),
+    );
+
+    for (let idx = message.toolCalls.length - 1; idx >= 0; idx -= 1) {
+        const toolCall = message.toolCalls[idx];
+
+        if (
+            toolCall.toolName !== 'runSql' ||
+            !successfulRunSqlToolCallIds.has(toolCall.toolCallId)
+        ) {
+            continue;
+        }
+
+        const linkState = getRunSqlLinkStateFromArgs(toolCall.toolArgs);
+        if (linkState) return linkState;
+    }
+
+    return null;
+};
+
+const SqlMarkdownCodeBlock: FC<
+    CustomRendererProps & { projectUuid: string; canOpenSqlRunner: boolean }
+> = ({ code, isIncomplete, projectUuid, canOpenSqlRunner }) => {
+    const sql = code.trim();
+    const canOpen = canOpenSqlRunner && !isIncomplete && sql.length > 0;
+
+    return (
+        <Box className={styles.sqlMarkdownCodeBlock}>
+            <Group
+                justify="space-between"
+                align="center"
+                gap="xs"
+                className={styles.sqlMarkdownCodeHeader}
+            >
+                <Text size="xs" fw={600} c="dimmed">
+                    SQL
+                </Text>
+                {canOpen ? (
+                    <Button
+                        component={Link}
+                        to={{
+                            pathname: `/projects/${projectUuid}/sql-runner`,
+                        }}
+                        state={{ sql }}
+                        data-content-link="true"
+                        size="compact-xs"
+                        variant="default"
+                        className={styles.sqlRunnerLinkButton}
+                        leftSection={
+                            <MantineIcon icon={IconTerminal2} size={12} />
+                        }
+                    >
+                        Open in SQL Runner
+                    </Button>
+                ) : null}
+            </Group>
+            <Code block className={styles.sqlMarkdownCodeBody}>
+                {code}
+            </Code>
+        </Box>
+    );
+};
+
+/**
+ * The streamed part carrying a tool's finished output. The streaming slice
+ * mirrors each tool's full return shape into its part's `toolResult`.
+ */
+const findLiveToolPart = (
+    parts: StreamPart[] | undefined,
+    toolNames: string[],
+): Extract<StreamPart, { type: 'toolCall' }> | undefined =>
+    parts?.find(
+        (p): p is Extract<StreamPart, { type: 'toolCall' }> =>
+            p.type === 'toolCall' &&
+            toolNames.includes(p.toolName) &&
+            p.toolResult !== null &&
+            p.isPreliminary !== true,
+    );
 
 const AssistantBubbleContent: FC<{
     message: AiAgentMessageAssistant;
     projectUuid: string;
     agentUuid: string;
-}> = ({ message, projectUuid, agentUuid }) => {
-    const streamingState = useAiAgentThreadStreamQuery(message.threadUuid);
+    isLastMessage: boolean;
+    mcpServers?: AiMcpServer[];
+    onDashboardLinkClick?: (url: string) => void;
+}> = ({
+    message,
+    projectUuid,
+    agentUuid,
+    isLastMessage,
+    mcpServers,
+    onDashboardLinkClick,
+}) => {
+    const threadStreamingState = useAiAgentThreadStreamQuery(
+        message.threadUuid,
+    );
+    // The thread-level streaming state is shared across all messages on the
+    // thread. We must only use it for *this* message's bubble — otherwise the
+    // previous bubble would mirror the next prompt's parts.
+    const streamingState =
+        threadStreamingState?.messageUuid === message.uuid
+            ? threadStreamingState
+            : null;
     const isStreaming = useAiAgentThreadMessageStreaming(
         message.threadUuid,
         message.uuid,
     );
     const { mutate: handleRetry } = useRetryAiAgentThreadMessageMutation();
-    const mdStyle = useMdEditorStyle();
 
-    const isPending = message.status === 'pending';
+    const isPending =
+        message.status === 'pending' &&
+        streamingState?.connection.status !== 'refused';
     const hasError = message.status === 'error';
-    const hasNoResponse = !isStreaming && !message.message && !isPending;
-    const shouldShowRetry = hasError || hasNoResponse;
+    const isRecovering = streamingState?.connection.status === 'recovering';
+    const streamingError =
+        streamingState?.connection.status === 'error'
+            ? streamingState.connection.error
+            : null;
+    const runSqlTimeoutErrorMessage = getRunSqlTimeoutErrorMessage(message);
+    const displayErrorMessage =
+        runSqlTimeoutErrorMessage ||
+        streamingError ||
+        message.errorMessage ||
+        'Failed to generate response. Please try again.';
+    const displayErrorTitle = runSqlTimeoutErrorMessage
+        ? 'SQL approval timed out'
+        : 'Something went wrong';
+    const sqlRunnerLinkState = getLatestSuccessfulRunSqlLinkState({
+        message,
+        streamParts: streamingState?.parts,
+    });
+    const canOpenSqlRunner = !!sqlRunnerLinkState;
+    const markdownPlugins = useMemo(
+        () => ({
+            renderers: [
+                {
+                    language: ['sql', 'postgresql', 'bigquery', 'snowflake'],
+                    component: (props: CustomRendererProps) => (
+                        <SqlMarkdownCodeBlock
+                            {...props}
+                            projectUuid={projectUuid}
+                            canOpenSqlRunner={canOpenSqlRunner}
+                        />
+                    ),
+                },
+            ],
+        }),
+        [canOpenSqlRunner, projectUuid],
+    );
+    // After streaming ends there's a brief window where the client has
+    // refetched the thread but the persisted message.message hasn't landed
+    // yet. The streamed content stays in redux keyed to this message, so we
+    // keep it as a fallback to avoid flashing an empty bubble (and a spurious
+    // "No response" notice) until the persisted text arrives.
+    const streamedContent = streamingState?.content ?? '';
+    const hasNoResponse =
+        !isStreaming &&
+        !streamingError &&
+        !message.message &&
+        !streamedContent &&
+        !isPending &&
+        !message.interrupted;
+    const shouldShowRetry = hasError || hasNoResponse || !!streamingError;
+
+    const isBenignEmptyResponse = hasNoResponse && !hasError && !streamingError;
+    const noticeTitle = isBenignEmptyResponse
+        ? 'No response'
+        : displayErrorTitle;
+    const noticeMessage = isBenignEmptyResponse
+        ? 'The agent finished without a response. You can try again.'
+        : displayErrorMessage;
 
     const baseMessageContent =
         isStreaming && streamingState
             ? streamingState.content
-            : (message.message ?? '');
+            : message.message || streamedContent;
 
     const referencedArtifactsMarkdown =
         !isStreaming &&
@@ -100,139 +445,473 @@ const AssistantBubbleContent: FC<{
 
     const messageContent = baseMessageContent + referencedArtifactsMarkdown;
 
-    const proposeChangeToolCall = isStreaming
-        ? (streamingState?.toolCalls.find((t) => t.toolName === 'proposeChange')
-              ?.toolArgs as ToolProposeChangeArgs)
-        : (message.toolCalls.find((t) => t.toolName === 'proposeChange')
-              ?.toolArgs as ToolProposeChangeArgs); // TODO: fix message type, it's `object` now
+    // Writeback PR card metadata. The editDbtProject tool result instructs
+    // the LLM not to print the PR URL inline (we surface it via a dedicated
+    // button instead), so we have to source it from the tool result ourselves.
+    //   - Persisted view: pull it from message.toolResults via the existing
+    //     isToolEditDbtProjectResult type predicate.
+    //   - Live streaming: pull it from streamingState.parts. The streaming
+    //     slice mirrors AI SDK output-available chunks into each part's
+    //     toolResult, which is the full tool return shape {result,metadata}.
+    //     We re-shape to the structured `metadata` the card expects.
+    const editDbtProjectResult: {
+        metadata: ToolEditDbtProjectOutput['metadata'];
+        // setupPreviewDeploy reuses this card but its PR only adds the preview
+        // workflow — it never previews itself, so the card hides the preview
+        // affordance when this is true.
+        isPreviewDeploySetup: boolean;
+    } | null = (() => {
+        // setupPreviewDeploy shares editDbtProject's output shape and the
+        // same PR-button card, so resolve either tool's result here.
+        const writebackResult = message.toolResults.find(
+            isToolEditDbtProjectResult,
+        );
+        if (writebackResult)
+            return {
+                metadata: writebackResult.metadata,
+                isPreviewDeploySetup: false,
+            };
+        const setupResult = message.toolResults.find(
+            isToolSetupPreviewDeployResult,
+        );
+        if (setupResult)
+            return {
+                metadata: setupResult.metadata,
+                isPreviewDeploySetup: true,
+            };
 
-    const proposeChangeToolResult = message.toolResults.find(
-        (result) => result.toolName === 'proposeChange',
+        const livePart = findLiveToolPart(streamingState?.parts, [
+            'editDbtProject',
+            'setupPreviewDeploy',
+        ]);
+        const liveOutput = livePart?.toolResult as
+            | ToolEditDbtProjectOutput
+            | undefined;
+        if (!liveOutput?.metadata) return null;
+        return {
+            metadata: liveOutput.metadata,
+            isPreviewDeploySetup: livePart?.toolName === 'setupPreviewDeploy',
+        };
+    })();
+
+    // General coding-agent (editRepo) PR card metadata — resolved the same way
+    // as editDbtProject (persisted result, then live streaming part), but kept
+    // separate since it has no preview / post-merge migration.
+    const editRepoMetadata: ToolEditRepoOutput['metadata'] | null = (() => {
+        const persisted = message.toolResults.find(isToolEditRepoResult);
+        if (persisted) return persisted.metadata;
+        const liveOutput = findLiveToolPart(streamingState?.parts, ['editRepo'])
+            ?.toolResult as ToolEditRepoOutput | undefined;
+        return liveOutput?.metadata ?? null;
+    })();
+
+    const dataAppBuild: {
+        metadata: ToolGenerateDataAppOutput['metadata'];
+        origin: DataAppBuildOrigin;
+    } | null = (() => {
+        const persisted = message.toolResults.find(isToolDataAppBuildResult);
+        if (persisted)
+            return { metadata: persisted.metadata, origin: 'persisted' };
+        const liveOutput = findLiveToolPart(streamingState?.parts, [
+            'generateDataApp',
+            'iterateDataApp',
+        ])?.toolResult as ToolGenerateDataAppOutput | undefined;
+        return liveOutput?.metadata
+            ? { metadata: liveOutput.metadata, origin: 'stream' }
+            : null;
+    })();
+
+    const { data: agentIdentityFlag } = useServerFeatureFlag(
+        FeatureFlags.AgentIdentity,
     );
+    const aiAccessRefusal = [
+        streamingState?.connection.status === 'refused'
+            ? streamingState.connection.refusal
+            : null,
+        ...(streamingState?.parts ?? []).flatMap((part) =>
+            part.type === 'toolCall'
+                ? [getAiAccessRefusal(part.toolResult)]
+                : [],
+        ),
+        ...message.toolResults.map(getAiAccessRefusal),
+    ].find((refusal) => refusal !== null);
 
-    const toolCalls = isStreaming
-        ? (streamingState?.toolCalls ?? [])
-        : message.toolCalls;
+    const showAccessRefusal =
+        agentIdentityFlag?.enabled === true && !!aiAccessRefusal;
 
     return (
         <>
-            {shouldShowRetry && (
-                <Paper
-                    variant="dotted"
-                    radius="md"
-                    pr="md"
-                    shadow="none"
-                    bg="ldGray.0"
-                >
-                    <Group gap="xs" align="center" justify="space-between">
-                        <Alert
-                            icon={
-                                <MantineIcon
-                                    icon={IconExclamationCircle}
-                                    color="gray"
-                                    size="md"
-                                />
-                            }
-                            color="ldGray.0"
-                            variant="outline"
-                        >
+            {showAccessRefusal && aiAccessRefusal && (
+                <AiAccessCallout
+                    projectUuid={projectUuid}
+                    refusal={aiAccessRefusal}
+                    variant="inline"
+                />
+            )}
+            {shouldShowRetry && !showAccessRefusal && (
+                <Paper withBorder radius="md" p="sm" bg="ldGray.0">
+                    <Group gap="sm" wrap="nowrap" justify="space-between">
+                        <Group gap="sm" wrap="nowrap" align="flex-start">
+                            <MantineIcon
+                                icon={IconExclamationCircle}
+                                color="ldGray.6"
+                                size="md"
+                            />
                             <Stack gap={4}>
                                 <Text size="sm" fw={500} c="dimmed">
-                                    Something went wrong
+                                    {noticeTitle}
                                 </Text>
                                 <Text size="xs" c="dimmed">
-                                    {message.errorMessage ||
-                                        'Failed to generate response. Please try again.'}
+                                    {noticeMessage}
                                 </Text>
                             </Stack>
-                        </Alert>
-                        <Button
-                            size="xs"
-                            variant="default"
-                            color="ldDark.5"
-                            leftSection={
-                                <MantineIcon
-                                    icon={IconRefresh}
-                                    size="sm"
-                                    color="ldGray.7"
-                                />
-                            }
-                            onClick={() =>
-                                handleRetry({
-                                    projectUuid,
-                                    agentUuid,
-                                    threadUuid: message.threadUuid,
-                                    messageUuid: message.uuid,
-                                })
-                            }
-                        >
-                            Try again
-                        </Button>
+                        </Group>
+                        {/* Retry re-runs the thread's latest prompt, so only
+                            offer it on the message it would actually re-run */}
+                        {isLastMessage && (
+                            <Button
+                                size="xs"
+                                variant="default"
+                                color="ldDark.5"
+                                leftSection={
+                                    <MantineIcon
+                                        icon={IconRefresh}
+                                        size="sm"
+                                        color="ldGray.7"
+                                    />
+                                }
+                                onClick={() =>
+                                    handleRetry({
+                                        projectUuid,
+                                        agentUuid,
+                                        threadUuid: message.threadUuid,
+                                        messageUuid: message.uuid,
+                                    })
+                                }
+                            >
+                                Try again
+                            </Button>
+                        )}
                     </Group>
                 </Paper>
             )}
 
-            {isStreaming && streamingState?.reasoning && (
-                <AiReasoning
-                    reasoning={streamingState.reasoning}
-                    type="streaming"
-                />
-            )}
-            {!isStreaming && message.reasoning.length > 0 && (
-                <AiReasoning reasoning={message.reasoning} type="persisted" />
-            )}
-            {toolCalls.length > 0 ? (
-                <AiChartToolCalls
-                    toolCalls={toolCalls}
-                    type={isStreaming || isPending ? 'streaming' : 'persisted'}
-                    projectUuid={projectUuid}
-                    agentUuid={agentUuid}
-                    threadUuid={message.threadUuid}
-                    promptUuid={message.uuid}
-                />
-            ) : null}
-            {messageContent.length > 0 ? (
-                <MDEditor.Markdown
-                    rehypeRewrite={rehypeRemoveHeaderLinks}
-                    source={messageContent}
-                    style={{ ...mdStyle, padding: `0.5rem 0` }}
-                    rehypePlugins={[rehypeAiAgentContentLinks]}
-                    components={{
-                        ...mdEditorComponents,
-                        a: ({ node, children, ...props }) => {
-                            const contentType =
-                                'data-content-type' in props &&
-                                typeof props['data-content-type'] === 'string'
-                                    ? props['data-content-type']
-                                    : undefined;
+            {/* Reasoning lives inside the LiveActivityCard at all times, so
+             *  there is one unified bento for the agent's process. */}
+            {(() => {
+                const shouldUseStreamParts =
+                    isStreaming ||
+                    (streamingState?.connection.status === 'complete' &&
+                        isPending);
+                const segments =
+                    shouldUseStreamParts && streamingState
+                        ? segmentStreamParts(streamingState.parts)
+                        : [];
 
-                            return (
-                                <ContentLink
-                                    contentType={contentType}
-                                    props={props}
-                                    message={message}
-                                    projectUuid={projectUuid}
-                                    agentUuid={agentUuid}
+                if (segments.length > 0) {
+                    // Tool segments are extracted into a single LiveActivityCard
+                    // pinned below the texts. Texts keep their interleaved order
+                    // with intermediates collapsed; the latest text stays open.
+                    const liveToolGroups: LiveActivityToolGroup[] = segments
+                        .filter(
+                            (
+                                s,
+                            ): s is Extract<typeof s, { kind: 'toolGroup' }> =>
+                                s.kind === 'toolGroup',
+                        )
+                        .map((s) => ({
+                            toolName: s.toolName,
+                            calls: s.calls,
+                            keyId: s.keyId,
+                            display: s.display,
+                        }));
+                    const pendingApprovalIds = streamingState
+                        ? getPendingApprovalIds(streamingState)
+                        : [];
+                    const textSegments = segments.filter(
+                        (s): s is Extract<typeof s, { kind: 'text' }> =>
+                            s.kind === 'text',
+                    );
+                    const latestTextSeg = textSegments[textSegments.length - 1];
+                    // bridges the gap between artifact landing and closing text.
+                    const showFinishingUp =
+                        isStreaming &&
+                        !!message.artifacts?.length &&
+                        segments[segments.length - 1]?.kind !== 'text';
+                    const finalAnswerMd = latestTextSeg ? (
+                        <AiMarkdown
+                            isStreaming={isStreaming}
+                            allowedTags={MEMORY_CITATION_ALLOWED_TAGS}
+                            className={
+                                isStreaming
+                                    ? styles.streamingNarration
+                                    : undefined
+                            }
+                            rehypePlugins={[
+                                rehypeAiAgentContentLinks,
+                                rehypeMemoryCitationIndices,
+                            ]}
+                            plugins={markdownPlugins}
+                            components={{
+                                ...MEMORY_CITATION_COMPONENTS,
+                                a: ({ node, children, ...props }) => {
+                                    const contentType =
+                                        'data-content-type' in props &&
+                                        isContentType(
+                                            props['data-content-type'],
+                                        )
+                                            ? props['data-content-type']
+                                            : undefined;
+                                    return (
+                                        <ContentLink
+                                            contentType={contentType}
+                                            props={props}
+                                            message={message}
+                                            projectUuid={projectUuid}
+                                            agentUuid={agentUuid}
+                                            sqlRunnerLinkState={
+                                                sqlRunnerLinkState
+                                            }
+                                            onDashboardLinkClick={
+                                                onDashboardLinkClick
+                                            }
+                                        >
+                                            {children}
+                                        </ContentLink>
+                                    );
+                                },
+                            }}
+                        >
+                            {latestTextSeg.text}
+                        </AiMarkdown>
+                    ) : null;
+                    return (
+                        <Stack
+                            gap={4}
+                            pt="xs"
+                            // Walkthrough: the reply is still being worked
+                            // on while this is live. See scripts/scope-tours.
+                            data-tour-anchor={
+                                isStreaming ? 'ai-working' : undefined
+                            }
+                        >
+                            {/* Activity card sits ABOVE the rolling preview /
+                             *  final answer so tool work reads top-to-bottom:
+                             *  what was done → the answer. After streaming we
+                             *  fold reasoning into the activity card so the
+                             *  answer remains the focal point. SQL approvals
+                             *  drop into the card's body, auto-expanded. */}
+                            {(() => {
+                                const reasoningTexts = toReasoningTexts(
+                                    !isStreaming
+                                        ? message.reasoning
+                                        : undefined,
+                                    isStreaming
+                                        ? streamingState?.reasoning
+                                        : undefined,
+                                );
+                                return reasoningTexts.length > 0 ? (
+                                    <ReasoningHistoryRow
+                                        texts={reasoningTexts}
+                                        isLive={isStreaming}
+                                    />
+                                ) : null;
+                            })()}
+                            {liveToolGroups.length > 0 && (
+                                <LiveActivityCard
+                                    toolGroups={liveToolGroups}
+                                    isLive={isStreaming}
+                                    toolResults={message.toolResults}
+                                    toolCalls={message.toolCalls}
+                                    mcpServers={mcpServers}
+                                    stepProgressMessages={
+                                        streamingState?.stepProgressMessages ??
+                                        []
+                                    }
+                                    approval={{
+                                        projectUuid,
+                                        agentUuid,
+                                        threadUuid: message.threadUuid,
+                                        pendingToolCallIds: pendingApprovalIds,
+                                        decidedToolCallIds:
+                                            streamingState?.decidedToolCallIds ??
+                                            [],
+                                    }}
+                                />
+                            )}
+                            {latestTextSeg ? (
+                                <Box
+                                    className={styles.streamPart}
+                                    // Walkthrough: the answer in words (while
+                                    // streaming). See scripts/scope-tours.
+                                    data-tour-scope="create:AiAgentThread"
+                                    data-tour-result="1"
+                                    data-tour-label="Read the answer"
+                                    data-tour-docs="agents/use-ai-agents.mdx#core-capabilities:p2:2"
                                 >
-                                    {children}
-                                </ContentLink>
-                            );
-                        },
-                    }}
+                                    {finalAnswerMd}
+                                </Box>
+                            ) : null}
+                            {/* Progress events ("Starting sandbox", "Cloning
+                                project", …) render inside the
+                                LiveActivityCard above as nested steps under
+                                the active tool — see renderInlineLiveStepProgress
+                                in that component. Here we just keep the
+                                "Finishing up" pulse for the brief gap
+                                between an artifact landing and the closing
+                                text. */}
+                            {showFinishingUp && (
+                                <Box className={styles.streamPart} pl={7}>
+                                    <TypingDots label="Finishing up" />
+                                </Box>
+                            )}
+                        </Stack>
+                    );
+                }
+
+                // Fallback (page reload, no streamingState): activity card ON
+                // TOP showing what the agent did + reasoning folded in, then
+                // the final markdown answer below as the hero.
+                const renderableToolCalls = message.toolCalls.filter(
+                    (tc) =>
+                        !isHiddenToolName(tc.toolName) &&
+                        // Subagent children render nested under their parent's row, not as top-level siblings.
+                        tc.parentToolCallId === null,
+                );
+                const persistedToolGroups: LiveActivityToolGroup[] =
+                    groupPersistedToolCalls(renderableToolCalls);
+                const persistedApproval = {
+                    projectUuid,
+                    agentUuid,
+                    threadUuid: message.threadUuid,
+                    pendingToolCallIds: getPendingPersistedApprovalIds(message),
+                    decidedToolCallIds: [],
+                };
+                return (
+                    <>
+                        {persistedToolGroups.length > 0 && (
+                            <LiveActivityCard
+                                toolGroups={persistedToolGroups}
+                                isLive={isStreaming || isPending}
+                                toolResults={message.toolResults}
+                                toolCalls={message.toolCalls}
+                                mcpServers={mcpServers}
+                                approval={persistedApproval}
+                            />
+                        )}
+                        {message.reasoning && message.reasoning.length > 0 && (
+                            <ReasoningHistoryRow
+                                texts={toReasoningTexts(
+                                    message.reasoning,
+                                    undefined,
+                                )}
+                                isLive={false}
+                            />
+                        )}
+                        {messageContent.length > 0 ? (
+                            <Box
+                                // Walkthrough: the answer in words (persisted).
+                                // See scripts/scope-tours.
+                                data-tour-scope="create:AiAgentThread"
+                                data-tour-result="1"
+                                data-tour-label="Read the answer"
+                                data-tour-docs="agents/use-ai-agents.mdx#core-capabilities:p2:2"
+                            >
+                                <AiMarkdown
+                                    className={styles.persistedAnswer}
+                                    allowedTags={MEMORY_CITATION_ALLOWED_TAGS}
+                                    rehypePlugins={[
+                                        rehypeAiAgentContentLinks,
+                                        rehypeMemoryCitationIndices,
+                                    ]}
+                                    plugins={markdownPlugins}
+                                    components={{
+                                        ...MEMORY_CITATION_COMPONENTS,
+                                        a: ({ node, children, ...props }) => {
+                                            const contentType =
+                                                'data-content-type' in props &&
+                                                isContentType(
+                                                    props['data-content-type'],
+                                                )
+                                                    ? props['data-content-type']
+                                                    : undefined;
+
+                                            return (
+                                                <ContentLink
+                                                    contentType={contentType}
+                                                    props={props}
+                                                    message={message}
+                                                    projectUuid={projectUuid}
+                                                    agentUuid={agentUuid}
+                                                    sqlRunnerLinkState={
+                                                        sqlRunnerLinkState
+                                                    }
+                                                    onDashboardLinkClick={
+                                                        onDashboardLinkClick
+                                                    }
+                                                >
+                                                    {children}
+                                                </ContentLink>
+                                            );
+                                        },
+                                    }}
+                                >
+                                    {messageContent}
+                                </AiMarkdown>
+                            </Box>
+                        ) : null}
+                    </>
+                );
+            })()}
+            {isRecovering && isPending && <StreamRecoveryAlert />}
+            {/* TypingDots fill the gap until the first visible output lands —
+             *  any tool call or text part. Reasoning alone doesn't count: it
+             *  collapses by default and would otherwise leave the bubble silent.
+             *  Once a part exists, the bento + rolling preview take over. The
+             *  optional label shows in-flight progress (e.g. "Starting
+             *  sandbox…") so this gap isn't silent for long-setup tools. */}
+            {(isStreaming || (isPending && !streamingError)) &&
+                (streamingState?.parts?.length ?? 0) === 0 && (
+                    <Box
+                        className={styles.streamPart}
+                        pl={7}
+                        data-tour-anchor="ai-working"
+                    >
+                        <TypingDots />
+                    </Box>
+                )}
+            <AiDocumentCards
+                projectUuid={projectUuid}
+                agentUuid={agentUuid}
+                message={message}
+                streamParts={streamingState?.parts}
+            />
+            {editDbtProjectResult && (
+                <AiEditDbtProjectToolCall
+                    metadata={editDbtProjectResult.metadata}
+                    projectUuid={projectUuid}
+                    isPreviewDeploySetup={
+                        editDbtProjectResult.isPreviewDeploySetup
+                    }
+                    agentUuid={agentUuid}
+                    threadUuid={message.threadUuid}
                 />
-            ) : null}
-            {isStreaming || isPending ? (
-                <Loader type="dots" color="gray" />
-            ) : null}
-            {proposeChangeToolCall && (
-                <AiProposeChangeToolCall
-                    change={proposeChangeToolCall.change}
-                    entityTableName={proposeChangeToolCall.entityTableName}
+            )}
+            {editRepoMetadata && (
+                <AiEditRepoToolCall
+                    metadata={editRepoMetadata}
+                    projectUuid={projectUuid}
+                />
+            )}
+            {dataAppBuild && (
+                <AiDataAppBuildCard
+                    metadata={dataAppBuild.metadata}
+                    origin={dataAppBuild.origin}
                     projectUuid={projectUuid}
                     agentUuid={agentUuid}
                     threadUuid={message.threadUuid}
-                    promptUuid={message.uuid}
-                    toolResult={proposeChangeToolResult}
+                    messageUuid={message.uuid}
+                    compact={!isLastMessage}
                 />
             )}
         </>
@@ -241,6 +920,9 @@ const AssistantBubbleContent: FC<{
 
 type Props = {
     message: AiAgentMessageAssistant;
+    /** The hidden user turn this reply answers, if any (same prompt uuid). */
+    hiddenSibling: AiAgentMessageUser | null;
+    isLastMessage: boolean;
     isActive?: boolean;
     debug?: boolean;
     projectUuid: string;
@@ -248,11 +930,15 @@ type Props = {
     onAddToEvals?: (promptUuid: string) => void;
     renderArtifactsInline?: boolean;
     showAddToEvalsButton?: boolean;
+    mcpServers?: AiMcpServer[];
+    onDashboardLinkClick?: (url: string) => void;
 };
 
 export const AssistantBubble: FC<Props> = memo(
     ({
         message,
+        hiddenSibling,
+        isLastMessage,
         isActive = false,
         debug = false,
         projectUuid,
@@ -260,17 +946,22 @@ export const AssistantBubble: FC<Props> = memo(
         onAddToEvals,
         renderArtifactsInline = false,
         showAddToEvalsButton = false,
+        mcpServers,
+        onDashboardLinkClick,
     }) => {
-        const artifact = useAiAgentStoreSelector(
-            (state) => state.aiArtifact.artifact,
-        );
+        const artifact = useAiAgentStoreSelector(selectArtifactPreview);
         const dispatch = useAiAgentStoreDispatch();
 
         if (!projectUuid) throw new Error(`Project Uuid not found`);
         if (!agentUuid) throw new Error(`Agent Uuid not found`);
 
+        const ability = useAbilityContext();
+        const isEmbed = useIsEmbedded();
+        const canViewDebugInfo =
+            !isEmbed || ability.can('view', 'EmbedAiAgentDebug');
         const [isDrawerOpen, { open: openDrawer, close: closeDrawer }] =
-            useDisclosure(debug);
+            useDisclosure(debug && canViewDebugInfo);
+        const battle = useBattleMessage(message.uuid);
 
         const updateFeedbackMutation = useUpdatePromptFeedbackMutation(
             projectUuid,
@@ -285,6 +976,10 @@ export const AssistantBubble: FC<Props> = memo(
         const [popoverOpened, { open: openPopover, close: closePopover }] =
             useDisclosure(false);
         const [feedbackText, setFeedbackText] = useState('');
+
+        const sourceSlugs = useMessageMemorySources(message.message ?? '');
+        const [sourcesExpanded, { toggle: toggleSources }] =
+            useDisclosure(false);
 
         const handleUpvote = useCallback(() => {
             updateFeedbackMutation.mutate({
@@ -325,15 +1020,40 @@ export const AssistantBubble: FC<Props> = memo(
             setFeedbackText('');
         }, [closePopover]);
 
-        const isPending = message.status === 'pending';
+        const threadStreamingState = useAiAgentThreadStreamQuery(
+            message.threadUuid,
+        );
+        const isRefused =
+            threadStreamingState?.messageUuid === message.uuid &&
+            threadStreamingState.connection.status === 'refused';
+        const isPending = message.status === 'pending' && !isRefused;
         const isLoading =
             useAiAgentThreadMessageStreaming(
                 message.threadUuid,
                 message.uuid,
             ) || isPending;
 
-        const isArtifactAvailable =
-            !!(message.artifacts && message.artifacts.length > 0) && !isPending;
+        // status flips to 'idle' only at stream end; artifacts land earlier.
+        const isArtifactAvailable = !!(
+            message.artifacts && message.artifacts.length > 0
+        );
+
+        // A restore turn is deterministic (no LLM): the card is the whole
+        // reply, its message included, so nothing else renders for it.
+        const restoreItem = getDataAppRestoreItem(hiddenSibling);
+        if (restoreItem) {
+            return (
+                <AiDataAppRestoreCard
+                    item={restoreItem}
+                    completionMessage={message.message}
+                    projectUuid={projectUuid}
+                    agentUuid={agentUuid}
+                    threadUuid={message.threadUuid}
+                    messageUuid={message.uuid}
+                    compact={!isLastMessage}
+                />
+            );
+        }
 
         return (
             <Stack
@@ -345,11 +1065,26 @@ export const AssistantBubble: FC<Props> = memo(
                     overflow: 'unset',
                     borderStartStartRadius: '0px',
                 }}
+                data-message-id={`assistant-${message.uuid}`}
+                // Walkthrough result marker for create:AiAgentThread: the
+                // agent's answer is where sending a question lands, so no
+                // return path. See scripts/scope-tours/generate.ts.
+                data-tour-scope="create:AiAgentThread"
+                data-tour-step="1"
+                data-tour-route="/projects/:projectUuid/ai-agents/:agentUuid/threads/:threadUuid"
+                data-tour-label="Ask the agent a question"
+                data-tour-docs="agents.mdx#intro:1"
+                data-tour-return="none"
+                data-tour-resultdocs="agents.mdx#intro:3"
+                data-tour-busy='[data-tour-anchor="ai-working"]'
             >
                 <AssistantBubbleContent
                     message={message}
                     projectUuid={projectUuid}
                     agentUuid={agentUuid}
+                    isLastMessage={isLastMessage}
+                    mcpServers={mcpServers}
+                    onDashboardLinkClick={onDashboardLinkClick}
                 />
 
                 {isArtifactAvailable && projectUuid && agentUuid && (
@@ -367,44 +1102,56 @@ export const AssistantBubble: FC<Props> = memo(
                               ))
                             : // Render artifact buttons that open modals
                               message.artifacts!.map((messageArtifact) => (
-                                  <AiArtifactButton
+                                  <Box
                                       key={`${messageArtifact.artifactUuid}-${messageArtifact.versionUuid}`}
-                                      onClick={() => {
-                                          if (
+                                      // Walkthrough: the chart the agent built
+                                      // opens in the side panel from here.
+                                      // See scripts/scope-tours.
+                                      data-tour-scope="create:AiAgentThread"
+                                      data-tour-result="2"
+                                      data-tour-label="The chart the agent built"
+                                      data-tour-docs="agents/use-ai-agents.mdx#core-capabilities:li2"
+                                  >
+                                      <AiArtifactButton
+                                          onClick={() => {
+                                              const isThisArtifactOpen =
+                                                  artifact?.artifactUuid ===
+                                                      messageArtifact.artifactUuid &&
+                                                  artifact?.versionUuid ===
+                                                      messageArtifact.versionUuid;
+                                              if (isThisArtifactOpen) {
+                                                  dispatch(clearPreview());
+                                                  return;
+                                              }
+                                              dispatch(
+                                                  setPreview({
+                                                      type: 'artifact',
+                                                      artifactUuid:
+                                                          messageArtifact.artifactUuid,
+                                                      versionUuid:
+                                                          messageArtifact.versionUuid,
+                                                      messageUuid: message.uuid,
+                                                      threadUuid:
+                                                          message.threadUuid,
+                                                      projectUuid: projectUuid,
+                                                      agentUuid: agentUuid,
+                                                  }),
+                                              );
+                                          }}
+                                          isArtifactOpen={
                                               artifact?.artifactUuid ===
                                                   messageArtifact.artifactUuid &&
                                               artifact?.versionUuid ===
                                                   messageArtifact.versionUuid
-                                          ) {
-                                              return;
                                           }
-                                          dispatch(
-                                              setArtifact({
-                                                  artifactUuid:
-                                                      messageArtifact.artifactUuid,
-                                                  versionUuid:
-                                                      messageArtifact.versionUuid,
-                                                  messageUuid: message.uuid,
-                                                  threadUuid:
-                                                      message.threadUuid,
-                                                  projectUuid: projectUuid,
-                                                  agentUuid: agentUuid,
-                                              }),
-                                          );
-                                      }}
-                                      isArtifactOpen={
-                                          artifact?.artifactUuid ===
-                                              messageArtifact.artifactUuid &&
-                                          artifact?.versionUuid ===
-                                              messageArtifact.versionUuid
-                                      }
-                                      artifact={messageArtifact}
-                                  />
+                                          artifact={messageArtifact}
+                                      />
+                                  </Box>
                               ))}
                     </Stack>
                 )}
                 {!popoverOpened && downVoted && message.humanFeedback && (
-                    <Paper p="xs" mt="xs" radius="md" withBorder>
+                    <Paper p="xs" mt="xs" radius="md">
                         <Stack gap="xs">
                             <Group gap="xs">
                                 <MantineIcon
@@ -423,25 +1170,23 @@ export const AssistantBubble: FC<Props> = memo(
                     </Paper>
                 )}
                 {isLoading ? null : (
-                    <Group gap={0}>
-                        <CopyButton value={message.message ?? ''}>
-                            {({ copied, copy }) => (
-                                <ActionIcon
-                                    variant="subtle"
-                                    color="ldGray.9"
-                                    aria-label="copy"
-                                    onClick={copy}
-                                >
-                                    <MantineIcon
-                                        icon={copied ? IconCheck : IconCopy}
-                                    />
-                                </ActionIcon>
-                            )}
-                        </CopyButton>
+                    <Group
+                        gap={0}
+                        // Walkthrough: rating the answer feeds the Issues loop.
+                        // See scripts/scope-tours.
+                        data-tour-scope="create:AiAgentThread"
+                        data-tour-result="3"
+                        data-tour-label="Rate the answer"
+                        data-tour-docs="agents/issues.mdx#ai-filed-findings:1"
+                    >
+                        <CopyActionIcon
+                            value={message.message ?? ''}
+                            color="ldGray.9"
+                            aria-label="copy"
+                        />
 
                         {(!hasRating || upVoted) && (
                             <ActionIcon
-                                variant="subtle"
                                 color="ldGray.9"
                                 aria-label="upvote"
                                 onClick={handleUpvote}
@@ -449,8 +1194,6 @@ export const AssistantBubble: FC<Props> = memo(
                                 <Tooltip
                                     label="Feedback sent"
                                     position="top"
-                                    withinPortal
-                                    withArrow
                                     // Hack to only render tooltip (on hover) when `hasRating` is false
                                     opened={hasRating ? undefined : false}
                                 >
@@ -479,7 +1222,6 @@ export const AssistantBubble: FC<Props> = memo(
                             >
                                 <Popover.Target>
                                     <ActionIcon
-                                        variant="subtle"
                                         color="ldGray.9"
                                         aria-label="downvote"
                                         onClick={handleDownvote}
@@ -515,7 +1257,6 @@ export const AssistantBubble: FC<Props> = memo(
                                                 }
                                                 minRows={3}
                                                 maxRows={5}
-                                                radius="md"
                                                 resize="vertical"
                                             />
                                             <Group gap="xs">
@@ -546,7 +1287,6 @@ export const AssistantBubble: FC<Props> = memo(
                         {showAddToEvalsButton && onAddToEvals && (
                             <Tooltip label="Add this response to evals">
                                 <ActionIcon
-                                    variant="subtle"
                                     color="ldGray.9"
                                     aria-label="Add to evaluation set"
                                     onClick={() => onAddToEvals(message.uuid)}
@@ -556,9 +1296,8 @@ export const AssistantBubble: FC<Props> = memo(
                             </Tooltip>
                         )}
 
-                        {isArtifactAvailable && (
+                        {isArtifactAvailable && canViewDebugInfo && (
                             <ActionIcon
-                                variant="subtle"
                                 color="ldGray.9"
                                 aria-label="Debug information"
                                 onClick={openDrawer}
@@ -567,24 +1306,70 @@ export const AssistantBubble: FC<Props> = memo(
                             </ActionIcon>
                         )}
 
-                        <MessageModelIndicator
-                            projectUuid={projectUuid}
-                            agentUuid={agentUuid}
-                            modelConfig={message.modelConfig}
+                        {sourceSlugs.length > 0 && (
+                            <MessageSourcesToggle
+                                count={sourceSlugs.length}
+                                expanded={sourcesExpanded}
+                                onToggle={toggleSources}
+                            />
+                        )}
+                        {!(
+                            battle.isBattle &&
+                            message.jevDecision &&
+                            isJevTurn(message.jevDecision)
+                        ) && (
+                            <MessageModelIndicator
+                                projectUuid={projectUuid}
+                                agentUuid={agentUuid}
+                                modelConfig={message.modelConfig}
+                            />
+                        )}
+                        {battle.isBattle && message.jevDecision && (
+                            <JevDecisionIndicator
+                                decision={message.jevDecision}
+                                name={battle.decisionName}
+                            />
+                        )}
+                        <MessageTimingIndicator
+                            responseTiming={message.responseTiming}
+                            isWinner={battle.isWinner}
+                            tokens={
+                                battle.isBattle && message.tokenUsage
+                                    ? {
+                                          agent: message.tokenUsage.totalTokens,
+                                          decisionName: battle.decisionName,
+                                          decisions:
+                                              (message.tokenUsage
+                                                  .decisionInputTokens ?? 0) +
+                                              (message.tokenUsage
+                                                  .decisionOutputTokens ?? 0),
+                                      }
+                                    : null
+                            }
                         />
                     </Group>
                 )}
 
-                <AgentChatDebugDrawer
-                    agentUuid={agentUuid}
-                    projectUuid={projectUuid}
-                    artifacts={message.artifacts}
-                    toolCalls={message.toolCalls}
-                    toolResults={message.toolResults}
-                    isVisualizationAvailable={isArtifactAvailable}
-                    isDrawerOpen={isDrawerOpen}
-                    onClose={closeDrawer}
-                />
+                {!isLoading && sourcesExpanded && sourceSlugs.length > 0 && (
+                    <MessageSourcesGrid
+                        slugs={sourceSlugs}
+                        projectUuid={projectUuid}
+                        agentUuid={agentUuid}
+                    />
+                )}
+
+                {canViewDebugInfo && (
+                    <AgentChatDebugDrawer
+                        agentUuid={agentUuid}
+                        projectUuid={projectUuid}
+                        artifacts={message.artifacts}
+                        toolCalls={message.toolCalls}
+                        toolResults={message.toolResults}
+                        isVisualizationAvailable={isArtifactAvailable}
+                        isDrawerOpen={isDrawerOpen}
+                        onClose={closeDrawer}
+                    />
+                )}
             </Stack>
         );
     },

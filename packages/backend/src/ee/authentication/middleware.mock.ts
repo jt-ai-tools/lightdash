@@ -1,10 +1,51 @@
-import { SessionServiceAccount } from '@lightdash/common';
+import { Ability } from '@casl/ability';
+import {
+    OrganizationMemberRole,
+    PossibleAbilities,
+    ServiceAccount,
+    ServiceAccountScope,
+    SessionServiceAccount,
+    SessionUser,
+} from '@lightdash/common';
 import express from 'express';
 import { BaseService } from '../../services/BaseService';
 
-export const mockServiceAccount: SessionServiceAccount = {
+export const mockServiceAccount: ServiceAccount = {
+    uuid: 'test-service-account-uuid',
+    createdByUserUuid: 'admin-user-uuid',
     organizationUuid: 'test-org-uuid',
+    createdAt: new Date('2024-01-01T00:00:00.000Z'),
+    expiresAt: null,
+    description: 'test scim token',
+    lastUsedAt: null,
+    rotatedAt: null,
+    scopes: [ServiceAccountScope.SCIM_MANAGE],
+    userUuid: 'sa-user-uuid',
+    roleUuid: null,
+    createdBy: null,
 };
+
+const mockSaSessionUser = {
+    userUuid: 'sa-user-uuid',
+    userId: 42,
+    email: undefined,
+    firstName: 'test scim token',
+    lastName: '',
+    organizationUuid: 'test-org-uuid',
+    organizationName: 'Test Org',
+    organizationCreatedAt: new Date('2024-01-01T00:00:00.000Z'),
+    isTrackingAnonymized: false,
+    isMarketingOptedIn: false,
+    timezone: null,
+    isSetupComplete: true,
+    role: OrganizationMemberRole.ADMIN,
+    isActive: false,
+    isPending: false,
+    createdAt: new Date('2024-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2024-01-01T00:00:00.000Z'),
+    ability: new Ability<PossibleAbilities>([]),
+    abilityRules: [],
+} as unknown as SessionUser;
 
 export const mockRequest = {
     headers: {
@@ -16,8 +57,31 @@ export const mockRequest = {
         path: '/Users',
     },
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateScim: jest.fn().mockResolvedValue(mockServiceAccount),
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateScim: vi.fn().mockResolvedValue({
+                result: 'authenticated',
+                serviceAccount: mockServiceAccount,
+            }),
+        }),
+        getUserService: vi.fn().mockReturnValue({
+            getSessionUserForServiceAccount: vi
+                .fn()
+                .mockResolvedValue(mockSaSessionUser),
+        }),
+    },
+} as unknown as express.Request;
+
+export const mockRequestWithExpiredToken = {
+    ...mockRequest,
+    headers: {
+        authorization: 'Bearer scim_expired_token',
+    },
+    services: {
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateScim: vi.fn().mockResolvedValue({
+                result: 'expired',
+                serviceAccount: mockServiceAccount,
+            }),
         }),
     },
 } as unknown as express.Request;
@@ -28,8 +92,8 @@ export const mockRequestWithInvalidToken = {
         authorization: 'Bearer invalid_token',
     },
     services: {
-        getServiceAccountService: jest.fn().mockReturnValue({
-            authenticateScim: jest.fn().mockResolvedValue(null),
+        getServiceAccountService: vi.fn().mockReturnValue({
+            authenticateScim: vi.fn().mockResolvedValue(null),
         }),
     },
 } as unknown as express.Request;
@@ -54,11 +118,20 @@ export const mockRequestWithMalformedToken = {
 } as unknown as express.Request;
 
 export const mockResponse = {
-    status: jest.fn().mockReturnThis(),
-    json: jest.fn(),
+    status: vi.fn().mockReturnThis(),
+    json: vi.fn(),
 } as unknown as express.Response;
 
-export const mockNext = jest.fn();
+type MockNextError = {
+    status?: string;
+    message?: string;
+    detail?: string;
+};
+
+export const mockNext = vi.fn<
+    (error: MockNextError) => void
+>() as import('vitest').Mock<(error: MockNextError) => void> &
+    express.NextFunction;
 
 export class MockScimService extends BaseService {
     // eslint-disable-next-line class-methods-use-this

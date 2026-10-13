@@ -1,0 +1,322 @@
+import './tracing/bootstrap'; // Must run before modules that can load Knex
+import { createTerminus } from '@godaddy/terminus';
+import { MotherduckInstanceCache } from '@lightdash/warehouses';
+import * as Sentry from '@sentry/node';
+import express from 'express';
+import http from 'http';
+import { Knex } from 'knex';
+import {
+    createAiUsageLedgerSink,
+    registerAiUsageLedger,
+    registerAiUsageTracker,
+} from './analytics/aiUsage';
+import { BufferedEventStreamWriter } from './analytics/eventStream/BufferedEventStreamWriter';
+import { createEventStreamWriter } from './analytics/eventStream/createEventStreamWriter';
+import { EventStreamSink } from './analytics/eventStream/EventStreamSink';
+import { eventStreamRegistry } from './analytics/eventStream/registry';
+import { LightdashAnalytics } from './analytics/LightdashAnalytics';
+import { registerOAuthRefreshStrategies } from './auth/registerOAuthRefreshStrategies';
+import {
+    ClientProviderMap,
+    ClientRepository,
+} from './clients/ClientRepository';
+import { type NatsClient } from './clients/NatsClient';
+import { LightdashConfig } from './config/parseConfig';
+import { createDatabase } from './database/createDatabase';
+import Logger from './logging/logger';
+import { ModelProviderMap, ModelRepository } from './models/ModelRepository';
+import { STREAM_CONFIGS, type NatsWorkerStream } from './nats/natsConfig';
+import { NatsWorker } from './nats/NatsWorker';
+import {
+    initOtelHttpMetrics,
+    shouldSelfRegisterHttpInstrumentation,
+} from './prometheus/otelHttpMetrics';
+import PrometheusMetrics from './prometheus/PrometheusMetrics';
+import { errorsOnlyIntegrations, IGNORE_ERRORS } from './sentry';
+import { createOrganizationNameResolver } from './sentry/organizationNameResolver';
+import {
+    OperationContext,
+    ServiceProviderMap,
+    ServiceRepository,
+} from './services/ServiceRepository';
+import {
+    initOtelTracing,
+    otelTracingEnabled,
+    shutdownOtelTracing,
+} from './tracing/tracing';
+import { UtilProviderMap, UtilRepository } from './utils/UtilRepository';
+import { VERSION } from './version';
+
+type NatsWorkerAppArguments = {
+    lightdashConfig: LightdashConfig;
+    port: string | number;
+    environment?: 'production' | 'development';
+    serviceProviders?: ServiceProviderMap;
+    knexConfig: {
+        production: Knex.Config<Knex.PgConnectionConfig>;
+        development: Knex.Config<Knex.PgConnectionConfig>;
+    };
+    clientProviders?: ClientProviderMap;
+    modelProviders?: ModelProviderMap;
+    utilProviders?: UtilProviderMap;
+    streams: NatsWorkerStream[];
+    natsWorkerFactory?: typeof natsWorkerFactory;
+};
+
+const natsWorkerFactory = (context: {
+    lightdashConfig: LightdashConfig;
+    natsClient: NatsClient;
+    serviceRepository: ServiceRepository;
+    modelRepository: ModelRepository;
+    streams: NatsWorkerStream[];
+}) =>
+    new NatsWorker({
+        natsClient: context.natsClient,
+        asyncQueryService: context.serviceRepository.getAsyncQueryService(),
+        queryHistoryModel: context.modelRepository.getQueryHistoryModel(),
+        streams: context.streams,
+        workerConcurrency: context.lightdashConfig.natsWorker.workerConcurrency,
+        resolveOrganizationName: createOrganizationNameResolver(
+            context.modelRepository.getOrganizationModel(),
+        ),
+    });
+
+/**
+ * Separate from SchedulerApp intentionally — SchedulerApp carries Graphile,
+ * Prometheus, passport refresh strategies, and many more service deps.
+ * Extracting a shared base would couple the two for little benefit.
+ */
+export default class NatsWorkerApp {
+    private readonly serviceRepository: ServiceRepository;
+
+    private readonly clients: ClientRepository;
+
+    private readonly modelRepository: ModelRepository;
+
+    private readonly lightdashConfig: LightdashConfig;
+
+    private readonly analytics: LightdashAnalytics;
+
+    private readonly port: string | number;
+
+    private readonly environment: 'production' | 'development';
+
+    private readonly database: Knex;
+
+    private readonly streams: NatsWorkerStream[];
+
+    private readonly natsWorkerFactory: typeof natsWorkerFactory;
+
+    private readonly prometheusMetrics: PrometheusMetrics;
+
+    private readonly eventStreamWriter: BufferedEventStreamWriter | null;
+
+    constructor(args: NatsWorkerAppArguments) {
+        this.lightdashConfig = args.lightdashConfig;
+        this.port = args.port;
+        this.environment = args.environment || 'production';
+
+        this.prometheusMetrics = new PrometheusMetrics(
+            this.lightdashConfig.prometheus,
+        );
+        this.eventStreamWriter = createEventStreamWriter(
+            this.lightdashConfig,
+            this.prometheusMetrics,
+            // eslint-disable-next-line no-use-before-define -- The background flush runs after model initialization.
+            () => models.getFeatureFlagModel(),
+        );
+        this.analytics = new LightdashAnalytics({
+            lightdashConfig: this.lightdashConfig,
+            writeKey: this.lightdashConfig.rudder.writeKey || 'notrack',
+            dataPlaneUrl: this.lightdashConfig.rudder.dataPlaneUrl || 'notrack',
+            options: {
+                enable:
+                    !!this.lightdashConfig.rudder.writeKey &&
+                    !!this.lightdashConfig.rudder.dataPlaneUrl,
+            },
+            eventStreamSink: this.eventStreamWriter
+                ? new EventStreamSink(
+                      eventStreamRegistry,
+                      this.eventStreamWriter,
+                  )
+                : undefined,
+        });
+        registerAiUsageTracker((event) => this.analytics.track(event));
+
+        this.database = createDatabase(
+            this.environment === 'production'
+                ? args.knexConfig.production
+                : args.knexConfig.development,
+        );
+
+        const utils = new UtilRepository({
+            utilProviders: args.utilProviders,
+            lightdashConfig: this.lightdashConfig,
+        });
+        const models = new ModelRepository({
+            modelProviders: args.modelProviders,
+            lightdashConfig: this.lightdashConfig,
+            database: this.database,
+            utils,
+        });
+        registerAiUsageLedger(createAiUsageLedgerSink(models));
+
+        const clients = new ClientRepository({
+            clientProviders: args.clientProviders,
+            context: new OperationContext({
+                operationId: 'NatsWorkerApp#ctor',
+                lightdashAnalytics: this.analytics,
+                lightdashConfig: this.lightdashConfig,
+            }),
+            models,
+        });
+        this.clients = clients;
+        this.modelRepository = models;
+        this.serviceRepository = new ServiceRepository({
+            serviceProviders: args.serviceProviders,
+            context: new OperationContext({
+                lightdashAnalytics: this.analytics,
+                lightdashConfig: this.lightdashConfig,
+                operationId: 'NatsWorkerApp#ctor',
+            }),
+            clients,
+            models,
+            utils,
+            prometheusMetrics: this.prometheusMetrics,
+        });
+        this.streams = args.streams;
+        this.natsWorkerFactory = args.natsWorkerFactory || natsWorkerFactory;
+    }
+
+    public async start() {
+        registerOAuthRefreshStrategies();
+        this.prometheusMetrics.start();
+        MotherduckInstanceCache.configure(
+            this.lightdashConfig.motherduckInstanceCache,
+        );
+        MotherduckInstanceCache.setObserver((event) =>
+            this.prometheusMetrics.observeMotherduckCacheEvent(event),
+        );
+        this.prometheusMetrics.monitorDatabase(this.database);
+        // @ts-ignore
+        // eslint-disable-next-line no-extend-native, func-names
+        BigInt.prototype.toJSON = function () {
+            return this.toString();
+        };
+        await this.initSentry();
+        const { worker, natsClient } = await this.initWorker();
+        await this.initServer(worker, natsClient);
+    }
+
+    private async initSentry() {
+        initOtelHttpMetrics(this.lightdashConfig.prometheus, {
+            registerHttpInstrumentation: shouldSelfRegisterHttpInstrumentation({
+                hasSentryDsn: !!this.lightdashConfig.sentry.backend.dsn,
+                isOtelTracingEnabled: otelTracingEnabled(),
+            }),
+        });
+        Sentry.init({
+            release: VERSION,
+            dsn: this.lightdashConfig.sentry.backend.dsn,
+            environment:
+                this.environment === 'development'
+                    ? 'development'
+                    : this.lightdashConfig.mode,
+            skipOpenTelemetrySetup: otelTracingEnabled(),
+            registerEsmLoaderHooks: !otelTracingEnabled(),
+            // OTel mode owns traces; strip Sentry's span-emitting default
+            // integrations (postgres etc.) so the worker is errors-only.
+            integrations: otelTracingEnabled() ? errorsOnlyIntegrations : [],
+            ignoreErrors: IGNORE_ERRORS,
+            ...(otelTracingEnabled()
+                ? {}
+                : {
+                      tracesSampleRate:
+                          this.lightdashConfig.sentry.queryTracesSampleRate ??
+                          this.lightdashConfig.sentry.tracesSampleRate,
+                  }),
+        });
+        initOtelTracing();
+    }
+
+    private async initWorker(): Promise<{
+        worker: NatsWorker;
+        natsClient: NatsClient;
+    }> {
+        const natsClient = this.clients.getNatsClient();
+        await natsClient.connect();
+        await natsClient.ensureStreamsAndConsumers(
+            this.streams.map((stream) => STREAM_CONFIGS[stream]),
+        );
+
+        const worker = this.natsWorkerFactory({
+            lightdashConfig: this.lightdashConfig,
+            natsClient,
+            serviceRepository: this.serviceRepository,
+            modelRepository: this.modelRepository,
+            streams: this.streams,
+        });
+        await worker.run();
+        return { worker, natsClient };
+    }
+
+    private async initServer(worker: NatsWorker, natsClient: NatsClient) {
+        const app = express();
+        if (this.lightdashConfig.prometheus.extendedMetricsEnabled) {
+            app.use(
+                this.prometheusMetrics.httpServerRequestMetricsMiddleware(),
+            );
+        }
+        const server = http.createServer(app);
+        server.keepAliveTimeout =
+            this.lightdashConfig.httpServer.keepAliveTimeoutMs;
+
+        createTerminus(server, {
+            signals: ['SIGUSR2', 'SIGTERM', 'SIGINT', 'SIGHUP', 'SIGABRT'],
+            healthChecks: {
+                '/api/v1/health': async () => {
+                    if (await worker.isHealthy()) {
+                        return 'NATS worker is running';
+                    }
+
+                    throw new Error(
+                        'NATS worker not running or connection lost',
+                    );
+                },
+                '/api/v1/livez': () => Promise.resolve(),
+            },
+            beforeShutdown: async () => {
+                Logger.debug('Shutdown signal received');
+                Logger.info('Shutting down NATS worker gracefully');
+            },
+            onSignal: async () => {
+                if (this.eventStreamWriter) {
+                    Logger.info('Flushing usage event stream writer');
+                    await this.eventStreamWriter.close();
+                }
+                await MotherduckInstanceCache.closeAll('shutdown');
+                Logger.info('Stopping Prometheus metrics');
+                await this.prometheusMetrics.stop();
+                await shutdownOtelTracing();
+                Logger.info('Stopping NATS worker');
+                await worker.stop();
+                await natsClient.drain();
+            },
+            onShutdown: async () => {
+                Logger.info('NATS worker shutdown complete');
+            },
+            useExit0: true,
+            logger: Logger.error,
+            sendFailuresDuringShutdown: true,
+            onSendFailureDuringShutdown: async () => {
+                Logger.debug('Returning 503 due to shutdown');
+            },
+        });
+
+        server.listen(this.port);
+    }
+
+    public getEventStreamWriter() {
+        return this.eventStreamWriter;
+    }
+}

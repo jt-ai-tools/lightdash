@@ -8,6 +8,7 @@
 | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | **AI Agents thread access consent** (`aiThreadAccessConsent`) | When enabled, AI can read previous messages in a thread when user @mentions the bot. Provides conversation context. |
 | **AI Agents OAuth requirement** (`aiRequireOAuth`)            | Require users to authenticate via OAuth before using AI agents.                                                     |
+| **Links only** (`aiLinksOnly`)                                | Never post query results into Slack: no chart images or CSV files, and the prompt forbids values in the reply. Users open results in Lightdash. Pair with data access off on the agent for a strict guarantee. |
 | **Multi-agent channel** (`aiMultiAgentChannelId`)             | Designated channel where users can access multiple AI agents.                                                       |
 
 ### Agent Settings (AI Agent → Integrations → Slack)
@@ -69,7 +70,12 @@ if (botUserId && event.text?.includes(`<@${botUserId}>`)) {
 
 Query results in Slack (from `ai/tools/runQuery.ts`):
 
-| Type  | Output              |
-| ----- | ------------------- |
-| Chart | PNG image (echarts) |
-| Table | CSV file attachment |
+| Type              | Output                                                        |
+| ----------------- | ------------------------------------------------------------- |
+| Chart             | PNG image (echarts)                                           |
+| Custom chart type | PNG image (headless artifact export; Lightdash link on failure) |
+| Table             | Optional inline `data_table`, selected by the final answer |
+
+Slack final answers default to a summary without supporting tables. To include a useful executed table, the model emits `<slack-table queryUuid="<execution UUID>" />`. Only successful table executions from the current prompt are eligible; the server removes these markers from visible and stored answer text. Unselected semantic table artifacts are omitted from the answer cards when inline data sharing is allowed.
+
+Generated Slack charts are optional too. The final answer selects exact successful chart versions from the current prompt using `<slack-chart versionUuid="<artifact version UUID>" />`. Prefer a single useful chart, and include several when the user requests them or distinct views materially improve the answer. Omit diagnostics, redundant charts and superseded versions. Chart images are deferred until after selection; missing deferred images leave a Lightdash link. Both chart and table markers are removed before persistence and display.

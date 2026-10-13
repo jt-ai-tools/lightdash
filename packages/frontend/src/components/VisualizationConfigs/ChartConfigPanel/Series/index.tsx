@@ -7,23 +7,34 @@ import {
 } from '@hello-pangea/dnd';
 import {
     CartesianSeriesType,
+    createConditionalFormattingConfigWithSingleColor,
     getItemId,
     getSeriesId,
+    StackType,
     type CustomDimension,
     type Field,
     type Series as SeriesType,
     type TableCalculation,
 } from '@lightdash/common';
-import { Checkbox, Divider, Stack } from '@mantine/core';
-import { produce } from 'immer';
+import { Checkbox, Divider, Stack, Switch } from '@mantine/core';
 import React, { Fragment, useCallback, useMemo, type FC } from 'react';
 import { createPortal } from 'react-dom';
-import { getSeriesGroupedByField } from '../../../../hooks/cartesianChartConfig/utils';
+import {
+    getSeriesGroupedByField,
+    isPivotSeriesOrderDeterminedByQuery,
+    moveSeriesGroup,
+    type SeriesGroup,
+} from '../../../../hooks/cartesianChartConfig/utils';
+import { usePortalTarget } from '../../../../providers/PortalTarget/usePortalTarget';
 import { isCartesianVisualizationConfig } from '../../../LightdashVisualization/types';
 import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
+import { ColorPaletteSection } from '../../common/ColorPaletteSection';
+import { Config } from '../../common/Config';
 import BasicSeriesConfiguration from './BasicSeriesConfiguration';
+import { CustomColors } from './CustomColors';
 import GroupedSeriesConfiguration from './GroupedSeriesConfiguration';
 import InvalidSeriesConfiguration from './InvalidSeriesConfiguration';
+import { SeriesDrawOrderBar } from './SeriesDrawOrder';
 
 type DraggablePortalHandlerProps = {
     snapshot: DraggableStateSnapshot;
@@ -32,7 +43,8 @@ type DraggablePortalHandlerProps = {
 const DraggablePortalHandler: FC<
     React.PropsWithChildren<DraggablePortalHandlerProps>
 > = ({ children, snapshot }) => {
-    if (snapshot.isDragging) return createPortal(children, document.body);
+    const portalTarget = usePortalTarget();
+    if (snapshot.isDragging) return createPortal(children, portalTarget);
     return <>{children}</>;
 };
 
@@ -46,15 +58,21 @@ export const Series: FC<Props> = ({ items }) => {
         getSeriesColor,
         pivotDimensions,
         resultsData,
+        colorPalette,
     } = useVisualizationContext();
+
+    const yField = isCartesianVisualizationConfig(visualizationConfig)
+        ? visualizationConfig.chartConfig.dirtyLayout?.yField
+        : undefined;
 
     const sortedByPivot = useMemo(
         () =>
-            !!pivotDimensions?.length &&
-            !!resultsData?.metricQuery?.sorts?.some((sort) =>
-                pivotDimensions.includes(sort.fieldId),
+            isPivotSeriesOrderDeterminedByQuery(
+                pivotDimensions,
+                yField,
+                resultsData?.metricQuery?.sorts,
             ),
-        [pivotDimensions, resultsData?.metricQuery?.sorts],
+        [pivotDimensions, yField, resultsData?.metricQuery?.sorts],
     );
 
     const isCartesianChart =
@@ -73,36 +91,59 @@ export const Series: FC<Props> = ({ items }) => {
         return getSeriesGroupedByField(dirtyEchartsConfig?.series ?? []);
     }, [isCartesianChart, visualizationConfig]);
 
+    const applyGroupOrder = useCallback(
+        (groups: SeriesGroup[]) => {
+            if (!chartConfig) return;
+            chartConfig.updateSeries(
+                groups.reduce<SeriesType[]>(
+                    (acc, seriesGroup) => [
+                        ...acc,
+                        ...seriesGroup.value.map((s) => ({
+                            ...s,
+                            color: getSeriesColor(s),
+                        })),
+                    ],
+                    [],
+                ),
+            );
+        },
+        [chartConfig, getSeriesColor],
+    );
+
     const onDragEnd = useCallback(
         (result: DropResult) => {
-            if (!chartConfig || !seriesGroupedByField) return;
-
-            const { updateSeries } = chartConfig;
-
+            if (!seriesGroupedByField) return;
             if (!result.destination) return;
             if (result.destination.index === result.source.index) return;
-            const sourceIndex = result.source.index;
-            const destinationIndex = result.destination.index;
-            const reorderedSeriesGroups = produce(
-                seriesGroupedByField,
-                (newState) => {
-                    const [removed] = newState.splice(sourceIndex, 1);
-                    newState.splice(destinationIndex, 0, removed);
-                },
+
+            applyGroupOrder(
+                moveSeriesGroup(
+                    seriesGroupedByField,
+                    result.source.index,
+                    result.destination.index,
+                ),
             );
-            const reorderedSeries = reorderedSeriesGroups.reduce<SeriesType[]>(
-                (acc, seriesGroup) => [
-                    ...acc,
-                    ...seriesGroup.value.map((s) => ({
-                        ...s,
-                        color: getSeriesColor(s),
-                    })),
-                ],
-                [],
-            );
-            updateSeries(reorderedSeries);
         },
-        [seriesGroupedByField, chartConfig, getSeriesColor],
+        [seriesGroupedByField, applyGroupOrder],
+    );
+
+    const onReverseOrder = useCallback(() => {
+        if (!seriesGroupedByField) return;
+        applyGroupOrder([...seriesGroupedByField].reverse());
+    }, [seriesGroupedByField, applyGroupOrder]);
+
+    const onBringToFront = useCallback(
+        (index: number) => {
+            if (!seriesGroupedByField) return;
+            applyGroupOrder(
+                moveSeriesGroup(
+                    seriesGroupedByField,
+                    index,
+                    seriesGroupedByField.length - 1,
+                ),
+            );
+        },
+        [seriesGroupedByField, applyGroupOrder],
     );
 
     if (!isCartesianChart) return null;
@@ -110,10 +151,16 @@ export const Series: FC<Props> = ({ items }) => {
     const {
         dirtyEchartsConfig,
         dirtyLayout,
+        dirtyChartType,
         updateSeries,
         getSingleSeries,
         updateSingleSeries,
         updateAllGroupedSeries,
+        setColorByCategory,
+        setCategoryColorOverride,
+        setAllCategoryColorOverrides,
+        conditionalFormattings,
+        onSetConditionalFormattings,
     } = visualizationConfig.chartConfig;
 
     const allSeries = dirtyEchartsConfig?.series ?? [];
@@ -142,8 +189,42 @@ export const Series: FC<Props> = ({ items }) => {
         updateSeries(updatedSeries);
     };
 
+    const hasCustomColorsStacking =
+        allSeries.some((series) => Boolean(series.stack)) ||
+        (dirtyLayout?.stack !== undefined &&
+            dirtyLayout.stack !== StackType.NONE);
+
+    // Conditional formatting: available for all-bar charts without pivots,
+    // regardless of how many metrics are charted or stacking. Mixed bar/line
+    // charts are excluded since formatting only renders on bars.
+    const supportsCustomColors =
+        dirtyChartType === CartesianSeriesType.BAR &&
+        allSeries.every((series) => series.type === CartesianSeriesType.BAR) &&
+        !pivotDimensions?.length;
+
+    // Color by category: only for single-series non-stacked bar charts
+    const isSingleSeriesBar =
+        supportsCustomColors &&
+        allSeries.length <= 1 &&
+        !hasCustomColorsStacking;
+
+    const colorByCategory = dirtyLayout?.colorByCategory ?? false;
+    const customColorsEnabled =
+        colorByCategory || conditionalFormattings.length > 0;
+
+    const hasMultipleSeries = (seriesGroupedByField?.length ?? 0) > 1;
+    const canReorder = hasMultipleSeries && !sortedByPivot;
+
     return (
-        <Stack spacing="md">
+        <Stack gap="md">
+            <ColorPaletteSection />
+            <Divider />
+            {hasMultipleSeries && (
+                <SeriesDrawOrderBar
+                    canReorder={canReorder}
+                    onReverse={onReverseOrder}
+                />
+            )}
             <DragDropContext onDragEnd={onDragEnd}>
                 <Droppable droppableId="results-table-sort-fields">
                     {(dropProps) => (
@@ -162,6 +243,16 @@ export const Series: FC<Props> = ({ items }) => {
 
                                 const hasDivider =
                                     seriesGroupedByField.length !== i + 1;
+
+                                const drawOrder = canReorder
+                                    ? {
+                                          isFront:
+                                              i ===
+                                              seriesGroupedByField.length - 1,
+                                          onBringToFront: () =>
+                                              onBringToFront(i),
+                                      }
+                                    : undefined;
 
                                 if (!field) {
                                     return (
@@ -222,6 +313,9 @@ export const Series: FC<Props> = ({ items }) => {
                                                             isDragDisabled={
                                                                 sortedByPivot
                                                             }
+                                                            drawOrder={
+                                                                drawOrder
+                                                            }
                                                             updateSeries={
                                                                 updateSeries
                                                             }
@@ -256,6 +350,12 @@ export const Series: FC<Props> = ({ items }) => {
                                                             isDragDisabled={
                                                                 sortedByPivot
                                                             }
+                                                            drawOrder={
+                                                                drawOrder
+                                                            }
+                                                            showColorPickerIcon={
+                                                                colorByCategory
+                                                            }
                                                         />
                                                     )}
                                                     {hasDivider && (
@@ -272,8 +372,78 @@ export const Series: FC<Props> = ({ items }) => {
                     )}
                 </Droppable>
             </DragDropContext>
+            {supportsCustomColors && (
+                <Config>
+                    <Config.Section>
+                        <Stack gap="xs">
+                            <Switch
+                                size="xs"
+                                label="Apply custom colors"
+                                checked={customColorsEnabled}
+                                onChange={(e) => {
+                                    if (e.currentTarget.checked) {
+                                        if (conditionalFormattings.length > 0) {
+                                            return;
+                                        }
+                                        if (isSingleSeriesBar) {
+                                            setColorByCategory(true);
+                                            return;
+                                        }
+                                        const firstYField =
+                                            dirtyLayout?.yField?.[0];
+                                        onSetConditionalFormattings([
+                                            createConditionalFormattingConfigWithSingleColor(
+                                                colorPalette[0],
+                                                firstYField
+                                                    ? { fieldId: firstYField }
+                                                    : null,
+                                            ),
+                                        ]);
+                                        return;
+                                    }
+
+                                    setColorByCategory(false);
+                                    onSetConditionalFormattings([]);
+                                }}
+                            />
+                            {customColorsEnabled && (
+                                <CustomColors
+                                    items={items}
+                                    rows={resultsData?.rows}
+                                    xField={dirtyLayout?.xField}
+                                    yFields={dirtyLayout?.yField ?? []}
+                                    canColorByCategory={isSingleSeriesBar}
+                                    enforceSingleTarget={
+                                        hasCustomColorsStacking
+                                    }
+                                    colorPalette={colorPalette}
+                                    colorByCategory={colorByCategory}
+                                    categoryColorOverrides={
+                                        dirtyLayout?.categoryColorOverrides ??
+                                        {}
+                                    }
+                                    conditionalFormattings={
+                                        conditionalFormattings
+                                    }
+                                    setColorByCategory={setColorByCategory}
+                                    setCategoryColorOverride={
+                                        setCategoryColorOverride
+                                    }
+                                    setAllCategoryColorOverrides={
+                                        setAllCategoryColorOverrides
+                                    }
+                                    onSetConditionalFormattings={
+                                        onSetConditionalFormattings
+                                    }
+                                />
+                            )}
+                        </Stack>
+                    </Config.Section>
+                </Config>
+            )}
             {hasStackedBars && (
                 <Checkbox
+                    size="xs"
                     checked={showOverlappingLabelsEnabled}
                     label="Show overlapping labels"
                     onChange={handleOverlappingLabelsToggle}

@@ -15,14 +15,14 @@ export const DeleteOrganizationPanel: FC = () => {
     if (isOrganizationLoading || organization === undefined) return null;
 
     return (
-        <Group position="right">
+        <Group justify="flex-end">
             <Button
                 variant="outline"
                 color="red"
-                leftIcon={<MantineIcon icon={IconTrash} />}
+                leftSection={<MantineIcon icon={IconTrash} />}
                 onClick={() => setShowDeleteOrganizationModal(true)}
             >
-                Delete '{organization.name}'
+                Delete '{organization.name.trim() || 'Unnamed organization'}'
             </Button>
 
             <OrganizationDeleteModal

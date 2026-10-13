@@ -1,11 +1,10 @@
 import {
+    FeatureFlags,
     type AiAgentChartTypeOption,
     type AiAgentMessageAssistant,
     type ApiAiAgentThreadMessageVizQuery,
     type ChartConfig,
-    type ToolTableVizArgs,
-    type ToolTimeSeriesArgs,
-    type ToolVerticalBarArgs,
+    type DashboardV2Visualization,
 } from '@lightdash/common';
 import {
     Center,
@@ -17,24 +16,29 @@ import {
     Stack,
     Text,
     Title,
-} from '@mantine-8/core';
-import { Prism } from '@mantine/prism';
+} from '@mantine/core';
 import { IconExclamationCircle } from '@tabler/icons-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { memo, useCallback, type FC } from 'react';
+import { memo, useCallback, useState, type FC } from 'react';
+import CodeBlock from '../../../../../components/common/CodeBlock/CodeBlock';
 import MantineIcon from '../../../../../components/common/MantineIcon';
+import { getAiAccessRefusal } from '../../../../../features/aiAccess/errors';
 import { useCompiledSqlFromMetricQuery } from '../../../../../hooks/useCompiledSql';
 import { useInfiniteQueryResults } from '../../../../../hooks/useQueryResults';
+import { useServerFeatureFlag } from '../../../../../hooks/useServerOrClientFeatureFlag';
+import useIsEmbedded from '../../../../providers/Embed/useIsEmbedded';
+import { getAiAgentArtifactResultsUrl } from '../../hooks/aiAgentRouting';
+import { useCanViewAiAgentSql } from '../../hooks/useCanViewAiAgentSql';
 import {
     getAiAgentDashboardChartVizQueryKey,
     useAiAgentDashboardChartVizQuery,
 } from '../../hooks/useProjectAiAgents';
+import { AiAccessCallout } from './AiAccessCallout';
 import { AiChartQuickOptions } from './AiChartQuickOptions';
 import { AiVisualizationRenderer } from './AiVisualizationRenderer';
-import { ViewSqlButton } from './ViewSqlButton';
 
 type Props = {
-    visualization: ToolTableVizArgs | ToolTimeSeriesArgs | ToolVerticalBarArgs;
+    visualization: DashboardV2Visualization;
     projectUuid: string;
     agentUuid: string;
     threadUuid: string;
@@ -56,8 +60,13 @@ export const AiDashboardVisualizationItem: FC<Props> = memo(
         index,
     }) => {
         const queryClient = useQueryClient();
+        const isEmbed = useIsEmbedded();
+        const identityFlag = useServerFeatureFlag(FeatureFlags.AgentIdentity);
+        const identityEnabled = identityFlag.data?.enabled === true;
 
-        // Fetch the chart query data
+        const [selectedChartType, setSelectedChartType] =
+            useState<AiAgentChartTypeOption | null>(null);
+
         const queryExecutionHandle = useAiAgentDashboardChartVizQuery({
             projectUuid,
             agentUuid,
@@ -68,22 +77,41 @@ export const AiDashboardVisualizationItem: FC<Props> = memo(
 
         const queryResults = useInfiniteQueryResults(
             projectUuid,
-            queryExecutionHandle.data?.query?.queryUuid,
+            isEmbed || !identityFlag.isLoading
+                ? queryExecutionHandle.data?.query?.queryUuid
+                : undefined,
+            undefined,
+            identityEnabled &&
+                !isEmbed &&
+                queryExecutionHandle.data?.query.queryUuid
+                ? getAiAgentArtifactResultsUrl({
+                      projectUuid,
+                      agentUuid,
+                      artifactUuid,
+                      versionUuid,
+                      queryUuid: queryExecutionHandle.data.query.queryUuid,
+                      cached: false,
+                  })
+                : null,
         );
 
+        const canViewSql = useCanViewAiAgentSql();
         const { data: compiledSql } = useCompiledSqlFromMetricQuery({
             tableName:
                 queryExecutionHandle.data?.query.metricQuery?.exploreName,
             projectUuid,
             metricQuery: queryExecutionHandle.data?.query.metricQuery,
+            enabled: canViewSql,
         });
 
         const isQueryLoading =
             queryExecutionHandle.isLoading || queryResults.isFetchingRows;
         const queryError = queryExecutionHandle.error || queryResults.error;
 
-        const handleDashboardChartTypeChange = useCallback(
+        const handleChartTypeChange = useCallback(
             (type: AiAgentChartTypeOption) => {
+                setSelectedChartType(type);
+
                 const queryKey = getAiAgentDashboardChartVizQueryKey({
                     projectUuid,
                     agentUuid,
@@ -99,7 +127,6 @@ export const AiDashboardVisualizationItem: FC<Props> = memo(
                         return {
                             ...oldData,
                             selectedChartType: type,
-                            // Clear expanded config when type changes
                             expandedChartConfig: undefined,
                         };
                     },
@@ -115,7 +142,7 @@ export const AiDashboardVisualizationItem: FC<Props> = memo(
             ],
         );
 
-        const handleDashboardChartConfigChange = useCallback(
+        const handleExpandedChartConfigChange = useCallback(
             (config: ChartConfig) => {
                 const queryKey = getAiAgentDashboardChartVizQueryKey({
                     projectUuid,
@@ -172,30 +199,46 @@ export const AiDashboardVisualizationItem: FC<Props> = memo(
                     )}
                 </Stack>
                 <Group gap="sm">
-                    <ViewSqlButton sql={compiledSql?.query} />
                     <AiChartQuickOptions
                         projectUuid={projectUuid}
                         agentUuid={agentUuid}
+                        showDownloadResults={false}
                         saveChartOptions={{
                             name: visualization.title,
                             description: visualization.description ?? null,
                             linkToMessage: false,
                         }}
                         message={message}
-                        compiledSql={compiledSql?.query}
+                        compiledSql={
+                            canViewSql ? compiledSql?.query : undefined
+                        }
+                        merge={null}
                     />
                 </Group>
             </Group>
         );
 
+        const refusal =
+            getAiAccessRefusal(queryExecutionHandle.error?.error) ??
+            getAiAccessRefusal(queryResults.error?.error);
+        if (refusal) {
+            return (
+                <AiAccessCallout
+                    projectUuid={projectUuid}
+                    refusal={refusal}
+                    variant="inline"
+                />
+            );
+        }
+
         if (isQueryLoading) {
             return (
-                <Stack gap="sm">
+                <Stack gap="sm" h="100%" mih={0}>
                     <VisualizationHeaderSimple />
 
                     {/* Loading State */}
-                    <Paper p="md" bg="ldGray.0">
-                        <Center h={200}>
+                    <Paper p="md" bg="ldGray.0" flex={1} mih={0}>
+                        <Center h="100%" mih={48}>
                             <Stack gap="xs" align="center">
                                 <Loader type="dots" color="gray" />
                                 <Text size="sm" c="dimmed" ta="center">
@@ -216,28 +259,28 @@ export const AiDashboardVisualizationItem: FC<Props> = memo(
                     <Paper p="md" bg="ldGray.0">
                         <Center h={100}>
                             <Stack gap="xs" align="center">
-                                <HoverCard withinPortal position="left">
+                                <HoverCard position="left">
                                     <HoverCard.Target>
                                         <MantineIcon
                                             icon={IconExclamationCircle}
                                         />
                                     </HoverCard.Target>
                                     <HoverCard.Dropdown p={0} maw={500}>
-                                        <Prism
+                                        <CodeBlock
+                                            code={JSON.stringify(
+                                                visualization,
+                                                null,
+                                                2,
+                                            )}
                                             language="json"
+                                            lineNumberFontSize={10}
                                             withLineNumbers
                                             styles={{
                                                 code: {
                                                     fontSize: 10,
                                                 },
                                             }}
-                                        >
-                                            {JSON.stringify(
-                                                visualization,
-                                                null,
-                                                2,
-                                            )}
-                                        </Prism>
+                                        />
                                     </HoverCard.Dropdown>
                                 </HoverCard>
 
@@ -264,14 +307,16 @@ export const AiDashboardVisualizationItem: FC<Props> = memo(
         return (
             <Flex direction="column" h="100%">
                 <AiVisualizationRenderer
+                    vizQueryData={queryExecutionHandle.data}
                     results={queryResults}
-                    queryExecutionHandle={queryExecutionHandle}
                     chartConfig={visualization}
-                    headerContent={<VisualizationHeaderWithButton />}
-                    onDashboardChartTypeChange={handleDashboardChartTypeChange}
-                    onDashboardChartConfigChange={
-                        handleDashboardChartConfigChange
+                    selectedChartType={selectedChartType}
+                    onChartTypeChange={handleChartTypeChange}
+                    switcherVariant="pill"
+                    onExpandedChartConfigChange={
+                        handleExpandedChartConfigChange
                     }
+                    headerContent={<VisualizationHeaderWithButton />}
                 />
             </Flex>
         );

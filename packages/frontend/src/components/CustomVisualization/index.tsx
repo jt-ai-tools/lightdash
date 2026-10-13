@@ -1,13 +1,20 @@
 import { Anchor, Text, useMantineColorScheme } from '@mantine/core';
 import { IconGraphOff } from '@tabler/icons-react';
-import { Suspense, lazy, useEffect, useMemo, useRef, type FC } from 'react';
-// @ts-expect-error - vega-themes ESM export not resolved by TS moduleResolution
+import {
+    lazy,
+    Suspense,
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    type FC,
+} from 'react';
 import { dark as vegaDarkTheme } from 'vega-themes';
 import { type CustomVisualizationConfigAndData } from '../../hooks/useCustomVisualizationConfig';
-import { isCustomVisualizationConfig } from '../LightdashVisualization/types';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
 import LoadingChart from '../common/LoadingChart';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
+import { isCustomVisualizationConfig } from '../LightdashVisualization/types';
+import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
 import { vegaStyleConfig } from './vegaConfig';
 
 const VegaEmbed = lazy(async () => {
@@ -39,7 +46,9 @@ const CustomVisualization: FC<Props> = ({
 
     const hasSignaledScreenshotReady = useRef(false);
 
-    const vegaConfig = useMemo(
+    // Vega and Vega-Lite Config types are structurally incompatible
+    // (e.g. FontWeight vs number, ExprRef vs SignalRef), so we bypass checking here.
+    const vegaConfig: Record<string, unknown> = useMemo(
         () => ({
             ...(isDarkMode ? vegaDarkTheme : {}),
             ...vegaStyleConfig,
@@ -47,19 +56,40 @@ const CustomVisualization: FC<Props> = ({
         [isDarkMode],
     );
 
-    useEffect(() => {
+    const handleVegaEmbed = useCallback(() => {
         if (hasSignaledScreenshotReady.current) return;
-        if (!onScreenshotReady && !onScreenshotError) return;
-        if (!isLoading) {
-            onScreenshotReady?.();
-            hasSignaledScreenshotReady.current = true;
-        }
-    }, [isLoading, visualizationConfig, onScreenshotReady, onScreenshotError]);
+        onScreenshotReady?.();
+        hasSignaledScreenshotReady.current = true;
+    }, [onScreenshotReady]);
+
+    const handleVegaError = useCallback(() => {
+        if (hasSignaledScreenshotReady.current) return;
+        onScreenshotError?.();
+        hasSignaledScreenshotReady.current = true;
+    }, [onScreenshotError]);
 
     useEffect(() => {
         // Load all the rows
         resultsData?.setFetchAll(true);
     }, [resultsData]);
+
+    // A tile that settles into a rendered empty state (no spec or zero rows)
+    // has finished loading, so it must still report screenshot-ready —
+    // otherwise dashboard exports wait for a Vega embed that will never
+    // happen and time out. Charts that do render signal via onEmbed/onError.
+    useEffect(() => {
+        if (hasSignaledScreenshotReady.current) return;
+        if (!onScreenshotReady && !onScreenshotError) return;
+        if (isLoading || !isCustomVisualizationConfig(visualizationConfig))
+            return;
+
+        const { validConfig, series } =
+            visualizationConfig.chartConfig as CustomVisualizationConfigAndData;
+        if (!validConfig.spec || !series || series.length === 0) {
+            onScreenshotReady?.();
+            hasSignaledScreenshotReady.current = true;
+        }
+    }, [isLoading, visualizationConfig, onScreenshotReady, onScreenshotError]);
 
     if (!isCustomVisualizationConfig(visualizationConfig)) return null;
     const spec = visualizationConfig.chartConfig.validConfig.spec;
@@ -116,6 +146,14 @@ const CustomVisualization: FC<Props> = ({
 
     const data = { values: visProps.series };
 
+    // Vega-Embed measures the container synchronously when the spec is embedded.
+    // useElementSize() reports 0 until ResizeObserver fires, so mounting VegaEmbed
+    // before the container has been measured produces an SVG locked at 0x0 that
+    // never recovers. Wait for a real measurement before handing the spec to Vega.
+    if (!containerWidth || !containerHeight) {
+        return <LoadingChart />;
+    }
+
     return (
         <div
             className={props.className}
@@ -141,9 +179,10 @@ const CustomVisualization: FC<Props> = ({
                     spec={{
                         ...spec,
                         // @ts-ignore, see above
-                        width: 'container',
+                        width: containerWidth,
                         // @ts-ignore, see above
-                        height: 'container',
+                        height: containerHeight,
+                        // @ts-ignore, see above
                         data: data,
                         // Merge configs: our defaults first, then user's config overrides
                         config: {
@@ -153,7 +192,14 @@ const CustomVisualization: FC<Props> = ({
                     }}
                     options={{
                         actions: false,
+                        // Use Vega's AST expression interpreter instead of
+                        // compiling expressions with `Function()`, so custom
+                        // visualizations render under a strict CSP (no
+                        // 'unsafe-eval'). See issue #21276.
+                        ast: true,
                     }}
+                    onEmbed={handleVegaEmbed}
+                    onError={handleVegaError}
                 />
             </Suspense>
         </div>

@@ -1,6 +1,7 @@
 import {
     ApiErrorPayload,
     ApiPinnedItems,
+    assertRegisteredAccount,
     UpdatePinnedItemOrder,
 } from '@lightdash/common';
 import {
@@ -44,9 +45,10 @@ export class PinningController extends BaseController {
         @Path() pinnedListUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiPinnedItems> {
+        assertRegisteredAccount(req.account);
         const pinnedItems = await this.services
             .getPinningService()
-            .getPinnedItems(req.user!, projectUuid, pinnedListUuid);
+            .getPinnedItems(req.account, projectUuid, pinnedListUuid);
         this.setStatus(200);
         return {
             status: 'ok',
@@ -77,10 +79,11 @@ export class PinningController extends BaseController {
         @Body()
         body: Array<UpdatePinnedItemOrder>,
     ): Promise<ApiPinnedItems> {
+        assertRegisteredAccount(req.account);
         const pinnedItems = await this.services
             .getPinningService()
             .updatePinnedItemsOrder(
-                req.user!,
+                req.account,
                 projectUuid,
                 pinnedListUuid,
                 body,

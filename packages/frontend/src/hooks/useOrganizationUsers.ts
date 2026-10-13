@@ -1,7 +1,9 @@
 import {
     type ApiError,
     type ApiOrganizationMemberProfiles,
+    type ApiReassignUserDashboardsResponse,
     type ApiReassignUserSchedulersResponse,
+    type ApiUserDashboardsSummaryResponse,
     type ApiUserSchedulersSummaryResponse,
     type KnexPaginateArgs,
 } from '@lightdash/common';
@@ -13,9 +15,13 @@ import {
     type UseInfiniteQueryOptions,
 } from '@tanstack/react-query';
 import Fuse from 'fuse.js';
+import { useMemo } from 'react';
 import { lightdashApi } from '../api';
 import useToaster from './toaster/useToaster';
 import useQueryError from './useQueryError';
+
+type OrganizationUser =
+    ApiOrganizationMemberProfiles['results']['data'][number];
 
 const getOrganizationUsersQuery = async (params?: {
     includeGroups?: number;
@@ -95,6 +101,18 @@ export const useOrganizationUsers = (params?: {
                 return data;
             },
         },
+    );
+};
+
+export const useOrgUsersByUuid = () => {
+    const { data: orgUsers = [] } = useOrganizationUsers();
+
+    return useMemo(
+        () =>
+            new Map<string, OrganizationUser>(
+                orgUsers.map((orgUser) => [orgUser.userUuid, orgUser]),
+            ),
+        [orgUsers],
     );
 };
 
@@ -206,6 +224,65 @@ const reassignUserSchedulersQuery = async ({
         method: 'PATCH',
         body: JSON.stringify({ newOwnerUserUuid }),
     });
+
+const getUserDashboardsSummaryQuery = async (userUuid: string) =>
+    // prettier-ignore
+    lightdashApi<ApiUserDashboardsSummaryResponse['results']>({ // pragma: allowlist secret
+        url: `/org/user/${userUuid}/dashboards-summary`,
+        method: 'GET',
+        body: undefined,
+    });
+
+export const useUserDashboardsSummary = (
+    userUuid: string,
+    enabled: boolean = true,
+) => {
+    const setErrorResponse = useQueryError();
+    return useQuery<ApiUserDashboardsSummaryResponse['results'], ApiError>({
+        queryKey: ['user_dashboards_summary', userUuid],
+        queryFn: () => getUserDashboardsSummaryQuery(userUuid),
+        onError: (result) => setErrorResponse(result),
+        enabled,
+    });
+};
+
+const reassignUserDashboardsQuery = async ({
+    userUuid,
+    newOwnerUserUuid,
+}: {
+    userUuid: string;
+    newOwnerUserUuid: string;
+}) =>
+    // prettier-ignore
+    lightdashApi<ApiReassignUserDashboardsResponse['results']>({ // pragma: allowlist secret
+        url: `/org/user/${userUuid}/reassign-dashboards`,
+        method: 'PATCH',
+        body: JSON.stringify({ newOwnerUserUuid }),
+    });
+
+export const useReassignUserDashboardsMutation = () => {
+    const { showToastSuccess, showToastApiError } = useToaster();
+    return useMutation<
+        ApiReassignUserDashboardsResponse['results'],
+        ApiError,
+        { userUuid: string; newOwnerUserUuid: string }
+    >(reassignUserDashboardsQuery, {
+        mutationKey: ['reassign_user_dashboards'],
+        onSuccess: async (data) => {
+            showToastSuccess({
+                title: `Success! ${data.reassignedCount} ${
+                    data.reassignedCount === 1 ? 'dashboard' : 'dashboards'
+                } transferred.`,
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: `Failed to transfer dashboards`,
+                apiError: error,
+            });
+        },
+    });
+};
 
 export const useReassignUserSchedulersMutation = () => {
     const { showToastSuccess, showToastApiError } = useToaster();

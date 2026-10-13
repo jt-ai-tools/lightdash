@@ -1,4 +1,5 @@
 import {
+    getDashboardFilterableFieldKey,
     getItemId,
     getItemLabel,
     getItemLabelWithoutTableName,
@@ -7,17 +8,18 @@ import {
     isField,
     isMetric,
     sortTimeFrames,
+    type DashboardFilterableField,
     type DashboardTab,
     type DashboardTile,
-    type FilterableDimension,
     type Item,
 } from '@lightdash/common';
 import { useMemo } from 'react';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
 
 type FieldGroup = {
     tableLabel: string;
     tableName: string;
-    fields: FilterableDimension[];
+    fields: DashboardFilterableField[];
 };
 
 export type FieldSection = {
@@ -43,7 +45,9 @@ const getGroupKey = (i: Item): string => {
     return i.name;
 };
 
-const sortFields = (fields: FilterableDimension[]): FilterableDimension[] =>
+const sortFields = (
+    fields: DashboardFilterableField[],
+): DashboardFilterableField[] =>
     [...fields].sort((a, b) => {
         // Sort by table label
         if (isField(a) && isField(b) && a.table !== b.table) {
@@ -75,25 +79,51 @@ const sortFields = (fields: FilterableDimension[]): FilterableDimension[] =>
         );
     });
 
-const groupByTable = (fields: FilterableDimension[]): FieldGroup[] => {
+const groupByTable = (fields: DashboardFilterableField[]): FieldGroup[] => {
     const groupMap = new Map<string, FieldGroup>();
 
     for (const field of fields) {
         const tableName = field.table;
         const tableLabel = field.tableLabel || field.table;
 
-        const existing = groupMap.get(tableName);
+        const groupKey = `${tableName}:${tableLabel}`;
+        const existing = groupMap.get(groupKey);
         if (existing) {
             existing.fields.push(field);
         } else {
-            groupMap.set(tableName, { tableLabel, tableName, fields: [field] });
+            groupMap.set(groupKey, { tableLabel, tableName, fields: [field] });
         }
     }
 
     return Array.from(groupMap.values());
 };
 
-const matchesSearch = (field: FilterableDimension, search: string): boolean => {
+/** Fields with one query id but different labels (a join alias relabelled per explore) need distinct option values */
+export const getCollidingFieldIds = (
+    fields: DashboardFilterableField[],
+): Set<string> => {
+    const seen = new Set<string>();
+    const colliding = new Set<string>();
+    for (const field of fields) {
+        const id = getItemId(field);
+        if (seen.has(id)) colliding.add(id);
+        seen.add(id);
+    }
+    return colliding;
+};
+
+export const getFieldOptionValue = (
+    field: DashboardFilterableField,
+    collidingFieldIds: Set<string>,
+): string =>
+    collidingFieldIds.has(getItemId(field))
+        ? getDashboardFilterableFieldKey(field)
+        : getItemId(field);
+
+const matchesSearch = (
+    field: DashboardFilterableField,
+    search: string,
+): boolean => {
     if (!search) return true;
     const lowerSearch = search.toLowerCase();
     return (
@@ -103,8 +133,8 @@ const matchesSearch = (field: FilterableDimension, search: string): boolean => {
 };
 
 type UseFilterFieldSectionsArgs = {
-    fields: FilterableDimension[];
-    availableTileFilters: Record<string, FilterableDimension[]>;
+    fields: DashboardFilterableField[];
+    availableTileFilters: Record<string, DashboardFilterableField[]>;
     tiles: DashboardTile[];
     tabs: DashboardTab[];
     activeTabUuid: string | undefined;
@@ -119,6 +149,7 @@ export const useFilterFieldSections = ({
     tabs,
     search,
 }: UseFilterFieldSectionsArgs): FieldSection[] => {
+    const getUiString = useUiStrings();
     return useMemo(() => {
         const filtered = fields.filter((f) => matchesSearch(f, search));
 
@@ -134,22 +165,29 @@ export const useFilterFieldSections = ({
             tiles.filter((t) => t.tabUuid === activeTabUuid).map((t) => t.uuid),
         );
 
+        const collidingFieldIds = getCollidingFieldIds(fields);
         const activeTabFieldIds = new Set<string>();
         for (const [tileUuid, tileFields] of Object.entries(
             availableTileFilters,
         )) {
             if (activeTabTileUuids.has(tileUuid)) {
                 for (const f of tileFields) {
-                    activeTabFieldIds.add(getItemId(f));
+                    activeTabFieldIds.add(
+                        getFieldOptionValue(f, collidingFieldIds),
+                    );
                 }
             }
         }
 
-        const activeTabFields: FilterableDimension[] = [];
-        const otherFields: FilterableDimension[] = [];
+        const activeTabFields: DashboardFilterableField[] = [];
+        const otherFields: DashboardFilterableField[] = [];
 
         for (const field of filtered) {
-            if (activeTabFieldIds.has(getItemId(field))) {
+            if (
+                activeTabFieldIds.has(
+                    getFieldOptionValue(field, collidingFieldIds),
+                )
+            ) {
                 activeTabFields.push(field);
             } else {
                 otherFields.push(field);
@@ -161,7 +199,7 @@ export const useFilterFieldSections = ({
         if (activeTabFields.length > 0) {
             const sorted = sortFields(activeTabFields);
             sections.push({
-                label: 'Fields in this tab',
+                label: getUiString('filters.config.fieldsInThisTab'),
                 groups: groupByTable(sorted),
                 dimmed: false,
             });
@@ -170,12 +208,20 @@ export const useFilterFieldSections = ({
         if (otherFields.length > 0) {
             const sorted = sortFields(otherFields);
             sections.push({
-                label: 'Other available fields',
+                label: getUiString('filters.config.otherAvailableFields'),
                 groups: groupByTable(sorted),
                 dimmed: true,
             });
         }
 
         return sections;
-    }, [fields, availableTileFilters, tiles, activeTabUuid, tabs, search]);
+    }, [
+        fields,
+        availableTileFilters,
+        tiles,
+        activeTabUuid,
+        tabs,
+        search,
+        getUiString,
+    ]);
 };

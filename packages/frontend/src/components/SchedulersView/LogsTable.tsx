@@ -14,7 +14,7 @@ import {
     Text,
     Tooltip,
     useMantineTheme,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import {
     IconAlertTriangleFilled,
@@ -24,29 +24,30 @@ import {
     IconTextCaption,
 } from '@tabler/icons-react';
 import {
-    MantineReactTable,
-    useMantineReactTable,
-    type MRT_ColumnDef,
-    type MRT_Virtualizer,
-} from 'mantine-react-table';
-import {
     useCallback,
     useEffect,
     useMemo,
     useRef,
     useState,
     type FC,
-    type UIEvent,
 } from 'react';
 import { Link } from 'react-router';
 import ConfirmSendNowModal from '../../features/scheduler/components/ConfirmSendNowModal';
 import { useLogsFilters } from '../../features/scheduler/hooks/useLogsFilters';
 import {
     useFetchRunLogs,
+    useResourceSchedulerRuns,
     useSchedulerRuns,
     useSendNowSchedulerByUuid,
 } from '../../features/scheduler/hooks/useScheduler';
-import LoadingState from '../common/LoadingState';
+import { useInfiniteScroll } from '../../hooks/useInfiniteScroll';
+import {
+    ContentTable,
+    useContentTable,
+    type ContentTableColumnDef,
+    type ContentTableVirtualizer,
+} from '../common/ContentTable';
+import EmptyStateLoader from '../common/EmptyStateLoader';
 import MantineIcon from '../common/MantineIcon';
 import { LogsTopToolbar } from './LogsTopToolbar';
 import RunDetailsModal from './RunDetailsModal';
@@ -60,6 +61,23 @@ import {
 type LogsTableProps = {
     projectUuid?: string;
     getSlackChannelName: (channelId: string) => string | null;
+    /**
+     * When provided, the table is scoped to a single scheduler on a specific
+     * dashboard or chart. The scheduler filter is hidden and runs are fetched
+     * from the resource-scoped v2 endpoint. Filter state is kept locally
+     * (not synced to the URL).
+     */
+    resourceScope?: {
+        resourceType: 'dashboard' | 'chart';
+        resourceUuid: string;
+        schedulerUuid: string;
+    };
+    /**
+     * When provided, row clicks call this instead of opening the embedded
+     * RunDetailsModal. Use this for flows that swap modal content rather
+     * than stacking modals.
+     */
+    onSelectRun?: (run: SchedulerRun) => void;
 };
 
 type TableRow = {
@@ -71,10 +89,14 @@ const fetchSize = 50;
 const LogsTable: FC<LogsTableProps> = ({
     projectUuid,
     getSlackChannelName,
+    resourceScope,
+    onSelectRun,
 }) => {
-    const tableContainerRef = useRef<HTMLDivElement>(null);
+    const isResourceScoped = !!resourceScope;
     const rowVirtualizerInstanceRef =
-        useRef<MRT_Virtualizer<HTMLDivElement, HTMLTableRowElement>>(null);
+        useRef<ContentTableVirtualizer<HTMLDivElement, HTMLTableRowElement>>(
+            null,
+        );
     const {
         search,
         setSearch,
@@ -88,7 +110,7 @@ const LogsTable: FC<LogsTableProps> = ({
         setSelectedSchedulerUuid,
         hasActiveFilters,
         resetFilters,
-    } = useLogsFilters();
+    } = useLogsFilters({ persistToUrl: !isResourceScoped });
 
     // Debounce filters to avoid too many API calls
     const debouncedFilters = useMemo(() => {
@@ -114,21 +136,36 @@ const LogsTable: FC<LogsTableProps> = ({
         300,
     );
 
+    const projectScopedQuery = useSchedulerRuns({
+        projectUuid: projectUuid!,
+        paginateArgs: { page: 1, pageSize: fetchSize },
+        searchQuery: debouncedSearchAndFilters.search,
+        sortBy: 'scheduledTime',
+        sortDirection: 'desc',
+        filters: {
+            schedulerUuid: debouncedSearchAndFilters.filters.schedulerUuid,
+            statuses: debouncedSearchAndFilters.filters.statuses,
+            createdByUserUuids:
+                debouncedSearchAndFilters.filters.createdByUserUuids,
+            destinations: debouncedSearchAndFilters.filters.destinations,
+        },
+    });
+    const resourceScopedQuery = useResourceSchedulerRuns({
+        resourceType: resourceScope?.resourceType ?? 'dashboard',
+        resourceUuid: resourceScope?.resourceUuid ?? '',
+        schedulerUuid: resourceScope?.schedulerUuid ?? '',
+        pageSize: fetchSize,
+        searchQuery: debouncedSearchAndFilters.search,
+        sortBy: 'scheduledTime',
+        sortDirection: 'desc',
+        filters: {
+            statuses: debouncedSearchAndFilters.filters.statuses,
+            destinations: debouncedSearchAndFilters.filters.destinations,
+        },
+        enabled: isResourceScoped,
+    });
     const { data, fetchNextPage, isError, isFetching, isLoading } =
-        useSchedulerRuns({
-            projectUuid: projectUuid!,
-            paginateArgs: { page: 1, pageSize: fetchSize },
-            searchQuery: debouncedSearchAndFilters.search,
-            sortBy: 'scheduledTime',
-            sortDirection: 'desc',
-            filters: {
-                schedulerUuid: debouncedSearchAndFilters.filters.schedulerUuid,
-                statuses: debouncedSearchAndFilters.filters.statuses,
-                createdByUserUuids:
-                    debouncedSearchAndFilters.filters.createdByUserUuids,
-                destinations: debouncedSearchAndFilters.filters.destinations,
-            },
-        });
+        isResourceScoped ? resourceScopedQuery : projectScopedQuery;
 
     // Flatten paginated data
     const schedulerRunsData = useMemo(() => {
@@ -142,36 +179,21 @@ const LogsTable: FC<LogsTableProps> = ({
     const totalDBRowCount = data?.pages?.[0]?.pagination?.totalResults ?? 0;
     const totalFetched = schedulerRunsData?.length ?? 0;
 
-    // Callback to fetch more data when scrolling
-    const fetchMoreOnBottomReached = useCallback(
-        (containerRefElement?: HTMLDivElement | null) => {
-            if (containerRefElement) {
-                const { scrollHeight, scrollTop, clientHeight } =
-                    containerRefElement;
-                // Fetch more when within 400px of bottom
-                if (
-                    scrollHeight - scrollTop - clientHeight < 400 &&
-                    !isFetching &&
-                    totalFetched < totalDBRowCount
-                ) {
-                    void fetchNextPage();
-                }
-            }
-        },
-        [fetchNextPage, isFetching, totalFetched, totalDBRowCount],
-    );
+    const {
+        containerRef: tableContainerRef,
+        onScroll,
+        scrollToTop,
+    } = useInfiniteScroll({
+        fetchNextPage,
+        isFetching,
+        hasMore: totalFetched < totalDBRowCount,
+        threshold: 400,
+    });
 
     // Scroll to top when filters change
     useEffect(() => {
-        if (tableContainerRef.current) {
-            tableContainerRef.current.scrollTop = 0;
-        }
-    }, [debouncedSearchAndFilters]);
-
-    // Check on mount if table needs initial fetch
-    useEffect(() => {
-        fetchMoreOnBottomReached(tableContainerRef.current);
-    }, [fetchMoreOnBottomReached]);
+        scrollToTop();
+    }, [debouncedSearchAndFilters, scrollToTop]);
 
     // Re-measure virtualizer when container becomes visible (fixes virtualization when switching tabs)
     // Note: depends on isLoading because the table container only exists after loading completes
@@ -189,7 +211,7 @@ const LogsTable: FC<LogsTableProps> = ({
 
         resizeObserver.observe(container);
         return () => resizeObserver.disconnect();
-    }, [isLoading]);
+    }, [isLoading, tableContainerRef]);
 
     const theme = useMantineTheme();
     const [isConfirmOpen, setIsConfirmOpen] = useState(false);
@@ -211,6 +233,10 @@ const LogsTable: FC<LogsTableProps> = ({
     // Handle row click to open modal and fetch child logs
     const handleRowClick = useCallback(
         (run: SchedulerRun) => {
+            if (onSelectRun) {
+                onSelectRun(run);
+                return;
+            }
             setSelectedRun(run);
 
             // Fetch logs if not already in cache
@@ -229,7 +255,7 @@ const LogsTable: FC<LogsTableProps> = ({
                     });
             }
         },
-        [childLogsMap, fetchRunLogsMutation],
+        [onSelectRun, childLogsMap, fetchRunLogsMutation],
     );
 
     // Compute available schedulers from runs (unique schedulers)
@@ -262,7 +288,7 @@ const LogsTable: FC<LogsTableProps> = ({
         );
     }, [schedulerRunsData]);
 
-    const columns: MRT_ColumnDef<TableRow>[] = useMemo(
+    const allColumns: ContentTableColumnDef<TableRow>[] = useMemo(
         () => [
             {
                 accessorKey: 'scheduler.name',
@@ -271,7 +297,7 @@ const LogsTable: FC<LogsTableProps> = ({
                 size: 250,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconTextCaption} color="ldGray.6" />
+                        <MantineIcon icon={IconTextCaption} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -326,7 +352,7 @@ const LogsTable: FC<LogsTableProps> = ({
                                         </Text>
                                     </Tooltip>
                                 </Anchor>
-                                <Text fz="xs" c="ldGray.6" maw="190px" truncate>
+                                <Text fz="xs" c="dimmed" maw="190px" truncate>
                                     {run.resourceName}
                                 </Text>
                             </Stack>
@@ -409,14 +435,14 @@ const LogsTable: FC<LogsTableProps> = ({
                 size: 140,
                 Header: ({ column }) => (
                     <Group gap="two" wrap="nowrap">
-                        <MantineIcon icon={IconClock} color="ldGray.6" />
+                        <MantineIcon icon={IconClock} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
                 Cell: ({ row }) => {
                     const { run } = row.original;
                     return (
-                        <Text fz="xs" c="ldGray.6">
+                        <Text fz="xs" c="dimmed">
                             {formatTime(run.scheduledTime)}
                         </Text>
                     );
@@ -429,14 +455,14 @@ const LogsTable: FC<LogsTableProps> = ({
                 size: 140,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconClock} color="ldGray.6" />
+                        <MantineIcon icon={IconClock} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
                 Cell: ({ row }) => {
                     const { run } = row.original;
                     return (
-                        <Text fz="xs" c="ldGray.6">
+                        <Text fz="xs" c="dimmed">
                             {formatTime(run.createdAt)}
                         </Text>
                     );
@@ -466,18 +492,15 @@ const LogsTable: FC<LogsTableProps> = ({
                                     }}
                                 >
                                     <Menu
-                                        withinPortal
                                         position="bottom-start"
                                         withArrow
                                         arrowPosition="center"
-                                        shadow="md"
                                         offset={-4}
                                         closeOnItemClick
                                         closeOnClickOutside
                                     >
                                         <Menu.Target>
                                             <ActionIcon
-                                                variant="subtle"
                                                 style={{
                                                     ':hover': {
                                                         backgroundColor:
@@ -518,19 +541,19 @@ const LogsTable: FC<LogsTableProps> = ({
         [projectUuid, theme, setSelectedScheduler, setIsConfirmOpen],
     );
 
-    const table = useMantineReactTable({
+    const columns = useMemo(
+        () =>
+            isResourceScoped
+                ? allColumns.filter((c) => c.accessorKey !== 'scheduler.name')
+                : allColumns,
+        [allColumns, isResourceScoped],
+    );
+
+    const table = useContentTable({
         columns,
         data: tableData,
         enableColumnResizing: true,
-        enableRowNumbers: false,
         enablePagination: false,
-        enableFilters: false,
-        enableFullScreenToggle: false,
-        enableDensityToggle: false,
-        enableColumnActions: false,
-        enableColumnFilters: false,
-        enableHiding: false,
-        enableGlobalFilterModes: false,
         enableSorting: false,
         enableRowVirtualization: true,
         enableTopToolbar: true,
@@ -553,23 +576,19 @@ const LogsTable: FC<LogsTableProps> = ({
                 hasActiveFilters={hasActiveFilters}
                 resetFilters={resetFilters}
                 availableSchedulers={availableSchedulers}
+                hideSchedulerPill={isResourceScoped}
+                hideCreatedByFilter={isResourceScoped}
+                hideSearchFilter={isResourceScoped}
             />
         ),
-        mantinePaperProps: {
-            shadow: undefined,
-            style: {
-                border: `1px solid ${theme.colors.ldGray[2]}`,
-                borderRadius: theme.spacing.sm,
-                boxShadow: theme.shadows.subtle,
-                display: 'flex',
-                flexDirection: 'column',
-            },
-        },
         mantineTableContainerProps: {
             ref: tableContainerRef,
-            style: { maxHeight: 'calc(100dvh - 420px)' },
-            onScroll: (event: UIEvent<HTMLDivElement>) =>
-                fetchMoreOnBottomReached(event.target as HTMLDivElement),
+            style: {
+                maxHeight: isResourceScoped
+                    ? 'calc(80vh - 220px)'
+                    : 'calc(100dvh - 420px)',
+            },
+            onScroll,
         },
         mantineTableProps: {
             highlightOnHover: true,
@@ -616,18 +635,6 @@ const LogsTable: FC<LogsTableProps> = ({
                 },
             };
         },
-        mantineTableHeadRowProps: {
-            sx: {
-                boxShadow: 'none',
-                'th > div > div:last-child': {
-                    top: -10,
-                    right: -5,
-                },
-                'th > div > div:last-child > .mantine-Divider-root': {
-                    border: 'none',
-                },
-            },
-        },
         mantineTableBodyCellProps: () => {
             return {
                 h: 48,
@@ -647,7 +654,7 @@ const LogsTable: FC<LogsTableProps> = ({
             },
         }),
         rowVirtualizerInstanceRef,
-        rowVirtualizerProps: { overscan: 10 },
+        rowVirtualizerProps: { estimateSize: () => 48, overscan: 10 },
         state: {
             isLoading,
             showAlertBanner: isError,
@@ -656,23 +663,24 @@ const LogsTable: FC<LogsTableProps> = ({
     });
 
     if (isLoading) {
-        return <LoadingState title="Loading run history" />;
+        return <EmptyStateLoader my="xl" title="Loading run history" />;
     }
 
     return (
         <>
-            <MantineReactTable table={table} />
+            <ContentTable table={table} />
             <ConfirmSendNowModal
                 opened={isConfirmOpen}
                 onClose={() => setIsConfirmOpen(false)}
                 schedulerName={selectedScheduler?.name || ''}
+                deliveryType="scheduled"
                 loading={sendNowMutation.isLoading}
                 onConfirm={() => {
                     sendNowMutation.mutate();
                     setIsConfirmOpen(false);
                 }}
             />
-            {!!selectedRun && (
+            {!!selectedRun && !onSelectRun && (
                 <RunDetailsModal
                     opened={!!selectedRun}
                     onClose={() => setSelectedRun(null)}

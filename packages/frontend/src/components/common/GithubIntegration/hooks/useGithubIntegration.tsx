@@ -1,9 +1,9 @@
 import {
     type ApiError,
+    type GithubUserCredential,
     type GitIntegrationConfiguration,
     type GitRepo,
 } from '@lightdash/common';
-
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { lightdashApi } from '../../../../api';
 import useToaster from '../../../../hooks/toaster/useToaster';
@@ -22,6 +22,7 @@ export const useGithubConfig = () => {
         queryKey: ['github_installation'],
         queryFn: () => getGithubConfig(),
         retry: false,
+        staleTime: 5 * 60 * 1000, // 5 minutes - the installation rarely changes; install detection drives its own refetch()
         onError: ({ error }) => {
             if (error.statusCode === 404 || error.statusCode === 401) return; // Ignore missing installation errors or unauthorized in demo
 
@@ -57,6 +58,56 @@ export const useGitHubRepositories = () => {
         },
     });
 };
+export const GITHUB_USER_AUTHORIZE_URL = `/api/v1/github/user/authorize`;
+
+const getGithubUserCredential = async () =>
+    lightdashApi<GithubUserCredential | null>({
+        url: `/github/user`,
+        method: 'GET',
+        body: undefined,
+    });
+
+export const useGithubUserCredential = () =>
+    useQuery<GithubUserCredential | null, ApiError>({
+        queryKey: ['github_user_credential'],
+        queryFn: () => getGithubUserCredential(),
+        retry: false,
+        // Linking happens in another tab; refetch when the user comes back
+        refetchOnWindowFocus: true,
+    });
+
+const unlinkGithubUser = async () =>
+    lightdashApi<null>({
+        url: `/github/user`,
+        method: 'DELETE',
+        body: undefined,
+    });
+
+export const useUnlinkGithubUserMutation = () => {
+    const { showToastSuccess, showToastApiError } = useToaster();
+    const queryClient = useQueryClient();
+    return useMutation<null, ApiError>(
+        ['unlink_github_user'],
+        () => unlinkGithubUser(),
+        {
+            onSuccess: async () => {
+                await queryClient.invalidateQueries(['github_user_credential']);
+                showToastSuccess({
+                    title: 'GitHub account unlinked',
+                    subtitle:
+                        'Write-backs will be authored by the Lightdash bot again.',
+                });
+            },
+            onError: ({ error }) => {
+                showToastApiError({
+                    title: 'Failed to unlink GitHub account',
+                    apiError: error,
+                });
+            },
+        },
+    );
+};
+
 const deleteGithubInstallation = async () =>
     lightdashApi<null>({
         url: `/github/uninstall`,

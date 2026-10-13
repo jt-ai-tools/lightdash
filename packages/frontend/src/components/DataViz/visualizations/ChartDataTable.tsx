@@ -5,12 +5,12 @@ import {
     type VizTableHeaderSortConfig,
 } from '@lightdash/common';
 import {
-    Badge,
     Flex,
     Group,
+    type FlexProps,
+    Badge,
     Tooltip,
     useMantineTheme,
-    type FlexProps,
 } from '@mantine/core';
 import { IconArrowDown, IconArrowUp } from '@tabler/icons-react';
 import { flexRender } from '@tanstack/react-table';
@@ -56,11 +56,14 @@ export const ChartDataTable = ({
             direction="column"
             miw="100%"
             {...flexProps}
-            sx={{
+            style={{
                 overflow: 'auto',
                 fontFeatureSettings: "'tnum'",
                 flexGrow: 1,
-                ...flexProps?.sx,
+                ...(typeof flexProps?.style === 'object' &&
+                !Array.isArray(flexProps.style)
+                    ? flexProps.style
+                    : {}),
             }}
             className="sentry-block ph-no-capture"
             data-testid="chart-data-table"
@@ -101,9 +104,8 @@ export const ChartDataTable = ({
                                                 label="You cannot sort by a group column"
                                                 disabled={!!onClick}
                                                 position="top"
-                                                withinPortal
                                             >
-                                                <Group spacing="two" fz={13}>
+                                                <Group gap="two" fz="sm">
                                                     {columnsConfig?.[header.id]
                                                         ?.aggregation && (
                                                         <Badge
@@ -158,9 +160,8 @@ export const ChartDataTable = ({
                                 {rowModelRows[index]
                                     .getVisibleCells()
                                     .map((cell) => {
-                                        const cellValue = cell.getValue() as
-                                            | RawResultRow[0]
-                                            | undefined;
+                                        const cellValue =
+                                            cell.getValue() as RawResultRow[0];
 
                                         return (
                                             <BodyCell

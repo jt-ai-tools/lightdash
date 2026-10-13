@@ -5,8 +5,19 @@ export default function mockHealthResponse(
 ): HealthState {
     return {
         healthy: true,
+        requiresMigration: false,
+        license: {
+            hasLicenseKey: false,
+            valid: false,
+        },
         mode: LightdashMode.CLOUD_BETA,
         version: '0.0.0',
+        mobile: {
+            minimumSupportedVersion: {
+                android: null,
+                ios: null,
+            },
+        },
         localDbtEnabled: true,
         isAuthenticated: true,
         requiresOrgRegistration: false,
@@ -40,19 +51,20 @@ export default function mockHealthResponse(
         staticIp: '',
         signupUrl: undefined,
         helpMenuUrl: undefined,
-        posthog: undefined,
         query: {
             maxPageSize: 2500,
             maxLimit: 1000000,
+            queryMaxLimit: 1000000,
             defaultLimit: 500,
             csvCellsLimit: 100,
+            exportTimeoutMs: 600000,
+            csvMaxLimit: 5000000,
+            retryQueryOnTransientErrors: true,
         },
         dashboard: {
             maxTilesPerTab: 50,
             maxTabsPerDashboard: 20,
-            versionHistory: {
-                daysLimit: 3,
-            },
+            disableSentryTracking: false,
         },
         pivotTable: {
             maxColumnLimit: 100,
@@ -89,21 +101,29 @@ export default function mockHealthResponse(
             snowflake: {
                 enabled: false,
             },
+            snowflakeAi: {
+                enabled: false,
+            },
             databricks: {
                 enabled: false,
             },
         },
         hasEmailClient: false,
+        hasPlaygroundProjects: false,
+        hasEmailWhitelabel: false,
         hasHeadlessBrowser: false,
         hasExtendedUsageAnalytics: false,
         hasGithub: false,
         hasGitlab: false,
+        hasJira: false,
+        hasLinear: false,
         hasCacheAutocompleResults: false,
         hasMicrosoftTeams: false,
         appearance: {
             overrideColorPalette: undefined,
             overrideColorPaletteName: undefined,
         },
+        hasBrandfetch: false,
         isServiceAccountEnabled: false,
         isOrganizationWarehouseCredentialsEnabled: false,
         isAthenaWarehouseIamRoleAuthEnabled: false,
@@ -117,6 +137,7 @@ export default function mockHealthResponse(
             analyticsProjectUuid: undefined,
             analyticsDashboardUuid: undefined,
             isAmbientAiEnabled: false,
+            threadDumpEnabled: false,
         },
         echarts6: {
             enabled: false,
@@ -127,6 +148,19 @@ export default function mockHealthResponse(
         softDelete: {
             enabled: false,
             retentionDays: 30,
+        },
+        learnSandbox: {
+            enabled: false,
+        },
+        dashboardComments: {
+            enabled: true,
+        },
+        preAggregates: {
+            enabled: false,
+        },
+        dataApps: {
+            previewOrigin: null,
+            sampleDataEnabled: true,
         },
         ...overrides,
     };

@@ -1,6 +1,5 @@
-import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
     getErrorMessage,
     MissingConfigError,
@@ -131,6 +130,48 @@ export class S3ResultsFileStorageClient extends S3CacheClient {
         return { write, close, writeStream: passThrough };
     }
 
+    async getFileSize(
+        cacheKey: string,
+        fileExtension = 'jsonl',
+    ): Promise<number | null> {
+        if (!this.configuration || !this.s3) {
+            return null;
+        }
+
+        try {
+            const key = S3ResultsFileStorageClient.sanitizeFileExtension(
+                cacheKey,
+                fileExtension,
+            );
+            const response = await this.s3.send(
+                new HeadObjectCommand({
+                    Bucket: this.configuration.bucket,
+                    Key: key,
+                }),
+            );
+            return response.ContentLength ?? null;
+        } catch (error) {
+            Logger.warn(
+                `Failed to get file size for ${cacheKey}: ${getErrorMessage(
+                    error,
+                )}`,
+            );
+            return null;
+        }
+    }
+
+    async deleteFile(key: string): Promise<void> {
+        if (!this.configuration || !this.s3) {
+            throw new MissingConfigError('S3 configuration is not set');
+        }
+        await this.s3.send(
+            new DeleteObjectCommand({
+                Bucket: this.configuration.bucket,
+                Key: key,
+            }),
+        );
+    }
+
     async getDownloadStream(
         cacheKey: string,
         fileExtension = 'jsonl',
@@ -182,7 +223,7 @@ export class S3ResultsFileStorageClient extends S3CacheClient {
     }
 
     async getFileUrl(cacheKey: string, fileExtension = 'jsonl') {
-        if (!this.configuration || !this.s3) {
+        if (!this.configuration || !this.s3 || !this.urlSigner) {
             throw new MissingConfigError('S3 configuration is not set');
         }
 
@@ -192,15 +233,10 @@ export class S3ResultsFileStorageClient extends S3CacheClient {
         );
 
         // Get the S3 URL
-        const url = await getSignedUrl(
-            this.s3,
-            new GetObjectCommand({
-                Bucket: this.configuration.bucket,
-                Key: key,
-            }),
-            {
-                expiresIn: this.s3ExpiresIn,
-            },
+        const url = await this.urlSigner.getSignedDownloadUrl(
+            this.configuration.bucket,
+            key,
+            this.s3ExpiresIn,
         );
 
         return url;

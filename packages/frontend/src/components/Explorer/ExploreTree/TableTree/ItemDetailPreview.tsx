@@ -3,9 +3,10 @@ import {
     isDateFilterRule,
     isWithValueFilter,
     type CompiledMetric,
+    type Dimension,
+    type Metric,
 } from '@lightdash/common';
 import {
-    Anchor,
     Badge,
     Box,
     Button,
@@ -19,17 +20,27 @@ import {
     Tooltip,
     useMantineTheme,
 } from '@mantine/core';
-import { IconCode } from '@tabler/icons-react';
+import { IconArrowRight, IconCode } from '@tabler/icons-react';
 import ReactMarkdownPreview from '@uiw/react-markdown-preview';
 import { Fragment, useState, type FC, type PropsWithChildren } from 'react';
 import rehypeExternalLinks from 'rehype-external-links';
+import useCanViewEmbedCompiledSql from '../../../../ee/providers/Embed/useCanViewEmbedCompiledSql';
 import {
     explorerActions,
     useExplorerDispatch,
 } from '../../../../features/explorer/store';
 import { rehypeRemoveHeaderLinks } from '../../../../utils/markdownUtils';
+import FieldIcon from '../../../common/Filters/FieldIcon';
 import { filterOperatorLabel } from '../../../common/Filters/FilterInputs/constants';
 import MantineIcon from '../../../common/MantineIcon';
+import classes from './ItemDetailPreview.module.css';
+import { ITEM_DETAIL_PREVIEW_TRANSITION_PROPS } from './itemDetailPreviewTransition';
+
+export const MetricTypeBadge: FC<{ type: string }> = ({ type }) => (
+    <Badge className={classes.metricTypeBadge} color="indigo" p={2}>
+        {friendlyName(type)}
+    </Badge>
+);
 
 /**
  * Renders markdown for an item's description, with additional constraints
@@ -40,11 +51,21 @@ export const ItemDetailMarkdown: FC<{ source: string }> = ({ source }) => {
     const theme = useMantineTheme();
     return (
         <ReactMarkdownPreview
+            className={classes.markdown}
             skipHtml
             components={{
                 h1: ({ children }) => <Title order={2}>{children}</Title>,
                 h2: ({ children }) => <Title order={3}>{children}</Title>,
                 h3: ({ children }) => <Title order={4}>{children}</Title>,
+                table: ({ children }) => (
+                    <table className={classes.markdownTable}>{children}</table>
+                ),
+                th: ({ children }) => (
+                    <th className={classes.markdownCell}>{children}</th>
+                ),
+                td: ({ children }) => (
+                    <td className={classes.markdownCell}>{children}</td>
+                ),
             }}
             rehypePlugins={[[rehypeExternalLinks, { target: '_blank' }]]}
             rehypeRewrite={rehypeRemoveHeaderLinks}
@@ -59,6 +80,29 @@ export const ItemDetailMarkdown: FC<{ source: string }> = ({ source }) => {
     );
 };
 
+const SourceFieldRow: FC<{ label: string; field: Dimension | Metric }> = ({
+    label,
+    field,
+}) => (
+    <>
+        <Divider color="ldGray.2" />
+        <Stack gap={4}>
+            <Text fz="xs" fw={500} c="ldDark.7">
+                {label}
+            </Text>
+            <Group gap="xs" wrap="nowrap">
+                <FieldIcon item={field} size="sm" />
+                <Text fz="xs" c="ldGray.7">
+                    {field.tableLabel}
+                </Text>
+                <Text fz="xs" fw={500} c="ldDark.7">
+                    {field.label || field.name}
+                </Text>
+            </Group>
+        </Stack>
+    </>
+);
+
 /**
  * Renders a truncated version of an item's description, with an option
  * to read the full description if necessary.
@@ -72,6 +116,8 @@ export const ItemDetailPreview: FC<{
         compiledSql: string;
         name: string;
         filters?: CompiledMetric['filters'];
+        baseDimension?: Dimension;
+        baseMetric?: Metric;
     };
 }> = ({ description, onViewDescription, metricInfo }) => {
     /**
@@ -87,42 +133,45 @@ export const ItemDetailPreview: FC<{
         (description && description.split('\n').length > 2);
 
     const [showCompiled, setShowCompiled] = useState(false);
+    const canViewSql = useCanViewEmbedCompiledSql();
+    const hasFilters = !!metricInfo?.filters && metricInfo.filters.length > 0;
 
     return (
-        <Stack spacing="xs">
+        <Stack gap="sm">
             {metricInfo && (
                 <>
-                    <Group spacing="xs" position="apart">
+                    <Group gap="xs" justify="space-between">
                         <Text fz="sm" fw={500} c="ldDark.7">
                             {metricInfo.name}
                         </Text>
-                        <Badge
-                            radius="sm"
-                            color="indigo"
-                            p={2}
-                            sx={(theme) => ({
-                                boxShadow: theme.shadows.subtle,
-                                border: `1px solid ${theme.colors.indigo[1]}`,
-                            })}
-                        >
-                            {friendlyName(metricInfo.type)}
-                        </Badge>
+                        <MetricTypeBadge type={metricInfo.type} />
                     </Group>
+                    {metricInfo.baseDimension && (
+                        <SourceFieldRow
+                            label="Source field"
+                            field={metricInfo.baseDimension}
+                        />
+                    )}
+                    {metricInfo.baseMetric && (
+                        <SourceFieldRow
+                            label="Source metric"
+                            field={metricInfo.baseMetric}
+                        />
+                    )}
                 </>
             )}
             {description && (
                 <Box
                     mah={120}
-                    sx={{
+                    style={{
                         overflow: 'hidden',
-
                         // If we're over the truncation limit, use a mask to fade out the bottom of the container.
                         maskImage: isTruncated
                             ? 'linear-gradient(180deg, white 0%, white 80%, transparent 100%)'
                             : undefined,
                     }}
                 >
-                    <Stack spacing="xs">
+                    <Stack gap="xs">
                         {metricInfo && (
                             <>
                                 <Divider color="ldGray.2" />
@@ -137,63 +186,75 @@ export const ItemDetailPreview: FC<{
                 </Box>
             )}
             {isTruncated && (
-                <Box ta={'center'}>
-                    <Anchor
-                        size={'xs'}
-                        onClick={(e: React.MouseEvent<HTMLAnchorElement>) => {
+                <Box ta="right">
+                    <Button
+                        variant="subtle"
+                        size="compact-sm"
+                        rightSection={
+                            <MantineIcon icon={IconArrowRight} size="sm" />
+                        }
+                        onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
                             e.preventDefault();
                             onViewDescription();
                         }}
                     >
                         Read full description
-                    </Anchor>
+                    </Button>
                 </Box>
             )}
-            {metricInfo && (
+            {metricInfo && (canViewSql || hasFilters) && (
                 <>
                     <Divider color="ldGray.2" />
-                    <Stack spacing="xs">
-                        <Group spacing="xs" align="center" position="apart">
-                            <Text fz="xs" fw={500} c="ldDark.7">
-                                SQL
-                            </Text>
-                            <Tooltip
-                                variant="xs"
-                                position="right"
-                                label={
-                                    showCompiled
-                                        ? 'Show original SQL'
-                                        : 'Show compiled SQL'
-                                }
-                            >
-                                <Button
-                                    compact
-                                    variant="subtle"
-                                    color="gray"
-                                    onClick={(
-                                        e: React.MouseEvent<HTMLButtonElement>,
-                                    ) => {
-                                        e.stopPropagation();
-                                        setShowCompiled(!showCompiled);
-                                    }}
-                                    size="xs"
-                                    leftIcon={<MantineIcon icon={IconCode} />}
+                    <Stack gap="xs">
+                        {canViewSql && (
+                            <>
+                                <Group
+                                    gap="xs"
+                                    align="center"
+                                    justify="space-between"
                                 >
+                                    <Text fz="xs" fw={500} c="ldDark.7">
+                                        SQL
+                                    </Text>
+                                    <Tooltip
+                                        position="right"
+                                        label={
+                                            showCompiled
+                                                ? 'Show original SQL'
+                                                : 'Show compiled SQL'
+                                        }
+                                    >
+                                        <Button
+                                            variant="subtle"
+                                            color="gray"
+                                            onClick={(
+                                                e: React.MouseEvent<HTMLButtonElement>,
+                                            ) => {
+                                                e.stopPropagation();
+                                                setShowCompiled(!showCompiled);
+                                            }}
+                                            size="compact-xs"
+                                            leftSection={
+                                                <MantineIcon icon={IconCode} />
+                                            }
+                                        >
+                                            {showCompiled
+                                                ? 'Original SQL'
+                                                : 'Compiled SQL'}
+                                        </Button>
+                                    </Tooltip>
+                                </Group>
+                                <Code maw={400}>
                                     {showCompiled
-                                        ? 'Original SQL'
-                                        : 'Compiled SQL'}
-                                </Button>
-                            </Tooltip>
-                        </Group>
-                        <Code maw={400}>
-                            {showCompiled
-                                ? metricInfo.compiledSql
-                                : metricInfo.sql}
-                        </Code>
+                                        ? metricInfo.compiledSql
+                                        : metricInfo.sql}
+                                </Code>
+                            </>
+                        )}
                         {metricInfo.filters &&
                             metricInfo.filters.length > 0 && (
                                 <>
-                                    <Divider color="ldGray.2" />
+                                    {canViewSql && <Divider color="ldGray.2" />}
                                     <Text fz="xs" fw={500} c="ldDark.7">
                                         Filters
                                     </Text>
@@ -204,7 +265,7 @@ export const ItemDetailPreview: FC<{
                                             ];
 
                                         return (
-                                            <Group key={filter.id} spacing={4}>
+                                            <Group key={filter.id} gap={4}>
                                                 <Code fz="xs" fw={500}>
                                                     {filter.target.fieldRef}
                                                 </Code>
@@ -261,6 +322,7 @@ export const TableItemDetailPreview = ({
     description,
     /** Position offset for the preview popover */
     offset = 20,
+    tableMetadata,
     children,
 }: PropsWithChildren<{
     showPreview: boolean;
@@ -268,6 +330,12 @@ export const TableItemDetailPreview = ({
     description?: string;
     label: string;
     offset?: number;
+    tableMetadata?: {
+        name: string;
+        dbtPackageName?: string;
+        ymlPath?: string;
+        sqlPath?: string;
+    };
 }>) => {
     const dispatch = useExplorerDispatch();
 
@@ -278,6 +346,7 @@ export const TableItemDetailPreview = ({
                 itemType: 'table',
                 label,
                 description,
+                tableMetadata,
             }),
         );
     };
@@ -286,12 +355,11 @@ export const TableItemDetailPreview = ({
         <Popover
             opened={showPreview}
             keepMounted={false}
-            shadow="sm"
-            withinPortal
             disabled={!description}
             position="right"
             withArrow
             offset={offset}
+            transitionProps={ITEM_DETAIL_PREVIEW_TRANSITION_PROPS}
         >
             <Popover.Target>{children}</Popover.Target>
             <Popover.Dropdown
@@ -300,6 +368,8 @@ export const TableItemDetailPreview = ({
                  * of readability.
                  */
                 maw={500}
+                p="md"
+                className={classes.previewDropdown}
                 /**
                  * If we don't stop propagation, users may unintentionally toggle dimensions/metrics
                  * while interacting with the hovercard.

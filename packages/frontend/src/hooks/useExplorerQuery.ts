@@ -1,9 +1,8 @@
-import { FeatureFlags } from '@lightdash/common';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
+import { Limit } from '../components/ExportResults/types';
 import {
     explorerActions,
-    selectIsMinimal,
     selectUnpivotedQueryArgs,
     useExplorerDispatch,
     useExplorerSelector,
@@ -14,7 +13,6 @@ import {
     useCancelQuery,
     type QueryResultsProps,
 } from './useQueryResults';
-import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
 
 /**
  * Public API for Explorer query management
@@ -28,10 +26,8 @@ import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
  */
 export const useExplorerQuery = () => {
     // Get all state and runQuery from manager (single source of truth)
-    const minimal = useExplorerSelector(selectIsMinimal);
     const manager = useExplorerQueryManager();
-    const { queryResults, runQuery, validQueryArgs, unpivotedQueryResults } =
-        manager;
+    const { queryResults, validQueryArgs, unpivotedQueryResults } = manager;
 
     // Redux dispatch and query client for actions
     const dispatch = useExplorerDispatch();
@@ -41,10 +37,6 @@ export const useExplorerQuery = () => {
     const unpivotedQueryArgs = useExplorerSelector(selectUnpivotedQueryArgs);
     const unpivotedEnabled = !!unpivotedQueryArgs;
 
-    const { data: useSqlPivotResults } = useServerFeatureFlag(
-        FeatureFlags.UseSqlPivotResults,
-    );
-
     // Action: Reset query results
     const resetQueryResults = useCallback(() => {
         dispatch(explorerActions.resetQueryExecution());
@@ -52,33 +44,49 @@ export const useExplorerQuery = () => {
             queryKey: ['create-query'],
             exact: false,
         });
+        queryClient.removeQueries({
+            queryKey: ['calculate_total'],
+            exact: false,
+        });
+        queryClient.removeQueries({
+            queryKey: ['calculate_subtotals'],
+            exact: false,
+        });
     }, [queryClient, dispatch]);
 
     // Action: Fetch results (force refresh - bypasses auto-fetch setting)
     const fetchResults = useCallback(() => {
         resetQueryResults();
-        runQuery();
-    }, [resetQueryResults, runQuery]);
+        dispatch(explorerActions.requestQueryExecution());
+    }, [resetQueryResults, dispatch]);
 
     // Action: Get download query UUID
     const getDownloadQueryUuid = useCallback(
-        async (limit: number | null, exportPivotedResults: boolean = false) => {
+        async (
+            limit: number | null,
+            exportPivotedResults: boolean = false,
+            limitType?: Limit,
+        ) => {
             // When unpivotedResultsEnabled it means that queryResults are pivoted results
             // therefore we need to use unpivotedQueryResults if we want to download raw results
+            const useTableQuery = limitType === Limit.TABLE;
             let queryUuid =
-                unpivotedEnabled && !exportPivotedResults
+                !useTableQuery && unpivotedEnabled && !exportPivotedResults
                     ? unpivotedQueryResults.queryUuid
                     : queryResults.queryUuid;
 
-            if (limit === null || limit !== queryResults.totalResults) {
-                const shouldPivot =
-                    exportPivotedResults && !!useSqlPivotResults?.enabled;
+            if (
+                !useTableQuery &&
+                (limitType !== undefined ||
+                    limit === null ||
+                    limit !== queryResults.totalResults)
+            ) {
+                const shouldPivot = exportPivotedResults;
                 const queryArgsWithLimit: QueryResultsProps | null =
                     validQueryArgs
                         ? {
                               ...validQueryArgs,
                               csvLimit: limit,
-                              invalidateCache: minimal,
                               pivotResults: shouldPivot,
                               pivotConfiguration: shouldPivot
                                   ? validQueryArgs.pivotConfiguration
@@ -100,8 +108,6 @@ export const useExplorerQuery = () => {
             queryResults.queryUuid,
             queryResults.totalResults,
             validQueryArgs,
-            minimal,
-            useSqlPivotResults?.enabled,
         ],
     );
 

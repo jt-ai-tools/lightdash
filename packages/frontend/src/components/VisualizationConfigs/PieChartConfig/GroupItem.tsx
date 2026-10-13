@@ -2,17 +2,18 @@
 
 import { type DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import {
+    getReadableTextColor,
     type PieChartValueLabel,
     type PieChartValueOptions,
 } from '@lightdash/common';
 import {
-    ActionIcon,
     Box,
     Collapse,
     Group,
     Stack,
-    Tooltip,
     type StackProps,
+    ActionIcon,
+    Tooltip,
 } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { IconChevronDown, IconChevronUp } from '@tabler/icons-react';
@@ -39,6 +40,10 @@ type GroupItemProps = {
     valueLabel: PieChartValueLabel;
     showValue: boolean;
     showPercentage: boolean;
+    valueLabelColor?: string;
+    defaultValueLabelColor?: string;
+
+    granularityFields?: string[];
 
     onColorChange: (label: string, newColor: string) => void;
     onLabelChange: (label: string, newLabel: string) => void;
@@ -69,6 +74,10 @@ export const GroupItem = forwardRef<
             valueLabel,
             showValue,
             showPercentage,
+            valueLabelColor,
+            defaultValueLabelColor,
+
+            granularityFields,
 
             onColorChange,
             onLabelChange,
@@ -81,8 +90,8 @@ export const GroupItem = forwardRef<
         const [opened, { toggle }] = useDisclosure();
 
         return (
-            <Stack ref={ref} spacing="xs" {...rest}>
-                <Group spacing="xs">
+            <Stack ref={ref} gap="xs" {...rest}>
+                <Group gap="xs">
                     {!isOnlyItem && (
                         <GrabIcon dragHandleProps={dragHandleProps} />
                     )}
@@ -95,10 +104,11 @@ export const GroupItem = forwardRef<
                             onColorChange(defaultLabel, newColor)
                         }
                     />
-                    <Box style={{ flexGrow: 1 }}>
+                    <Box flex={1}>
                         <EditableText
                             placeholder={defaultLabel}
                             value={label}
+                            granularityFields={granularityFields}
                             onChange={(event) => {
                                 onLabelChange(
                                     defaultLabel,
@@ -108,11 +118,7 @@ export const GroupItem = forwardRef<
                         />
                     </Box>
 
-                    <Tooltip
-                        variant="xs"
-                        label="Override value label options"
-                        withinPortal
-                    >
+                    <Tooltip label="Override value label options">
                         <ActionIcon onClick={toggle}>
                             <MantineIcon
                                 icon={opened ? IconChevronUp : IconChevronDown}
@@ -121,8 +127,8 @@ export const GroupItem = forwardRef<
                     </Tooltip>
                 </Group>
 
-                <Collapse in={opened}>
-                    <Stack ml="xl" spacing="xs" pb="xs">
+                <Collapse expanded={opened}>
+                    <Stack ml="xl" gap="xs" pb="xs">
                         <ValueOptions
                             valueLabel={valueLabel}
                             onValueLabelChange={(newValue) =>
@@ -140,6 +146,19 @@ export const GroupItem = forwardRef<
                             onToggleShowPercentage={(newValue) =>
                                 onValueOptionsChange(defaultLabel, {
                                     showPercentage: newValue,
+                                })
+                            }
+                            valueLabelColor={valueLabelColor}
+                            defaultValueLabelColor={
+                                defaultValueLabelColor ??
+                                (valueLabel === 'inside' && color
+                                    ? getReadableTextColor(color)
+                                    : color)
+                            }
+                            swatches={swatches}
+                            onValueLabelColorChange={(newColor) =>
+                                onValueOptionsChange(defaultLabel, {
+                                    valueLabelColor: newColor,
                                 })
                             }
                         />

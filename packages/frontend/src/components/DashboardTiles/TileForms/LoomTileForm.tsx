@@ -10,7 +10,7 @@ interface LoomTileFormProps {
 }
 
 const LoomTileForm = ({ form, withHideTitle }: LoomTileFormProps) => (
-    <Stack spacing="md">
+    <Stack gap="md">
         <Flex
             align={form.getInputProps('title').error ? 'center' : 'flex-end'}
             gap="xs"
@@ -18,14 +18,13 @@ const LoomTileForm = ({ form, withHideTitle }: LoomTileFormProps) => (
             <TextInput
                 label="Title"
                 placeholder="Tile title"
-                style={{ flex: 1 }}
+                flex={1}
                 required
                 disabled={form.values.hideTitle}
                 {...form.getInputProps('title')}
             />
             {withHideTitle && (
                 <ActionIcon
-                    variant="subtle"
                     size="lg"
                     onClick={() => {
                         form.setFieldValue('hideTitle', !form.values.hideTitle);

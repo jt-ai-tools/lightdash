@@ -1,18 +1,24 @@
-import { ParseError } from '../types/errors';
+import { LightdashProjectConfigError, ParseError } from '../types/errors';
 import { loadLightdashProjectConfig } from './loadLightdashProjectConfig';
 import {
     configWithEmptyOptionsArray,
     emptyConfig,
+    invalidConfigCustomGranularityConflictsWithTimeFrames,
+    invalidConfigCustomGranularityNoLabel,
+    invalidConfigCustomGranularityNoSql,
     invalidConfigWithAllowCustomValuesFalse,
     invalidConfigWithIncompleteOptionsFromDimension,
     invalidConfigWithNoOptions,
     validConfigWithAllowCustomValues,
+    validConfigWithCustomGranularities,
     validConfigWithDateParameter,
     validConfigWithDateParameterFromDimension,
+    validConfigWithLabeledOptions,
     validConfigWithMixedArrayTypes,
     validConfigWithNumberArrayParameter,
     validConfigWithNumberParameter,
     validConfigWithOptionsFromDimension,
+    validConfigWithoutCustomGranularities,
     validConfigWithParameters,
     validConfigWithStringTypeExplicit,
 } from './loadLightdashProjectConfig.mock';
@@ -24,6 +30,18 @@ describe('loadLightdashProjectConfig', () => {
             spotlight: {
                 default_visibility: 'show',
             },
+        });
+    });
+
+    it('should load content_as_code sync and path', async () => {
+        const config = await loadLightdashProjectConfig(`
+content_as_code:
+  sync: true
+  path: analytics/content
+`);
+        expect(config.content_as_code).toEqual({
+            sync: true,
+            path: 'analytics/content',
         });
     });
 
@@ -220,6 +238,65 @@ describe('loadLightdashProjectConfig', () => {
                         model: 'orders',
                         dimension: 'order_date',
                     },
+                },
+            },
+        });
+    });
+
+    it('should load config with custom_granularities', async () => {
+        const config = await loadLightdashProjectConfig(
+            validConfigWithCustomGranularities,
+        );
+        expect(config.custom_granularities).toBeDefined();
+        expect(config.custom_granularities!.slt_week.label).toBe('SLT Week');
+        expect(config.custom_granularities!.slt_week.type).toBeUndefined();
+        expect(config.custom_granularities!.fiscal_quarter.type).toBe('string');
+    });
+
+    it('should reject custom_granularity without sql', async () => {
+        await expect(
+            loadLightdashProjectConfig(invalidConfigCustomGranularityNoSql),
+        ).rejects.toThrow(ParseError);
+    });
+
+    it('should reject custom_granularity without label', async () => {
+        await expect(
+            loadLightdashProjectConfig(invalidConfigCustomGranularityNoLabel),
+        ).rejects.toThrow(ParseError);
+    });
+
+    it('should reject custom_granularity that conflicts with standard TimeFrames', async () => {
+        const promise = loadLightdashProjectConfig(
+            invalidConfigCustomGranularityConflictsWithTimeFrames,
+        );
+        await expect(promise).rejects.toThrow(LightdashProjectConfigError);
+        await expect(promise).rejects.toThrow(
+            /conflict.*standard time intervals/i,
+        );
+    });
+
+    it('should load config without custom_granularities', async () => {
+        const config = await loadLightdashProjectConfig(
+            validConfigWithoutCustomGranularities,
+        );
+        expect(config.custom_granularities).toBeUndefined();
+    });
+
+    it('should load a valid config with labeled options (label+value pairs)', async () => {
+        const config = await loadLightdashProjectConfig(
+            validConfigWithLabeledOptions,
+        );
+        expect(config).toEqual({
+            spotlight: {
+                default_visibility: 'show',
+            },
+            parameters: {
+                status: {
+                    label: 'Status',
+                    options: [
+                        { label: 'Active', value: 'active_id_1' },
+                        { label: 'Inactive', value: 'inactive_id_2' },
+                    ],
                 },
             },
         });

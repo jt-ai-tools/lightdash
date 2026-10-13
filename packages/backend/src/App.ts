@@ -1,42 +1,57 @@
-// organize-imports-ignore
-// eslint-disable-next-line import/order
-import './sentry'; // Sentry has to be initialized before anything else
+import './tracing/bootstrap'; // Must run before modules that can load Knex
 import {
-    Account,
+    AI_THREAD_FILE_MAX_BYTES,
     AnyType,
     ApiError,
     getErrorMessage,
+    isExpectedError,
+    LightdashBuildHashHeader,
     LightdashError,
     LightdashMode,
     LightdashVersionHeader,
     MissingConfigError,
     OauthAuthenticationError,
-    Project,
-    ServiceAccount,
-    SessionUser,
     UnexpectedServerError,
+    UPLOAD_GSHEET_FROM_ROWS_MAX_BYTES,
 } from '@lightdash/common';
+import { MotherduckInstanceCache } from '@lightdash/warehouses';
+import { trace } from '@opentelemetry/api';
 import * as Sentry from '@sentry/node';
 import flash from 'connect-flash';
 import connectSessionKnex from 'connect-session-knex';
+import cors from 'cors';
+import { EventEmitter } from 'events';
 import express, { Express, NextFunction, Request, Response } from 'express';
 import expressSession from 'express-session';
 import expressStaticGzip from 'express-static-gzip';
 import helmet from 'helmet';
-import knex, { Knex } from 'knex';
+import { produce } from 'immer';
+import { Knex } from 'knex';
 import passport from 'passport';
 import refresh from 'passport-oauth2-refresh';
 import path from 'path';
 import qs from 'qs';
 import reDoc from 'redoc-express';
 import { URL } from 'url';
-import cors from 'cors';
-import { produce } from 'immer';
+import {
+    createAiUsageLedgerSink,
+    registerAiUsageLedger,
+    registerAiUsageTracker,
+} from './analytics/aiUsage';
+import { BufferedEventStreamWriter } from './analytics/eventStream/BufferedEventStreamWriter';
+import { createEventStreamWriter } from './analytics/eventStream/createEventStreamWriter';
+import { EventStreamSink } from './analytics/eventStream/EventStreamSink';
+import { eventStreamRegistry } from './analytics/eventStream/registry';
 import { LightdashAnalytics } from './analytics/LightdashAnalytics';
+import { getFrontendBuildHash } from './buildHash';
 import {
     ClientProviderMap,
     ClientRepository,
 } from './clients/ClientRepository';
+import { setGithubRateLimitObserver } from './clients/github/Github';
+import { SlackClient } from './clients/Slack/SlackClient';
+import { createStaticAssetsFallbackHandler } from './clients/StaticAssets/staticAssetsFallbackMiddleware';
+import { StaticAssetsS3Client } from './clients/StaticAssets/StaticAssetsS3Client';
 import { LightdashConfig } from './config/parseConfig';
 import {
     apiKeyPassportStrategy,
@@ -46,66 +61,69 @@ import {
     invalidUserErrorHandler,
     isAzureAdPassportStrategyAvailableToUse,
     isGenericOidcPassportStrategyAvailableToUse,
-    isOktaPassportStrategyAvailableToUse,
     localPassportStrategy,
     oneLoginPassportStrategy,
     OpenIDClientOktaStrategy,
 } from './controllers/authentication';
+import {
+    AGENT_CONNECTION_REQUEST_PATH,
+    parseAgentConnectionApprovalBody,
+} from './controllers/authentication/agentConnectionApproval';
+import { databricksPassportStrategy } from './controllers/authentication/strategies/databricksStrategy';
+import { slackPassportStrategy } from './controllers/authentication/strategies/slackStrategy';
+import { snowflakePassportStrategy } from './controllers/authentication/strategies/snowflakeStrategy';
+import { createDatabase } from './database/createDatabase';
+import { MigrationLeaseManager } from './database/migrationLease';
 import { errorHandler, scimErrorHandler } from './errors';
+import { buildExpressSessionOptions } from './expressSessionOptions';
 import { RegisterRoutes } from './generated/routes';
 import apiSpec from './generated/swagger.json';
 import Logger from './logging/logger';
 import {
     expressWinstonMiddleware,
     expressWinstonPreResponseMiddleware,
+    requestExecutionContextMiddleware,
 } from './logging/winston';
+import { sessionAccountMiddleware } from './middlewares/accountMiddleware';
+import { jwtAuthMiddleware } from './middlewares/jwtAuthMiddleware';
+import { createRestrictUnverifiedSessionMiddleware } from './middlewares/restrictUnverifiedSession/restrictUnverifiedSession';
+import { flush as flushFeatureFlagChecks } from './models/FeatureFlagModel/flagCheckAggregator';
 import { ModelProviderMap, ModelRepository } from './models/ModelRepository';
-import { postHogClient } from './postHog';
+import PrometheusMetrics from './prometheus/PrometheusMetrics';
 import { apiV1Router } from './routers/apiV1Router';
+import { createAppPreviewRouter } from './routers/appPreviewRouter';
+import {
+    createAndroidAssetLinksHandler,
+    createAppleAppSiteAssociationHandler,
+} from './routers/mobileAppAssociation';
 import {
     oauthAuthorizationServerHandler,
     oauthProtectedResourceHandler,
 } from './routers/oauthRouter';
+import { createProbeRouter } from './routers/probeRouter';
 import { SchedulerWorker } from './scheduler/SchedulerWorker';
+import { SchedulerWorkerHealth } from './scheduler/SchedulerWorkerHealth';
+import { createOrganizationNameResolver } from './sentry/organizationNameResolver';
+import { InstanceConfigurationService } from './services/InstanceConfigurationService/InstanceConfigurationService';
+import { createCorsOptionsDelegate } from './services/OrganizationSettingsService/CorsPolicy';
+import { ReadinessService } from './services/ReadinessService/ReadinessService';
 import {
     OperationContext,
     ServiceProviderMap,
     ServiceRepository,
 } from './services/ServiceRepository';
+import { initOtelTracing, shutdownOtelTracing } from './tracing/tracing';
+import { personaliseSharedSignInError } from './utils/sharedSignInExpiry';
 import { UtilProviderMap, UtilRepository } from './utils/UtilRepository';
 import { VERSION } from './version';
-import PrometheusMetrics from './prometheus';
-import { snowflakePassportStrategy } from './controllers/authentication/strategies/snowflakeStrategy';
-import { databricksPassportStrategy } from './controllers/authentication/strategies/databricksStrategy';
-import { jwtAuthMiddleware } from './middlewares/jwtAuthMiddleware';
-import { InstanceConfigurationService } from './services/InstanceConfigurationService/InstanceConfigurationService';
-import { slackPassportStrategy } from './controllers/authentication/strategies/slackStrategy';
-import { SlackClient } from './clients/Slack/SlackClient';
-import { sessionAccountMiddleware } from './middlewares/accountMiddleware';
 
-// We need to override this interface to have our user typing
-declare global {
-    namespace Express {
-        /**
-         * There's potentially a good case for NOT including this under the top-level of the Request,
-         * but instead under `locals` - I've yet to see a good reasoning on -why-, so for now I'm
-         * opting for the keystrokes saved through omitting `.locals`.
-         */
-        interface Request {
-            services: ServiceRepository;
-            serviceAccount?: Pick<ServiceAccount, 'organizationUuid'>;
-            // The project associated with this request
-            project?: Pick<Project, 'projectUuid'>;
-            /**
-             * @deprecated Clients should be used inside services. This will be removed soon.
-             */
-            clients: ClientRepository;
-            account?: Account;
-        }
+// Express Request/User type augmentations live in src/@types/express.d.ts
+// so they're picked up as ambient declarations regardless of which file is
+// the compilation entry point (e.g. knex seed/migrate via sucrase).
 
-        interface User extends SessionUser {}
-    }
-}
+initOtelTracing();
+
+const FEATURE_FLAG_CHECK_FLUSH_INTERVAL_MS = 15 * 60 * 1000;
 
 const schedulerWorkerFactory = (context: {
     lightdashConfig: LightdashConfig;
@@ -114,8 +132,16 @@ const schedulerWorkerFactory = (context: {
     models: ModelRepository;
     clients: ClientRepository;
     utils: UtilRepository;
+    // Optional only so the EE factory override (which reads context.workerHealth) typechecks against this shape.
+    workerHealth?: SchedulerWorkerHealth;
+    prometheusMetrics?: PrometheusMetrics;
 }) =>
     new SchedulerWorker({
+        getAgentConnectionGrantService: () =>
+            context.serviceRepository.getAgentConnectionGrantService(),
+        agentActionLogModel: context.models.getAgentActionLogModel(),
+        usageDimensionsModel: context.models.getUsageDimensionsModel(),
+        featureFlagModel: context.models.getFeatureFlagModel(),
         lightdashConfig: context.lightdashConfig,
         analytics: context.analytics,
         // SlackClient should initialize before UnfurlService and AiAgentService
@@ -123,7 +149,10 @@ const schedulerWorkerFactory = (context: {
         unfurlService: context.serviceRepository.getUnfurlService(),
         csvService: context.serviceRepository.getCsvService(),
         dashboardService: context.serviceRepository.getDashboardService(),
+        deployService: context.serviceRepository.getDeployService(),
         projectService: context.serviceRepository.getProjectService(),
+        contentAsCodeWritebackService:
+            context.serviceRepository.getContentAsCodeWritebackService(),
         schedulerService: context.serviceRepository.getSchedulerService(),
         validationService: context.serviceRepository.getValidationService(),
         userService: context.serviceRepository.getUserService(),
@@ -132,14 +161,42 @@ const schedulerWorkerFactory = (context: {
         fileStorageClient: context.clients.getFileStorageClient(),
         schedulerClient: context.clients.getSchedulerClient(),
         msTeamsClient: context.clients.getMsTeamsClient(),
+        googleChatClient: context.clients.getGoogleChatClient(),
         catalogService: context.serviceRepository.getCatalogService(),
         encryptionUtil: context.utils.getEncryptionUtil(),
         renameService: context.serviceRepository.getRenameService(),
         asyncQueryService: context.serviceRepository.getAsyncQueryService(),
-        featureFlagService: context.serviceRepository.getFeatureFlagService(),
         persistentDownloadFileService:
             context.serviceRepository.getPersistentDownloadFileService(),
+        preAggregateModel: context.models.getPreAggregateModel(),
+        preAggregateMaterializationService:
+            context.serviceRepository.getPreAggregateMaterializationService(),
+        organizationSettingsModel:
+            context.models.getOrganizationSettingsModel(),
+        emailWhitelabelService:
+            context.serviceRepository.getEmailWhitelabelService(),
+        warehouseConnectCodeModel:
+            context.models.getWarehouseConnectCodeModel(),
+        agentConnectionApprovalRequestModel:
+            context.models.getAgentConnectionApprovalRequestModel(),
+        aiUsageLedgerModel: context.models.getAiUsageLedgerModel(),
+        learnSandboxService: context.serviceRepository.getLearnSandboxService(),
+        resolveOrganizationName: createOrganizationNameResolver(
+            context.models.getOrganizationModel(),
+        ),
+        prometheusMetrics: context.prometheusMetrics,
     });
+
+/**
+ * Minimal lifecycle contract for a TCP server the App can start/stop without
+ * importing its implementation. The Postgres wire protocol server (EE-only) is
+ * supplied via `pgWireServerFactory` so the semantic-layer endpoint stays in
+ * the enterprise codebase and is only wired up under a valid license.
+ */
+export interface PgWireServerInstance {
+    listen(port: number, host?: string): Promise<void>;
+    close(): Promise<void>;
+}
 
 export type AppArguments = {
     lightdashConfig: LightdashConfig;
@@ -155,6 +212,10 @@ export type AppArguments = {
     utilProviders?: UtilProviderMap;
     schedulerWorkerFactory?: typeof schedulerWorkerFactory;
     customExpressMiddlewares?: Array<(app: Express) => void>; // Array of custom middleware functions
+    pgWireServerFactory?: (
+        serviceRepository: ServiceRepository,
+    ) => PgWireServerInstance;
+    beforeShutdown?: (serviceRepository: ServiceRepository) => Promise<void>;
 };
 
 export default class App {
@@ -170,6 +231,16 @@ export default class App {
 
     private schedulerWorker: SchedulerWorker | undefined;
 
+    private pgWireServer: PgWireServerInstance | undefined;
+
+    private readonly pgWireServerFactory:
+        | ((serviceRepository: ServiceRepository) => PgWireServerInstance)
+        | undefined;
+
+    private readonly beforeShutdown:
+        | ((serviceRepository: ServiceRepository) => Promise<void>)
+        | undefined;
+
     private readonly clients: ClientRepository;
 
     private readonly utils: UtilRepository;
@@ -182,12 +253,29 @@ export default class App {
 
     private readonly prometheusMetrics: PrometheusMetrics;
 
+    private readonly eventStreamWriter: BufferedEventStreamWriter | null;
+
     private readonly customExpressMiddlewares: Array<(app: Express) => void>;
+
+    private readonly analyticsEventEmitter: EventEmitter;
+
+    private readonly readinessService: ReadinessService;
+
+    private featureFlagCheckFlushInterval: NodeJS.Timeout | undefined;
 
     constructor(args: AppArguments) {
         this.lightdashConfig = args.lightdashConfig;
         this.port = args.port;
         this.environment = args.environment || 'production';
+        this.analyticsEventEmitter = new EventEmitter();
+        this.prometheusMetrics = new PrometheusMetrics(
+            this.lightdashConfig.prometheus,
+        );
+        this.eventStreamWriter = createEventStreamWriter(
+            this.lightdashConfig,
+            this.prometheusMetrics,
+            () => this.models.getFeatureFlagModel(),
+        );
         this.analytics = new LightdashAnalytics({
             lightdashConfig: this.lightdashConfig,
             writeKey: this.lightdashConfig.rudder.writeKey || 'notrack',
@@ -199,8 +287,16 @@ export default class App {
                     this.lightdashConfig.rudder.writeKey &&
                     this.lightdashConfig.rudder.dataPlaneUrl,
             },
+            eventEmitter: this.analyticsEventEmitter,
+            eventStreamSink: this.eventStreamWriter
+                ? new EventStreamSink(
+                      eventStreamRegistry,
+                      this.eventStreamWriter,
+                  )
+                : undefined,
         });
-        this.database = knex(
+        registerAiUsageTracker((event) => this.analytics.track(event));
+        this.database = createDatabase(
             this.environment === 'production'
                 ? args.knexConfig.production
                 : args.knexConfig.development,
@@ -215,6 +311,14 @@ export default class App {
             database: this.database,
             utils: this.utils,
         });
+        registerAiUsageLedger(createAiUsageLedgerSink(this.models));
+        this.readinessService = new ReadinessService({
+            migrationModel: this.models.getMigrationModel(),
+            migrationRunLedger: new MigrationLeaseManager({
+                database: this.database,
+            }),
+            ttlMs: this.lightdashConfig.database.readinessProbeTtlMs,
+        });
         this.clients = new ClientRepository({
             clientProviders: args.clientProviders,
             context: new OperationContext({
@@ -224,9 +328,6 @@ export default class App {
             }),
             models: this.models,
         });
-        this.prometheusMetrics = new PrometheusMetrics(
-            this.lightdashConfig.prometheus,
-        );
         this.serviceRepository = new ServiceRepository({
             serviceProviders: args.serviceProviders,
             context: new OperationContext({
@@ -238,15 +339,41 @@ export default class App {
             models: this.models,
             utils: this.utils,
             prometheusMetrics: this.prometheusMetrics,
+            readinessService: this.readinessService,
         });
         this.schedulerWorkerFactory =
             args.schedulerWorkerFactory || schedulerWorkerFactory;
         this.customExpressMiddlewares = args.customExpressMiddlewares || [];
+        this.pgWireServerFactory = args.pgWireServerFactory;
+        this.beforeShutdown = args.beforeShutdown;
     }
 
     async start() {
+        this.featureFlagCheckFlushInterval = setInterval(() => {
+            try {
+                this.analytics.trackFeatureFlagChecks(
+                    flushFeatureFlagChecks(),
+                    'api',
+                );
+            } catch {
+                // telemetry must never break the app
+            }
+        }, FEATURE_FLAG_CHECK_FLUSH_INTERVAL_MS);
+        this.featureFlagCheckFlushInterval.unref();
+
         this.prometheusMetrics.start();
+        MotherduckInstanceCache.configure(
+            this.lightdashConfig.motherduckInstanceCache,
+        );
+        MotherduckInstanceCache.setObserver((event) =>
+            this.prometheusMetrics.observeMotherduckCacheEvent(event),
+        );
+        setGithubRateLimitObserver((rl) =>
+            this.prometheusMetrics.observeGithubRateLimit(rl),
+        );
         this.prometheusMetrics.monitorDatabase(this.database);
+        this.prometheusMetrics.monitorPreAggregates(this.database);
+        this.prometheusMetrics.monitorEventMetrics(this.analyticsEventEmitter);
         // @ts-ignore
         // eslint-disable-next-line no-extend-native, func-names
         BigInt.prototype.toJSON = function () {
@@ -255,11 +382,16 @@ export default class App {
 
         const expressApp = express();
 
-        // Increase query string array limit from default (20) to 100
-        // to support endpoints that accept large arrays (e.g. chart IDs)
+        // Increase query string array limit from default (20) to 1000
+        // to support endpoints that accept large arrays (e.g. chart IDs for
+        // dashboards with many tiles). Without this, qs silently converts
+        // overflowing arrays into indexed-key objects, breaking TSOA
+        // validation for `string[]` query params.
         expressApp.set('query parser', (str: string) =>
-            qs.parse(str, { arrayLimit: 100 }),
+            qs.parse(str, { arrayLimit: 1000 }),
         );
+
+        expressApp.use('/api/v1', createProbeRouter(this.readinessService));
 
         // Slack must be initialized before our own middleware / routes, which cause the slack app to fail
         this.initSlack(expressApp).catch((e) => {
@@ -276,6 +408,24 @@ export default class App {
 
         // Load Lightdash middleware/routes last
         await this.initExpress(expressApp);
+
+        // Postgres wire protocol endpoint for the semantic layer (experimental,
+        // enterprise-only). The factory is supplied by the EE bootstrap under a
+        // valid license; without it the endpoint stays disabled.
+        const pgWirePort = this.lightdashConfig.pgWire.port;
+        if (pgWirePort && this.pgWireServerFactory) {
+            this.pgWireServer = this.pgWireServerFactory(
+                this.serviceRepository,
+            );
+            await this.pgWireServer.listen(pgWirePort);
+            Logger.info(
+                `Postgres wire protocol server listening on port ${pgWirePort}`,
+            );
+        } else if (pgWirePort) {
+            Logger.warn(
+                'PGWIRE_PORT is set but the Postgres wire protocol server is an enterprise feature; set a valid license key to enable it.',
+            );
+        }
 
         if (this.lightdashConfig.scheduler?.enabled) {
             this.initSchedulerWorker();
@@ -303,40 +453,47 @@ export default class App {
     }
 
     private async initExpress(expressApp: Express) {
+        // Short-circuit CORS preflights for data-app iframe asset fetches.
+        //
+        // The data-app preview iframe uses `sandbox="allow-scripts allow-modals"`
+        // (no `allow-same-origin`), so subresource fetches originate from the
+        // opaque origin `null`. The global `cors()` middleware below ends those
+        // preflights with 204 but, because `null` doesn't match the configured
+        // allow-list, omits `Access-Control-Allow-Origin` — which blocks the
+        // subsequent asset GET and renders the iframe (and any scheduled
+        // screenshot of it) as a blank page. The appPreviewRouter has its own
+        // permissive CORS handler for these URLs, but it never runs because
+        // `cors()` short-circuits the preflight first. Handling OPTIONS here
+        // restores the intended behaviour without widening CORS for any other
+        // route. The matching GET handler remains auth-gated by `requireToken`.
+        if (this.lightdashConfig.appRuntime.s3) {
+            expressApp.options(
+                '/api/apps/:appUuid/versions/:version/t/:token/assets/:filename',
+                (_req, res) => {
+                    res.setHeader('Access-Control-Allow-Origin', '*');
+                    res.setHeader(
+                        'Access-Control-Allow-Methods',
+                        'GET, OPTIONS',
+                    );
+                    res.setHeader('Access-Control-Allow-Headers', '*');
+                    res.setHeader('Access-Control-Max-Age', '86400');
+                    res.status(204).end();
+                },
+            );
+        }
+
         // Cross-Origin Resource Sharing policy (CORS)
         // WARNING: this middleware should be mounted before the helmet middleware
         // (ideally at the top of the middleware stack)
-        if (
-            this.lightdashConfig.security.crossOriginResourceSharingPolicy
-                .enabled &&
-            this.lightdashConfig.security.crossOriginResourceSharingPolicy
-                .allowedDomains.length > 0
-        ) {
-            const allowedOrigins: Array<string | RegExp> = [
-                this.lightdashConfig.siteUrl,
-            ];
-
-            for (const allowedDomain of this.lightdashConfig.security
-                .crossOriginResourceSharingPolicy.allowedDomains) {
-                if (
-                    allowedDomain.startsWith('/') &&
-                    allowedDomain.endsWith('/')
-                ) {
-                    allowedOrigins.push(new RegExp(allowedDomain.slice(1, -1)));
-                } else {
-                    allowedOrigins.push(allowedDomain);
-                }
-            }
-
-            expressApp.use(
-                cors({
-                    methods: 'OPTIONS, GET, HEAD, PUT, PATCH, POST, DELETE',
-                    allowedHeaders: '*',
-                    credentials: false,
-                    origin: allowedOrigins,
+        expressApp.use(
+            cors(
+                createCorsOptionsDelegate({
+                    lightdashConfig: this.lightdashConfig,
+                    organizationSettingsModel:
+                        this.models.getOrganizationSettingsModel(),
                 }),
-            );
-        }
+            ),
+        );
 
         const KnexSessionStore = connectSessionKnex(expressSession);
 
@@ -352,6 +509,50 @@ export default class App {
             middleware(expressApp),
         );
 
+        if (this.lightdashConfig.prometheus.extendedMetricsEnabled) {
+            expressApp.use(
+                this.prometheusMetrics.httpServerRequestMetricsMiddleware(),
+            );
+        }
+
+        expressApp.post(
+            [
+                AGENT_CONNECTION_REQUEST_PATH,
+                `${AGENT_CONNECTION_REQUEST_PATH}/:requestUuid/decision`,
+            ],
+            parseAgentConnectionApprovalBody,
+        );
+
+        // Raise body-parser limit for the data-apps gsheet export route only.
+        // Must run BEFORE the global parser below — `express.json()` is a no-op
+        // when `req.body` is already populated, so whichever parser sees the
+        // request first wins.
+        expressApp.use(
+            '/api/v1/gdrive/upload-gsheet-from-rows',
+            express.json({ limit: UPLOAD_GSHEET_FROM_ROWS_MAX_BYTES }),
+        );
+        // Capture the raw request body for the dbt Cloud webhook so its HMAC
+        // signature can be verified against the exact bytes that were signed.
+        expressApp.use((req, res, next) => {
+            if (req.path.endsWith('/dbt-cloud/webhook')) {
+                express.json({
+                    limit: this.lightdashConfig.maxPayloadSize,
+                    verify: (request, _res, buf) => {
+                        (request as Request).rawBody = buf;
+                    },
+                })(req, res, next);
+            } else {
+                next();
+            }
+        });
+        // Agent conversation documents arrive as a raw body of any content
+        // type. Parsing them here keeps the global JSON parser from consuming
+        // (or rejecting) `application/json` uploads, and body-parser aborts
+        // the request at the size limit instead of draining it.
+        expressApp.use(
+            '/api/v1/aiAgents/thread-files',
+            express.raw({ type: () => true, limit: AI_THREAD_FILE_MAX_BYTES }),
+        );
         expressApp.use(
             express.json({ limit: this.lightdashConfig.maxPayloadSize }),
         );
@@ -391,7 +592,6 @@ export default class App {
             'wss://*.pusher.com', // used by pylon
             'https://*.headwayapp.co',
             'https://headway-widget.net',
-            'https://*.posthog.com',
             'https://*.intercom.com',
             'https://*.intercom.io',
             'wss://*.intercom.io',
@@ -401,7 +601,6 @@ export default class App {
             'https://apis.google.com',
             'https://accounts.google.com',
             'https://vega.github.io',
-            'https://cdn.jsdelivr.net/npm/monaco-editor@0.43.0/',
             'https://*.lightdash.cloud',
             ...this.lightdashConfig.security.contentSecurityPolicy
                 .allowedDomains,
@@ -414,13 +613,9 @@ export default class App {
                         "'self'",
                         ...contentSecurityPolicyAllowedDomains,
                     ],
-                    'img-src': ["'self'", 'data:', 'https://*'],
+                    'img-src': ["'self'", 'data:', 'blob:', 'https://*'],
                     'frame-src': ["'self'", 'https://*'],
-                    'frame-ancestors': [
-                        "'self'",
-                        ...this.lightdashConfig.security.contentSecurityPolicy
-                            .frameAncestors,
-                    ],
+                    'frame-ancestors': ["'self'"] as string[],
                     'worker-src': [
                         "'self'",
                         'blob:',
@@ -473,12 +668,23 @@ export default class App {
 
         expressApp.use(helmet(helmetConfig));
 
+        // Allow MCP-related icons to be embedded cross-origin so MCP hosts
+        // (e.g. claude.ai) can display them in connector listings.
+        expressApp.use(
+            ['/logo-icon.svg', '/favicon-32x32.png', '/apple-touch-icon.png'],
+            helmet.crossOriginResourcePolicy({ policy: 'cross-origin' }),
+        );
+
+        const { frameAncestors } =
+            this.lightdashConfig.security.contentSecurityPolicy;
+        const embedFrameAncestors = [
+            "'self'",
+            ...(frameAncestors.length > 0 ? frameAncestors : ['https://*']),
+        ];
         const helmetConfigForEmbeds = produce(helmetConfig, (draft) => {
             // eslint-disable-next-line no-param-reassign
-            draft.contentSecurityPolicy.directives['frame-ancestors'] = [
-                "'self'",
-                'https://*',
-            ];
+            draft.contentSecurityPolicy.directives['frame-ancestors'] =
+                embedFrameAncestors;
         });
 
         expressApp.use('/embed/*', helmet(helmetConfigForEmbeds));
@@ -488,40 +694,63 @@ export default class App {
             next();
         });
 
+        const frontendBuildHash = getFrontendBuildHash();
+
         expressApp.use((req, res, next) => {
             // Permissions-Policy header that is not yet supported by helmet. More details here: https://github.com/helmetjs/helmet/issues/234
             res.setHeader('Permissions-Policy', 'camera=(), microphone=()');
             res.setHeader(LightdashVersionHeader, VERSION);
+            if (frontendBuildHash) {
+                res.setHeader(LightdashBuildHashHeader, frontendBuildHash);
+            }
             next();
         });
+
+        // App runtime preview routes — stateless, no session/auth.
+        // Registered before session middleware so preview requests
+        // never touch the DB for session lookups.
+        // Always registered when S3 is configured so the preview router
+        // is available regardless of whether the feature is enabled via
+        // APPS_RUNTIME_ENABLED env var or the enable-data-apps feature flag.
+        if (this.lightdashConfig.appRuntime.s3) {
+            const analyticsModel = this.models.getAnalyticsModel();
+            expressApp.use(
+                '/api/apps',
+                createAppPreviewRouter(
+                    this.lightdashConfig.appRuntime,
+                    this.lightdashConfig.lightdashSecrets,
+                    embedFrameAncestors,
+                    (p) => {
+                        void analyticsModel.addAppViewEvent(
+                            p.appUuid,
+                            p.userUuid,
+                        );
+                        this.analytics.track({
+                            event: 'data_app.view',
+                            userId: p.userUuid,
+                            properties: {
+                                organizationId: p.organizationUuid,
+                                projectId: p.projectUuid,
+                                appUuid: p.appUuid,
+                                viewContext: p.viewContext,
+                            },
+                        });
+                    },
+                ),
+            );
+        }
 
         expressApp.use(express.json());
         expressApp.use(express.urlencoded({ extended: false }));
 
         expressApp.use(
-            expressSession({
-                name:
-                    process.env.NODE_ENV === 'development' &&
-                    process.env.DEV_SCOPED_COOKIE_NAMES_ENABLED === 'true'
-                        ? `connect.sid.${this.port}`
-                        : 'connect.sid',
-                secret: this.lightdashConfig.lightdashSecret,
-                proxy: this.lightdashConfig.trustProxy,
-                rolling: true,
-                cookie: {
-                    maxAge:
-                        (this.lightdashConfig.cookiesMaxAgeHours || 24) *
-                        60 *
-                        60 *
-                        1000, // in ms
-                    secure: this.lightdashConfig.secureCookies,
-                    httpOnly: true,
-                    sameSite: this.lightdashConfig.cookieSameSite,
-                },
-                resave: false,
-                saveUninitialized: false,
-                store,
-            }),
+            expressSession(
+                buildExpressSessionOptions(
+                    this.lightdashConfig,
+                    store,
+                    this.port,
+                ),
+            ),
         );
         expressApp.use(flash());
         expressApp.use(passport.initialize());
@@ -554,6 +783,14 @@ export default class App {
         // We'll also be able to add the user to Sentry for embedded users.
         expressApp.use(jwtAuthMiddleware);
         expressApp.use(sessionAccountMiddleware);
+        expressApp.use(
+            createRestrictUnverifiedSessionMiddleware({
+                hasEmailClient: Boolean(this.lightdashConfig.smtp),
+            }),
+        );
+        // Must run after auth so req.user is populated. Stamps every downstream
+        // log line with organization_uuid + organization_name via ExecutionContext.
+        expressApp.use(requestExecutionContextMiddleware);
 
         expressApp.use((req, res, next) => {
             if (req.user) {
@@ -562,6 +799,29 @@ export default class App {
                     organization: req.user.organizationUuid,
                     email: req.user.email,
                     username: req.user.email,
+                });
+                if (req.user.organizationUuid) {
+                    Sentry.setTag(
+                        'organization.uuid',
+                        req.user.organizationUuid,
+                    );
+                }
+                if (req.user.organizationName) {
+                    Sentry.setTag(
+                        'organization.name',
+                        req.user.organizationName,
+                    );
+                }
+                // Sentry tags are error-scope only; stamp the same attribution
+                // on the request span so it's queryable in the trace backend.
+                trace.getActiveSpan()?.setAttributes({
+                    'user.uuid': req.user.userUuid,
+                    ...(req.user.organizationUuid && {
+                        'organization.uuid': req.user.organizationUuid,
+                    }),
+                    ...(req.user.organizationName && {
+                        'organization.name': req.user.organizationName,
+                    }),
                 });
             }
             next();
@@ -614,6 +874,15 @@ export default class App {
             ),
         );
 
+        expressApp.get(
+            '/assets/*',
+            createStaticAssetsFallbackHandler(
+                new StaticAssetsS3Client({
+                    lightdashConfig: this.lightdashConfig,
+                }),
+            ),
+        );
+
         // Return 404 for missing assets (don't fall through index.html)
         // This ensures chunks are not serving the index.html file.
         expressApp.use('/assets/*', (req, res) => {
@@ -639,6 +908,34 @@ export default class App {
             '/.well-known/oauth-protected-resource/api/v1/mcp',
             oauthProtectedResourceHandler,
         );
+
+        const appleAppSiteAssociationHandler =
+            createAppleAppSiteAssociationHandler(
+                this.lightdashConfig.mobileAppAssociation,
+            );
+        expressApp.get(
+            '/.well-known/apple-app-site-association',
+            appleAppSiteAssociationHandler,
+        );
+        expressApp.get(
+            '/apple-app-site-association',
+            appleAppSiteAssociationHandler,
+        );
+        expressApp.get(
+            '/.well-known/assetlinks.json',
+            createAndroidAssetLinksHandler(
+                this.lightdashConfig.mobileAppAssociation,
+            ),
+        );
+
+        // OpenAI Apps domain verification: serves the portal-issued token so
+        // OpenAI can confirm we control the domain hosting the MCP server
+        const { openaiAppsChallengeToken } = this.lightdashConfig;
+        if (openaiAppsChallengeToken) {
+            expressApp.get('/.well-known/openai-apps-challenge', (req, res) => {
+                res.type('text/plain').send(openaiAppsChallengeToken);
+            });
+        }
 
         // frontend static files - no cache
         expressApp.use(
@@ -677,20 +974,28 @@ export default class App {
         });
 
         // Start the server
-        expressApp.listen(this.port, () => {
+        const server = expressApp.listen(this.port, () => {
             if (this.environment === 'production') {
                 Logger.info(
                     `\n   |     |     |     |     |     |     |\n   |     |     |     |     |     |     |\n   |     |     |     |     |     |     |  \n \\ | / \\ | / \\ | / \\ | / \\ | / \\ | / \\ | /\n  \\|/   \\|/   \\|/   \\|/   \\|/   \\|/   \\|/\n------------------------------------------\nLaunch lightdash at http://localhost:${this.port}\n------------------------------------------\n  /|\\   /|\\   /|\\   /|\\   /|\\   /|\\   /|\\\n / | \\ / | \\ / | \\ / | \\ / | \\ / | \\ / | \\\n   |     |     |     |     |     |     |\n   |     |     |     |     |     |     |\n   |     |     |     |     |     |     |`,
                 );
             }
         });
+        server.keepAliveTimeout =
+            this.lightdashConfig.httpServer.keepAliveTimeoutMs;
 
         // Errors
         Sentry.setupExpressErrorHandler(expressApp);
         expressApp.use(scimErrorHandler); // SCIM error check before general error handler
         expressApp.use(invalidUserErrorHandler);
         expressApp.use(
-            (error: Error, req: Request, res: Response, _: NextFunction) => {
+            (rawError: Error, req: Request, res: Response, _: NextFunction) => {
+                const error = personaliseSharedSignInError(
+                    rawError,
+                    req.account?.isRegisteredUser()
+                        ? req.account.user.id
+                        : null,
+                );
                 const errorResponse = errorHandler(error);
                 if (
                     error instanceof UnexpectedServerError ||
@@ -699,28 +1004,30 @@ export default class App {
                     // This intentionally uses console vs. winston because of problems from some error/JSON payloads.
                     console.error(error);
                 }
-                Logger.error(
-                    `Handled error of type ${errorResponse.name} on [${req.method}] ${req.path}`,
-                    errorResponse,
-                );
+                if (!isExpectedError(errorResponse)) {
+                    Logger.error(
+                        `Handled error of type ${errorResponse.name} on [${req.method}] ${req.path}`,
+                        errorResponse,
+                    );
 
-                if (process.env.NODE_ENV === 'development') {
-                    Logger.error(error.stack);
+                    if (process.env.NODE_ENV === 'development') {
+                        Logger.error(error.stack);
+                    }
+
+                    this.analytics.track({
+                        event: 'api.error',
+                        userId: req.user?.userUuid,
+                        anonymousId: !req.user?.userUuid
+                            ? LightdashAnalytics.anonymousId
+                            : undefined,
+                        properties: {
+                            name: errorResponse.name,
+                            statusCode: errorResponse.statusCode,
+                            route: req.path,
+                            method: req.method,
+                        },
+                    });
                 }
-
-                this.analytics.track({
-                    event: 'api.error',
-                    userId: req.user?.userUuid,
-                    anonymousId: !req.user?.userUuid
-                        ? LightdashAnalytics.anonymousId
-                        : undefined,
-                    properties: {
-                        name: errorResponse.name,
-                        statusCode: errorResponse.statusCode,
-                        route: req.path,
-                        method: req.method,
-                    },
-                });
 
                 // Check if this is an OAuth endpoint and return OAuth2-compliant error response
                 if (error instanceof OauthAuthenticationError) {
@@ -773,9 +1080,11 @@ export default class App {
             passport.use(googlePassportStrategy);
             refresh.use(googlePassportStrategy);
         }
-        if (isOktaPassportStrategyAvailableToUse) {
-            passport.use('okta', new OpenIDClientOktaStrategy());
-        }
+        // Always register the Okta strategy: it resolves its config per
+        // request (per-org DB config by email, else instance env config), so
+        // it must be available even when no instance-level Okta env config is
+        // set.
+        passport.use('okta', new OpenIDClientOktaStrategy());
         if (oneLoginPassportStrategy) {
             passport.use('oneLogin', oneLoginPassportStrategy);
         }
@@ -789,6 +1098,7 @@ export default class App {
             passport.use('snowflake', snowflakePassportStrategy);
             refresh.use('snowflake', snowflakePassportStrategy);
         }
+
         if (databricksPassportStrategy) {
             passport.use('databricks', databricksPassportStrategy);
             refresh.use('databricks', databricksPassportStrategy);
@@ -813,12 +1123,19 @@ export default class App {
         // Before each request handler we read `sess.passport.user` from the session store
         passport.deserializeUser(
             async (
+                req: express.Request,
                 passportUser: { id: string; organization: string },
-                done,
+                done: (err: unknown, user?: Express.User | false) => void,
             ) => {
-                // Convert to a full user profile
                 try {
-                    done(null, await userService.findSessionUser(passportUser));
+                    const sessionUser = await userService.resolveSessionUser(
+                        passportUser,
+                        req.session?.impersonation,
+                        () => {
+                            delete req.session.impersonation;
+                        },
+                    );
+                    done(null, sessionUser);
                 } catch (e) {
                     done(e);
                 }
@@ -844,6 +1161,7 @@ export default class App {
             models: this.models,
             clients: this.clients,
             utils: this.utils,
+            prometheusMetrics: this.prometheusMetrics,
         });
 
         this.schedulerWorker.run().catch((e) => {
@@ -852,21 +1170,42 @@ export default class App {
     }
 
     async stop() {
-        this.prometheusMetrics.stop();
-        if (this.schedulerWorker && this.schedulerWorker.runner) {
+        try {
+            await this.beforeShutdown?.(this.serviceRepository);
+        } catch (error) {
+            Logger.error('Error running pre-shutdown hook', error);
+        }
+
+        if (this.featureFlagCheckFlushInterval) {
+            clearInterval(this.featureFlagCheckFlushInterval);
+            this.featureFlagCheckFlushInterval = undefined;
+        }
+        try {
+            this.analytics.trackFeatureFlagChecks(
+                flushFeatureFlagChecks(),
+                'api',
+            );
+            await this.analytics.flushEvents();
+        } catch {
+            // telemetry must never break shutdown
+        }
+        if (this.pgWireServer) {
+            await this.pgWireServer.close();
+            Logger.info('Stopped Postgres wire protocol server');
+        }
+        if (this.eventStreamWriter) {
+            await this.eventStreamWriter.close();
+            Logger.info('Flushed usage event stream writer');
+        }
+        await MotherduckInstanceCache.closeAll('shutdown');
+        await this.prometheusMetrics.stop();
+        await shutdownOtelTracing();
+        if (this.schedulerWorker) {
             try {
-                await this.schedulerWorker.runner.stop();
+                await this.schedulerWorker.stop();
                 Logger.info('Stopped scheduler worker');
             } catch (e) {
                 Logger.error('Error stopping scheduler worker', e);
-            }
-        }
-        if (postHogClient) {
-            try {
-                await postHogClient.shutdown();
-                Logger.info('Stopped PostHog Client');
-            } catch (e) {
-                Logger.error('Error stopping PostHog Client', e);
             }
         }
     }
@@ -885,5 +1224,9 @@ export default class App {
 
     getDatabase() {
         return this.database;
+    }
+
+    getEventStreamWriter() {
+        return this.eventStreamWriter;
     }
 }

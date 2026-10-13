@@ -1,7 +1,6 @@
 import { subject } from '@casl/ability';
 import { Group, Stack, Text, Title } from '@mantine/core';
 import { type FC } from 'react';
-
 import { Can } from '../../../providers/Ability';
 import useApp from '../../../providers/App/useApp';
 import { EventName } from '../../../types/Events';
@@ -10,18 +9,23 @@ import MantineLinkButton from '../../common/MantineLinkButton';
 interface Props {
     userName: string | undefined;
     projectUuid: string;
+    projectUrlIdentifier: string;
 }
 
-const LandingPanel: FC<Props> = ({ userName, projectUuid }) => {
+const LandingPanel: FC<Props> = ({
+    userName,
+    projectUuid,
+    projectUrlIdentifier,
+}) => {
     const { user } = useApp();
     return (
-        <Group position="apart" my="xl">
-            <Stack justify="flex-start" spacing="xs">
+        <Group justify="space-between" my="xl">
+            <Stack justify="flex-start" gap="xs">
                 <Title order={3}>
                     {`Welcome${userName ? ', ' + userName : ' to Lightdash'}!`}{' '}
                     ⚡️
                 </Title>
-                <Text color="ldGray.7">
+                <Text c="ldGray.7">
                     Run a query to ask a business question or browse your data
                     below:
                 </Text>
@@ -34,7 +38,7 @@ const LandingPanel: FC<Props> = ({ userName, projectUuid }) => {
                 })}
             >
                 <MantineLinkButton
-                    href={`/projects/${projectUuid}/tables`}
+                    href={`/projects/${projectUrlIdentifier}/tables`}
                     trackingEvent={{
                         name: EventName.LANDING_RUN_QUERY_CLICKED,
                         properties: {

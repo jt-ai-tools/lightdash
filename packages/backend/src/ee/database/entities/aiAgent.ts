@@ -1,3 +1,4 @@
+import { type AiAgentModelConfig } from '@lightdash/common';
 import { Knex } from 'knex';
 
 export const AiAgentTableName = 'ai_agent';
@@ -7,13 +8,39 @@ export type DbAiAgent = {
     organization_uuid: string;
     project_uuid: string;
     name: string;
+    slug: string;
     description: string | null;
     image_url: string | null;
+    image_url_source: 'upload' | 'url' | null;
     tags: string[] | null;
     enable_data_access: boolean;
     enable_self_improvement: boolean;
-    enable_reasoning: boolean;
+    enable_content_tools: boolean;
+    enable_user_context: boolean;
+    enable_sql_mode: boolean;
+    admin_only: boolean;
+    model_config: AiAgentModelConfig | null;
+    /**
+     * AI provider credential this agent's prompts run on. Null resolves the
+     * project pin, then the organization default. FK with ON DELETE RESTRICT.
+     */
+    ai_organization_provider_credential_uuid: string | null;
+    /**
+     * @deprecated Per-agent reasoning toggle was removed. The gating feature flag
+     * `agent-reasoning` was never enabled so this column was effectively
+     * unused. Reasoning is now controlled per-prompt via `ai_prompt.model_config.reasoning`.
+     * Column kept on the table (DB default `false`); drop in a follow-up migration.
+     */
+    enable_reasoning?: boolean;
+    /**
+     * Built-in fallback agent used when an organization has no configured
+     * agents. Hidden from normal agent listings (so it never counts as "an
+     * agent configured") but usable as a Slack fallback. At most one per
+     * (organization, project).
+     */
+    is_system: boolean;
     version: number;
+    thread_retention_hours: number | null;
     created_at: Date;
     updated_at: Date;
 };
@@ -143,4 +170,161 @@ export type AiAgentSpaceAccessTable = Knex.CompositeTableType<
             'ai_agent_uuid' | 'space_uuid' | 'created_at'
         >
     >
+>;
+
+export const AiMcpServerTableName = 'ai_mcp_server';
+
+export type DbAiMcpServer = {
+    ai_mcp_server_uuid: string;
+    project_uuid: string;
+    name: string;
+    url: string;
+    icon_url: string | null;
+    auth_type: 'none' | 'bearer' | 'oauth';
+    allow_oauth_credential_sharing: boolean;
+    connection_status:
+        | 'not_connected'
+        | 'connecting'
+        | 'connected'
+        | 'error'
+        | null;
+    error: string | null;
+    created_at: Date;
+    updated_at: Date;
+};
+
+export type AiMcpServerTable = Knex.CompositeTableType<
+    DbAiMcpServer,
+    Omit<DbAiMcpServer, 'ai_mcp_server_uuid' | 'created_at' | 'updated_at'>,
+    Partial<
+        Omit<DbAiMcpServer, 'ai_mcp_server_uuid' | 'created_at' | 'updated_at'>
+    > & {
+        updated_at: Knex.Raw;
+    }
+>;
+
+export const AiMcpServerCredentialTableName = 'ai_mcp_server_credential';
+
+export type DbAiMcpServerCredential = {
+    ai_mcp_server_credential_uuid: string;
+    ai_mcp_server_uuid: string;
+    credential_scope: 'shared' | 'user';
+    user_uuid: string | null;
+    encrypted_credentials: Buffer;
+    created_by_user_uuid: string | null;
+    updated_by_user_uuid: string | null;
+    created_at: Date;
+    updated_at: Date;
+};
+
+export type AiMcpServerCredentialTable = Knex.CompositeTableType<
+    DbAiMcpServerCredential,
+    Omit<
+        DbAiMcpServerCredential,
+        'ai_mcp_server_credential_uuid' | 'created_at' | 'updated_at'
+    >,
+    Partial<
+        Omit<
+            DbAiMcpServerCredential,
+            'ai_mcp_server_credential_uuid' | 'created_at' | 'updated_at'
+        >
+    > & {
+        updated_at: Knex.Raw;
+    }
+>;
+
+export const AiAgentMcpServerTableName = 'ai_agent_mcp_server';
+
+export type DbAiAgentMcpServer = {
+    ai_agent_uuid: string;
+    ai_mcp_server_uuid: string;
+    created_at: Date;
+};
+
+export type AiAgentMcpServerTable = Knex.CompositeTableType<
+    DbAiAgentMcpServer,
+    Omit<DbAiAgentMcpServer, 'created_at'>,
+    Partial<
+        Omit<
+            DbAiAgentMcpServer,
+            'ai_agent_uuid' | 'ai_mcp_server_uuid' | 'created_at'
+        >
+    >
+>;
+
+export const AiMcpServerToolTableName = 'ai_mcp_server_tool';
+
+export type DbAiMcpServerTool = {
+    ai_mcp_server_tool_uuid: string;
+    ai_mcp_server_uuid: string;
+    tool_name: string;
+    title: string | null;
+    description: string | null;
+    input_schema: unknown;
+    annotations: unknown | null;
+    meta: unknown | null;
+    created_at: Date;
+    updated_at: Date;
+};
+
+export type AiMcpServerToolTable = Knex.CompositeTableType<
+    DbAiMcpServerTool,
+    Omit<
+        DbAiMcpServerTool,
+        'ai_mcp_server_tool_uuid' | 'created_at' | 'updated_at'
+    >,
+    Partial<
+        Omit<
+            DbAiMcpServerTool,
+            'ai_mcp_server_tool_uuid' | 'created_at' | 'updated_at'
+        >
+    > & {
+        updated_at: Knex.Raw;
+    }
+>;
+
+export const AiAgentMcpServerToolTableName = 'ai_agent_mcp_server_tool';
+
+export const AiAgentMcpServerToolPermissionModes = [
+    'always_allow',
+    'ask',
+    'always_deny',
+] as const;
+
+export type DbAiAgentMcpServerToolPermissionMode =
+    (typeof AiAgentMcpServerToolPermissionModes)[number];
+
+export const AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_ALLOW: DbAiAgentMcpServerToolPermissionMode =
+    'always_allow';
+export const AI_AGENT_MCP_SERVER_TOOL_PERMISSION_MODE_ALWAYS_DENY: DbAiAgentMcpServerToolPermissionMode =
+    'always_deny';
+
+export type DbAiAgentMcpServerTool = {
+    ai_agent_uuid: string;
+    ai_mcp_server_uuid: string;
+    ai_mcp_server_tool_uuid: string;
+    /**
+     * @deprecated Kept for rolling deploy safety. New code should use
+     * `permission_mode` instead.
+     */
+    enabled?: boolean;
+    permission_mode: DbAiAgentMcpServerToolPermissionMode;
+    created_at: Date;
+    updated_at: Date;
+};
+
+export type AiAgentMcpServerToolTable = Knex.CompositeTableType<
+    DbAiAgentMcpServerTool,
+    Omit<DbAiAgentMcpServerTool, 'created_at' | 'updated_at'>,
+    Partial<
+        Omit<
+            DbAiAgentMcpServerTool,
+            | 'ai_agent_uuid'
+            | 'ai_mcp_server_uuid'
+            | 'ai_mcp_server_tool_uuid'
+            | 'created_at'
+        >
+    > & {
+        updated_at: Knex.Raw;
+    }
 >;

@@ -146,6 +146,77 @@ export const dashboardFilters: DashboardFilters = {
     tableCalculations: [],
 };
 
+export const dashboardFiltersWithMetrics: DashboardFilters = {
+    dimensions: [
+        {
+            id: '4',
+            label: undefined,
+            target: {
+                fieldId: 'a_dim1',
+                tableName: 'test',
+            },
+            operator: FilterOperator.EQUALS,
+            values: ['1', '2', '3'],
+        },
+    ],
+    metrics: [
+        {
+            id: 'm1',
+            label: undefined,
+            target: {
+                fieldId: 'a_metric1',
+                tableName: 'test',
+            },
+            operator: FilterOperator.GREATER_THAN,
+            values: [100],
+        },
+    ],
+    tableCalculations: [],
+};
+
+export const metricQueryWithExistingMetricFilters: MetricQuery = {
+    exploreName: 'test',
+    limit: 501,
+    dimensions: ['a_dim1'],
+    metrics: ['a_metric1'],
+    sorts: [],
+    tableCalculations: [],
+    filters: {
+        dimensions: {
+            id: 'root',
+            and: [
+                {
+                    id: '1',
+                    target: {
+                        fieldId: 'a_dim1',
+                    },
+                    operator: FilterOperator.EQUALS,
+                    values: [0],
+                },
+            ],
+        },
+        metrics: {
+            id: 'metric-root',
+            and: [
+                {
+                    id: 'existing-metric-filter',
+                    target: {
+                        fieldId: 'a_metric1',
+                    },
+                    operator: FilterOperator.LESS_THAN,
+                    values: [1000],
+                },
+            ],
+        },
+    },
+};
+
+export const emptyDashboardFilters: DashboardFilters = {
+    dimensions: [],
+    metrics: [],
+    tableCalculations: [],
+};
+
 export const expectedChartWithOverrideDashboardFilters: MetricQuery = {
     exploreName: 'test',
     dimensions: ['a_dim1'],
@@ -373,6 +444,21 @@ export const mockExplore: Explore = {
             metrics: {},
             lineageGraph: {},
             dimensions: {
+                // Interval base dimensions have isIntervalBase set and no
+                // timeIntervalBaseDimensionName (see convertDimension in translator.ts)
+                order_date: {
+                    name: 'order_date',
+                    label: 'Order Date',
+                    table: 'orders',
+                    tableLabel: 'Orders',
+                    compiledSql: 'order_date',
+                    tablesReferences: [],
+                    sql: 'order_date',
+                    hidden: false,
+                    fieldType: FieldType.DIMENSION,
+                    type: DimensionType.DATE,
+                    isIntervalBase: true,
+                },
                 order_date_year: {
                     name: 'order_date_year',
                     label: 'Order Date Year',

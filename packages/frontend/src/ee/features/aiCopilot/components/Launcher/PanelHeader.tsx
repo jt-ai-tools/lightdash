@@ -1,0 +1,238 @@
+import { type AiAgentSummary } from '@lightdash/common';
+import {
+    ActionIcon,
+    Avatar,
+    Group,
+    Menu,
+    Text,
+    UnstyledButton,
+} from '@mantine/core';
+import {
+    IconCheck,
+    IconChevronDown,
+    IconWindowMaximize,
+    IconMinus,
+} from '@tabler/icons-react';
+import { type FC } from 'react';
+import { useNavigate } from 'react-router';
+import { LightdashUserAvatar } from '../../../../../components/Avatar';
+import MantineIcon from '../../../../../components/common/MantineIcon';
+import { useAiRouterConfig } from '../../hooks/useAiRouter';
+import { closePanel, openPanel } from '../../store/aiAgentLauncherSlice';
+import {
+    useAiAgentStoreDispatch,
+    useAiAgentStoreSelector,
+} from '../../store/hooks';
+import styles from './AiAgentsLauncher.module.css';
+import {
+    getConcreteLauncherAgent,
+    isLauncherAutoAgent,
+    LAUNCHER_AUTO_AGENT,
+} from './launcherAgentSelection';
+import { launcherSession } from './launcherSession';
+import { buildNewThreadUrl } from './newThreadUrl';
+
+type Props = {
+    projectUuid: string;
+    agent: AiAgentSummary | typeof LAUNCHER_AUTO_AGENT | null;
+    agents: AiAgentSummary[];
+    title: string;
+    threadId: string | null;
+    showAgentSwitcher?: boolean;
+    showAgentIdentity?: boolean;
+};
+
+export const PanelHeader: FC<Props> = ({
+    projectUuid,
+    agent,
+    agents,
+    title,
+    threadId,
+    showAgentSwitcher = true,
+    showAgentIdentity = true,
+}) => {
+    const dispatch = useAiAgentStoreDispatch();
+    const navigate = useNavigate();
+    const pendingContext = useAiAgentStoreSelector(
+        (state) => state.aiAgentLauncher.pendingContext,
+    );
+    const { data: aiRouterConfig } = useAiRouterConfig();
+    const isAuto = isLauncherAutoAgent(agent);
+    const showAutoOption =
+        agents.length > 1 && aiRouterConfig?.enabled === true;
+    const selectedAgentUuid = getConcreteLauncherAgent(agent)?.uuid ?? null;
+
+    const canSwitchAgent =
+        showAgentSwitcher &&
+        threadId === null &&
+        (agents.length > 1 || showAutoOption);
+
+    const handleClose = () => dispatch(closePanel());
+    const handleSwitchAgent = (nextAgentUuid: string) => {
+        dispatch(
+            openPanel({
+                threadId: null,
+                agentUuid: nextAgentUuid,
+                pendingContext,
+            }),
+        );
+    };
+    const handleExpand = () => {
+        if (!agent) return;
+        launcherSession.markExpandedFromBubble();
+        let target;
+        if (threadId) {
+            if (isAuto) return;
+            target = `/projects/${projectUuid}/ai-agents/${agent.uuid}/threads/${threadId}`;
+        } else {
+            target = buildNewThreadUrl({ projectUuid, agent, pendingContext });
+        }
+        dispatch(closePanel());
+        void navigate(target);
+    };
+
+    return (
+        <div className={styles.panelHeader}>
+            <Group gap="xs" wrap="nowrap" className={styles.flexFillNoMin}>
+                {canSwitchAgent ? (
+                    <Menu position="bottom-start" withinPortal={false}>
+                        <Menu.Target>
+                            <UnstyledButton aria-label="Switch agent">
+                                <Group gap="xs" wrap="nowrap">
+                                    {isAuto ? (
+                                        <Avatar
+                                            size="sm"
+                                            color="ldGray"
+                                            radius="xl"
+                                        >
+                                            <Text
+                                                size="10px"
+                                                fw={600}
+                                                c="dimmed"
+                                            >
+                                                AI
+                                            </Text>
+                                        </Avatar>
+                                    ) : (
+                                        <LightdashUserAvatar
+                                            size="sm"
+                                            name={agent?.name ?? 'AI'}
+                                            src={agent?.imageUrl}
+                                        />
+                                    )}
+                                    <Text
+                                        size="sm"
+                                        fw={500}
+                                        className={styles.panelHeaderTitle}
+                                    >
+                                        {title}
+                                    </Text>
+                                    <MantineIcon
+                                        icon={IconChevronDown}
+                                        color="dimmed"
+                                        size={14}
+                                    />
+                                </Group>
+                            </UnstyledButton>
+                        </Menu.Target>
+                        <Menu.Dropdown>
+                            {showAutoOption && (
+                                <Menu.Item
+                                    leftSection={
+                                        <Avatar
+                                            size="xs"
+                                            color="ldGray"
+                                            radius="xl"
+                                        >
+                                            <Text
+                                                size="9px"
+                                                fw={600}
+                                                c="dimmed"
+                                            >
+                                                AI
+                                            </Text>
+                                        </Avatar>
+                                    }
+                                    rightSection={
+                                        isAuto ? (
+                                            <MantineIcon icon={IconCheck} />
+                                        ) : null
+                                    }
+                                    onClick={() =>
+                                        handleSwitchAgent(LAUNCHER_AUTO_AGENT)
+                                    }
+                                >
+                                    Auto
+                                </Menu.Item>
+                            )}
+                            {agents.map((a) => (
+                                <Menu.Item
+                                    key={a.uuid}
+                                    leftSection={
+                                        <LightdashUserAvatar
+                                            size="xs"
+                                            name={a.name}
+                                            src={a.imageUrl}
+                                        />
+                                    }
+                                    rightSection={
+                                        a.uuid === selectedAgentUuid ? (
+                                            <MantineIcon icon={IconCheck} />
+                                        ) : null
+                                    }
+                                    onClick={() => handleSwitchAgent(a.uuid)}
+                                >
+                                    {a.name}
+                                </Menu.Item>
+                            ))}
+                        </Menu.Dropdown>
+                    </Menu>
+                ) : showAgentIdentity ? (
+                    <Group gap="xs" wrap="nowrap" className={styles.minWidth0}>
+                        {isAuto ? (
+                            <Avatar size="sm" color="ldGray" radius="xl">
+                                <Text size="10px" fw={600} c="dimmed">
+                                    AI
+                                </Text>
+                            </Avatar>
+                        ) : (
+                            <LightdashUserAvatar
+                                size="sm"
+                                name={agent?.name ?? 'AI'}
+                                src={agent?.imageUrl}
+                            />
+                        )}
+                        <Text
+                            size="sm"
+                            fw={500}
+                            className={styles.panelHeaderTitle}
+                        >
+                            {title}
+                        </Text>
+                    </Group>
+                ) : null}
+            </Group>
+            <Group gap="xs" wrap="nowrap">
+                <ActionIcon
+                    size="sm"
+                    onClick={handleExpand}
+                    disabled={!agent}
+                    aria-label="Open in fullscreen"
+                >
+                    <MantineIcon
+                        icon={IconWindowMaximize}
+                        size={16}
+                        style={{ transform: 'scaleX(-1)' }}
+                    />
+                </ActionIcon>
+                <ActionIcon
+                    size="sm"
+                    onClick={handleClose}
+                    aria-label="Close panel"
+                >
+                    <MantineIcon icon={IconMinus} size={16} />
+                </ActionIcon>
+            </Group>
+        </div>
+    );
+};

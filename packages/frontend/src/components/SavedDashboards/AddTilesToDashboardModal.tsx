@@ -1,6 +1,6 @@
 import {
-    DashboardTileTypes,
     assertUnreachable,
+    DashboardTileTypes,
     getDefaultChartTileSize,
     type DashboardTile,
 } from '@lightdash/common';
@@ -10,9 +10,9 @@ import {
     Group,
     Select,
     Stack,
-    TextInput,
     Textarea,
-} from '@mantine-8/core';
+    TextInput,
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
 import {
     IconArrowLeft,
@@ -36,6 +36,7 @@ import {
 } from '../../hooks/useSpaces';
 import MantineIcon from '../common/MantineIcon';
 import MantineModal from '../common/MantineModal';
+import classes from './AddTilesToDashboardModal.module.css';
 
 interface AddTilesToDashboardModalProps {
     isOpen: boolean;
@@ -58,7 +59,8 @@ const AddTilesToDashboardModal: FC<AddTilesToDashboardModalProps> = ({
     const [isLoading, setIsLoading] = useState(false);
 
     const exploreChartQuery = useSavedQuery({
-        id: uuid,
+        uuidOrSlug: uuid,
+        projectUuid,
         useQueryOptions: {
             enabled: dashboardTileType === DashboardTileTypes.SAVED_CHART,
         },
@@ -122,6 +124,7 @@ const AddTilesToDashboardModal: FC<AddTilesToDashboardModalProps> = ({
             case DashboardTileTypes.LOOM:
             case DashboardTileTypes.MARKDOWN:
             case DashboardTileTypes.HEADING:
+            case DashboardTileTypes.DATA_APP:
                 throw new Error(
                     `not implemented for chart tile type: ${dashboardTileType}`,
                 );
@@ -183,7 +186,7 @@ const AddTilesToDashboardModal: FC<AddTilesToDashboardModalProps> = ({
             return acc;
         }, {});
 
-        // Convert to Mantine 8 grouped format
+        // Convert to Mantine grouped format
         return Object.entries(groupedBySpace).map(([group, items]) => ({
             group,
             items,
@@ -204,13 +207,17 @@ const AddTilesToDashboardModal: FC<AddTilesToDashboardModalProps> = ({
         data: selectedDashboard,
         isFetching: isFetchingSelectedDashboard,
         isError: isSelectedDashboardError,
-    } = useDashboardQuery(form.getInputProps('dashboardUuid').value);
+    } = useDashboardQuery({
+        uuidOrSlug: form.getInputProps('dashboardUuid').value,
+        projectUuid,
+    });
     const { mutateAsync: createDashboard } = useCreateMutation(
         projectUuid,
         true,
     );
     const { mutateAsync: updateDashboard } = useUpdateDashboard(
         form.getInputProps('dashboardUuid').value,
+        projectUuid,
         true,
     );
     const { mutateAsync: createSpace } = useSpaceCreateMutation(projectUuid);
@@ -230,7 +237,7 @@ const AddTilesToDashboardModal: FC<AddTilesToDashboardModalProps> = ({
                 if (isCreatingNewSpace) {
                     const newSpace = await createSpace({
                         name: spaceName,
-                        isPrivate: false,
+                        inheritParentPermissions: true,
                         access: [],
                     });
                     spaceUuid = newSpace.uuid;
@@ -361,7 +368,7 @@ const AddTilesToDashboardModal: FC<AddTilesToDashboardModalProps> = ({
                             placeholder="A few words to give your team some context"
                             autosize
                             maxRows={3}
-                            style={{ overflowY: 'auto' }}
+                            className={classes.descriptionInput}
                             {...form.getInputProps('dashboardDescription')}
                         />
                         {!isLoadingSpaces && !showNewSpaceInput ? (

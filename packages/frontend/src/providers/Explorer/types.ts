@@ -5,6 +5,7 @@ import {
     type CartesianChartConfig,
     type ChartConfig,
     type ChartType,
+    type DataAppVizChartConfig,
     type CreateSavedChartVersion,
     type CustomDimension,
     type CustomFormat,
@@ -21,7 +22,9 @@ import {
     type MetricType,
     type ParameterDefinitions,
     type PieChartConfig,
+    type PreAggregateCheckResult,
     type ReplaceCustomFields,
+    type SankeyChartConfig,
     type SavedChart,
     type TableCalculation,
     type TableCalculationMetadata,
@@ -73,7 +76,7 @@ export enum ActionType {
 
 export type ChartConfigCache<T = AnyType> = {
     chartConfig: T;
-    pivotConfig?: { columns: string[] };
+    pivotConfig?: SavedChart['pivotConfig'];
 };
 
 /**
@@ -103,6 +106,8 @@ export type ConfigCacheMap = {
     [ChartType.GAUGE]: ChartConfigCache<GaugeChartConfig['config']>;
     [ChartType.MAP]: MapChartConfigCache;
     [ChartType.CUSTOM]: ChartConfigCache<CustomVisConfig['config']>;
+    [ChartType.SANKEY]: ChartConfigCache<SankeyChartConfig['config']>;
+    [ChartType.DATA_APP_VIZ]: ChartConfigCache<DataAppVizChartConfig['config']>;
 };
 
 export type Action =
@@ -230,6 +235,43 @@ export type Action =
           payload: string[] | null;
       };
 
+export type PreAggregateCheck =
+    | {
+          status: 'unavailable';
+          reason: 'feature_disabled' | 'no_configured_pre_aggregates';
+      }
+    | {
+          status: 'idle';
+      }
+    | {
+          status: 'loading';
+      }
+    | {
+          status: 'error';
+          message: string;
+      }
+    | {
+          status: 'ready';
+          result: PreAggregateCheckResult;
+      };
+
+export type ChartSidebarStep = 'choose' | 'configure';
+
+export type ChartTypeAuthoringState = {
+    /** The chart type being revised; null while a new one is authored. */
+    dataAppVizUuid: string | null;
+    /** The older version the builder previews; null follows the current one. */
+    viewedVersion: number | null;
+    /** The type was created by this session, so cancelling may discard it. */
+    createdInSession: boolean;
+    /** What the chart and the sidebar showed before, restored on cancel. */
+    previous: {
+        chartSidebarStep: ChartSidebarStep;
+        chartConfig: CreateSavedChartVersion['chartConfig'];
+        pivotConfig: CreateSavedChartVersion['pivotConfig'];
+    };
+};
+
 export interface ExplorerReduceState {
     expandedSections: ExplorerSection[];
     metadata?: {
@@ -237,6 +279,10 @@ export interface ExplorerReduceState {
         tableCalculations?: TableCalculationMetadata[];
     };
     isVisualizationConfigOpen?: boolean;
+    /** Which step the chart gallery sidebar shows when it is open. */
+    chartSidebarStep: ChartSidebarStep;
+    /** A chart type being authored in place of the chart; null otherwise. */
+    chartTypeAuthoring: ChartTypeAuthoringState | null;
     isMinimal?: boolean;
     isEditMode?: boolean;
     unsavedChartVersion: CreateSavedChartVersion;
@@ -258,8 +304,11 @@ export interface ExplorerReduceState {
         additionalMetric: {
             isOpen: boolean;
             isEditing?: boolean;
-            item?: Dimension | AdditionalMetric | CustomDimension;
+            item?: Dimension | AdditionalMetric | CustomDimension | Metric;
             type?: MetricType;
+            label?: string;
+            /** Merge source that owns this custom metric. */
+            mergeSourceId?: string;
         };
         customDimension: {
             isOpen: boolean;
@@ -277,6 +326,12 @@ export interface ExplorerReduceState {
             label?: string;
             description?: string;
             fieldItem?: Item | AdditionalMetric;
+            tableMetadata?: {
+                name: string;
+                dbtPackageName?: string;
+                ymlPath?: string;
+                sqlPath?: string;
+            };
         };
         periodOverPeriodComparison: {
             isOpen: boolean;
@@ -297,4 +352,11 @@ export interface ExplorerReduceState {
     fromDashboard?: string;
     isExploreFromHere?: boolean;
     savedChart?: SavedChart;
+    unsavedColorPaletteUuid: string | null;
+
+    // Pre-aggregate check state — computed once in useExplorerQueryEffects
+    preAggregate: {
+        usePreAggregateCache: boolean;
+        check: PreAggregateCheck;
+    };
 }

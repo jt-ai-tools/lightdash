@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call */
 // This rule is failing in CI but passes locally
-import { Ability, AbilityBuilder } from '@casl/ability';
+import { Ability, AbilityBuilder, subject } from '@casl/ability';
 import {
     Account,
     AccountOrganization,
@@ -8,19 +8,30 @@ import {
     AnonymousAccount,
     ApiKeyAccount,
     applyEmbeddedAbility,
+    applyEmbedScopeAbilities,
+    assertRegisteredAccount,
     buildAccountHelpers,
     CreateEmbedJwt,
     EmbedContent,
+    FilterInteractivityValues,
     ForbiddenError,
+    isDashboardContent,
+    isJwtUser,
     MemberAbility,
     OauthAccount,
+    OAuthAgentConnectionGrant,
     Organization,
     OssEmbed,
+    RegisteredAccount,
     ServiceAcctAccount,
     SessionAccount,
     SessionUser,
     UserAccessControls,
 } from '@lightdash/common';
+import {
+    createOAuthScopedAbility,
+    OAuthScopePolicy,
+} from '../oauthScopes/scopedAbility';
 
 /**
  * Creates an ID for the external user. We prefix the ID to prevent hijacking a real user ID.
@@ -79,18 +90,71 @@ export const fromJwt = ({
     source,
     userAttributes,
     content,
+    embedWriteUser,
+    embedWriteContext,
 }: {
     decodedToken: CreateEmbedJwt;
     embed: OssEmbed;
     source: string;
     userAttributes: UserAccessControls;
     content: EmbedContent;
+    embedWriteUser?: SessionUser;
+    embedWriteContext?: AnonymousAccount['embedWriteContext'];
 }): AnonymousAccount => {
+    if (
+        isDashboardContent(decodedToken.content) &&
+        decodedToken.writeActions?.permissionsMode === 'roles' &&
+        !embedWriteUser
+    ) {
+        throw new ForbiddenError(
+            'Role-based dashboard permissions require a resolved write actor',
+        );
+    }
     const builder = new AbilityBuilder<MemberAbility>(Ability);
     const externalId = getExternalId(decodedToken, source, embed.organization);
+    applyEmbedScopeAbilities({
+        embedUser: decodedToken,
+        embed,
+        embedWriteUserAbility: embedWriteUser?.ability,
+        builder,
+    });
 
     applyEmbeddedAbility(decodedToken, content, embed, externalId, builder);
     const abilities = builder.build();
+    let filtering = isDashboardContent(decodedToken.content)
+        ? decodedToken.content.dashboardFiltersInteractivity
+        : undefined;
+    let parameters = isDashboardContent(decodedToken.content)
+        ? decodedToken.content.parameterInteractivity
+        : undefined;
+    if (
+        isDashboardContent(decodedToken.content) &&
+        decodedToken.writeActions?.permissionsMode === 'roles'
+    ) {
+        const target = {
+            organizationUuid: embed.organization.organizationUuid,
+            projectUuid: embed.projectUuid,
+        };
+        filtering = {
+            ...filtering,
+            enabled: abilities.can(
+                'view',
+                subject('EmbedDashboardFilters', { ...target }),
+            )
+                ? FilterInteractivityValues.all
+                : false,
+            canAddFilters: abilities.can(
+                'view',
+                subject('EmbedDashboardFilterAddition', { ...target }),
+            ),
+        };
+        parameters = {
+            enabled: abilities.can(
+                'view',
+                subject('EmbedDashboardParameters', { ...target }),
+            ),
+        };
+    }
 
     return createAccount({
         authentication: {
@@ -102,10 +166,12 @@ export const fromJwt = ({
         embed,
         access: {
             content,
-            filtering: decodedToken.content.dashboardFiltersInteractivity,
-            parameters: decodedToken.content.parameterInteractivity,
+            filtering,
+            parameters,
             controls: userAttributes,
         },
+        embedWriteUser,
+        embedWriteContext,
         // Create the fields we're able to set from the JWT
         user: {
             id: externalId,
@@ -118,19 +184,24 @@ export const fromJwt = ({
     });
 };
 
-// TODO: This uses the hacky method of copying over an admin user. Long-term, we'll want to have a proper
-// service-account/principle-user unrelated to a real admin-user.
-// @see https://github.com/lightdash/lightdash/issues/15466
 export const fromServiceAccount = (
     sessionUser: SessionUser,
     source: string,
 ): ServiceAcctAccount => {
+    if (!sessionUser.serviceAccount) {
+        throw new ForbiddenError(
+            'SessionUser is missing serviceAccount context; the service-account auth middleware must run first.',
+        );
+    }
     const [organization, user] = extractOrganizationFromUser(sessionUser);
 
     return createAccount({
         authentication: {
             type: 'service-account',
             source,
+            serviceAccountUuid: sessionUser.serviceAccount.uuid,
+            serviceAccountDescription:
+                sessionUser.serviceAccount.description ?? '',
         },
         organization,
         user: {
@@ -159,6 +230,107 @@ export const fromApiKey = (
             id: user.userUuid,
         },
     });
+};
+
+export const toSessionUser = (account: RegisteredAccount): SessionUser => ({
+    ...account.user,
+    organizationUuid: account.organization.organizationUuid,
+    organizationName: account.organization.name,
+    organizationCreatedAt: account.organization.createdAt,
+    requestContext: account.requestContext,
+    serviceAccount:
+        account.authentication.type === 'service-account'
+            ? {
+                  uuid: account.authentication.serviceAccountUuid,
+                  description: account.authentication.serviceAccountDescription,
+              }
+            : undefined,
+});
+
+export type AccountWriteContext = {
+    user: SessionUser;
+    embedWriteActions?: {
+        spaceUuid: string;
+    };
+};
+
+export const getAccountWriteContext = (
+    account: Account,
+): AccountWriteContext => {
+    if (!isJwtUser(account)) {
+        assertRegisteredAccount(account);
+        return { user: toSessionUser(account) };
+    }
+
+    if (account.authentication.data.content?.type === 'apiAccess') {
+        throw new ForbiddenError(
+            'API access embeds cannot perform write actions',
+        );
+    }
+
+    const { embedWriteUser } = account;
+    const { spaceUuid } = account.authentication.data.writeActions ?? {};
+
+    if (!embedWriteUser || !spaceUuid) {
+        throw new ForbiddenError('Embed token does not allow write actions');
+    }
+
+    return {
+        user: embedWriteUser,
+        embedWriteActions: {
+            spaceUuid,
+        },
+    };
+};
+
+/** Spaces whose charts the embed write actor's own permissions authorize: the write space plus any source spaces. */
+export const getEmbedActorChartSpaceUuids = (account: Account): string[] => {
+    if (!isJwtUser(account) || !account.embedWriteUser) return [];
+    const { writeActions, content } = account.authentication.data;
+    // apiAccess tokens may omit the write space.
+    if (!writeActions?.spaceUuid) return [];
+    const sourceSpaceUuids =
+        content?.type === 'dashboard'
+            ? (writeActions.sourceSpaceUuids ?? [])
+            : [];
+    return [writeActions.spaceUuid, ...sourceSpaceUuids];
+};
+
+/** Tokens that opt in with sourceSpaceUuids may only list content from the actor chart spaces. */
+export const getEmbedContentListingSpaceUuids = (
+    account: Account,
+): string[] | undefined => {
+    if (
+        !isJwtUser(account) ||
+        account.authentication.data.content?.type !== 'dashboard' ||
+        account.authentication.data.writeActions?.sourceSpaceUuids === undefined
+    ) {
+        return undefined;
+    }
+    return getEmbedActorChartSpaceUuids(account);
+};
+
+export const getAccountApiAccessContext = (
+    account: Account,
+): Pick<AccountWriteContext, 'user'> => {
+    if (!isJwtUser(account)) {
+        assertRegisteredAccount(account);
+        return { user: toSessionUser(account) };
+    }
+
+    if (
+        account.authentication.data.content.type !== 'apiAccess' &&
+        account.authentication.data.writeActions?.serviceAccountUserUuid ===
+            undefined
+    ) {
+        throw new ForbiddenError('Embed token does not allow API access');
+    }
+
+    if (!account.embedWriteUser) {
+        throw new ForbiddenError('Embed token does not allow API access');
+    }
+
+    return { user: account.embedWriteUser };
 };
 
 export const fromSession = (
@@ -191,8 +363,18 @@ export const fromOauth = (
         scope?: string[];
         client: { id: string };
     },
+    scopePolicy: OAuthScopePolicy | null = null,
+    agentConnectionGrant: OAuthAgentConnectionGrant | null = null,
 ): OauthAccount => {
     const [organization, user] = extractOrganizationFromUser(sessionUser);
+    const ability =
+        scopePolicy === null
+            ? user.ability
+            : createOAuthScopedAbility(user.ability, {
+                  ...scopePolicy,
+                  clientId: token.client.id,
+                  scopes: token.scope ?? [],
+              });
     return createAccount({
         authentication: {
             type: 'oauth',
@@ -200,10 +382,14 @@ export const fromOauth = (
             token: token.accessToken,
             clientId: token.client.id,
             scopes: token.scope || [],
+            agentConnectionGrant,
         },
         organization,
         user: {
             ...user,
+            ability,
+            abilityRules:
+                scopePolicy === null ? user.abilityRules : ability.rules,
             type: 'registered',
             id: user.userUuid,
         },

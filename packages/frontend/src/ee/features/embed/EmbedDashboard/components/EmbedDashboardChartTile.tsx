@@ -1,10 +1,11 @@
 import { mergeExisting, QueryExecutionContext } from '@lightdash/common';
-import { Box } from '@mantine-8/core';
+import { Box } from '@mantine/core';
 import { produce } from 'immer';
 import { useMemo, type ComponentProps, type FC } from 'react';
 import type DashboardChartTile from '../../../../../components/DashboardTiles/DashboardChartTile';
 import { GenericDashboardChartTile } from '../../../../../components/DashboardTiles/DashboardChartTile';
 import TileBase from '../../../../../components/DashboardTiles/TileBase';
+import UnmetRequirementsPlaceholder from '../../../../../components/DashboardTiles/UnmetRequirementsPlaceholder';
 import { useDashboardChartReadyQuery } from '../../../../../hooks/dashboard/useDashboardChartReadyQuery';
 import { useInfiniteQueryResults } from '../../../../../hooks/useQueryResults';
 import useEmbed from '../../../../providers/Embed/useEmbed';
@@ -12,6 +13,8 @@ import useEmbed from '../../../../providers/Embed/useEmbed';
 type Props = ComponentProps<typeof DashboardChartTile> & {
     projectUuid: string;
     dashboardSlug: string;
+    paletteColors?: string[];
+    paletteDarkColors?: string[] | null;
     locked: boolean;
     tileIndex: number;
 };
@@ -19,6 +22,8 @@ type Props = ComponentProps<typeof DashboardChartTile> & {
 const EmbedDashboardChartTile: FC<Props> = ({
     projectUuid,
     dashboardSlug,
+    paletteColors,
+    paletteDarkColors,
     locked,
     canExportCsv,
     canExportImages,
@@ -101,7 +106,9 @@ const EmbedDashboardChartTile: FC<Props> = ({
                     title={''}
                     tile={translatedTile}
                     {...rest}
-                />
+                >
+                    <UnmetRequirementsPlaceholder />
+                </TileBase>
             </Box>
         );
     }
@@ -119,6 +126,8 @@ const EmbedDashboardChartTile: FC<Props> = ({
             dashboardChartReadyQuery={dashboardChartReadyQuery}
             error={error}
             onExplore={onExplore}
+            colorPaletteOverride={paletteColors}
+            darkColorPaletteOverride={paletteDarkColors}
         />
     );
 };

@@ -1,5 +1,5 @@
-import { Anchor } from '@mantine-8/core';
-import { IconAlertTriangleFilled } from '@tabler/icons-react';
+import { Anchor } from '@mantine/core';
+import { IconAlertTriangle } from '@tabler/icons-react';
 import { type FC } from 'react';
 import { Link } from 'react-router';
 import {
@@ -12,31 +12,33 @@ import { getOmnibarItemColor, getOmnibarItemIcon } from './utils';
 
 type Props = {
     item: SearchItem;
+    boxSize?: number;
 };
 
-export const OmnibarItemIcon: FC<Props> = ({ item }) => {
+export const OmnibarItemIcon: FC<Props> = ({ item, boxSize }) => {
     return (
         <IconBox
             color={getOmnibarItemColor(item.type)}
             icon={getOmnibarItemIcon(item)}
+            boxSize={boxSize}
+            size={boxSize !== undefined && boxSize < 32 ? 'md' : 'lg'}
         />
     );
 };
 
-type OmnibarItemIconWithIndicatorProps = {
-    item: SearchItem;
+type OmnibarItemIconWithIndicatorProps = Props & {
     projectUuid: string;
     canUserManageValidation: boolean;
 };
 
 export const OmnibarItemIconWithIndicator: FC<
     OmnibarItemIconWithIndicatorProps
-> = ({ item, projectUuid, canUserManageValidation }) =>
+> = ({ item, boxSize, projectUuid, canUserManageValidation }) =>
     item.item && 'validationErrors' in item.item ? (
         <ResourceIndicator
             iconProps={{
                 color: 'red',
-                icon: IconAlertTriangleFilled,
+                icon: IconAlertTriangle,
             }}
             tooltipProps={{
                 maw: 300,
@@ -58,9 +60,10 @@ export const OmnibarItemIconWithIndicator: FC<
                             }
                             to={{
                                 pathname: `/generalSettings/projectManagement/${projectUuid}/validator`,
-                                search: `?validationId=${item.item.validationErrors[0].validationId}`,
+                                search: `?validationUuid=${item.item.validationErrors[0].validationUuid}`,
                             }}
-                            color="blue.4"
+                            c="blue.4"
+                            fz="xs"
                         >
                             here
                         </Anchor>
@@ -73,6 +76,6 @@ export const OmnibarItemIconWithIndicator: FC<
                 )
             }
         >
-            <OmnibarItemIcon item={item} />
+            <OmnibarItemIcon item={item} boxSize={boxSize} />
         </ResourceIndicator>
     ) : null;

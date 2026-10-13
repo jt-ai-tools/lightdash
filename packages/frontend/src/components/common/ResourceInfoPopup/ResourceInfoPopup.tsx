@@ -1,84 +1,299 @@
-import { Group, HoverCard, Stack, Text, Tooltip } from '@mantine-8/core';
-import { IconEye, IconInfoCircle } from '@tabler/icons-react';
+import {
+    isAppVersionInProgress,
+    type AppVersionStatus,
+} from '@lightdash/common';
+import {
+    Anchor,
+    Box,
+    CopyButton,
+    Divider,
+    Group,
+    HoverCard,
+    Stack,
+    Text,
+    Tooltip,
+    UnstyledButton,
+    ActionIcon,
+    Popover,
+    useMatches,
+} from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
+import {
+    IconCheck,
+    IconClock,
+    IconCopy,
+    IconEye,
+    IconFolder,
+    IconHash,
+    IconHistory,
+    IconInfoCircle,
+} from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import { type FC } from 'react';
+import { Link } from 'react-router';
+import { useOptionalProjectRoute } from '../../../hooks/useProjectRoute';
+import { useTimeAgo } from '../../../hooks/useTimeAgo';
 import MantineIcon from '../MantineIcon';
+import InfoRow from '../PageHeader/InfoRow';
+import ViewsCountPopover from '../ViewsCountPopover';
 import { DashboardList } from './DashboardList';
 import styles from './ResourceInfoPopup.module.css';
 
-type Props = {
-    resourceUuid: string;
-    withChartData?: boolean;
-    description?: string;
-    projectUuid: string;
-    viewStats?: number;
-    firstViewedAt?: Date | string | null;
+const versionStatusLabel = (status: AppVersionStatus): string => {
+    if (status === 'error') return 'error';
+    if (status === 'ready') return 'ready';
+    if (isAppVersionInProgress(status)) return 'building';
+    return status;
 };
 
-export const ResourceInfoPopup: FC<Props> = ({
-    resourceUuid,
+export type ResourceInfoPopupProps = {
+    resourceUuid: string;
+    withChartData?: boolean;
+    title?: string;
+    description?: string;
+    slug?: string;
+    updatedAt?: Date | string | null;
+    spaceName?: string;
+    spaceUuid?: string | null;
+    projectUuid: string;
+    viewStats?: number;
+    viewStatsResourceType?: 'chart' | 'dashboard';
+    firstViewedAt?: Date | string | null;
+    latestVersion?: { number: number; status: AppVersionStatus } | null;
+};
+
+const hasResourceInfoContent = ({
+    title,
     description,
+    slug,
+    withChartData = false,
+    updatedAt,
+    viewStats,
+    spaceName,
+    spaceUuid,
+    latestVersion,
+}: ResourceInfoPopupProps) =>
+    !!title ||
+    !!description ||
+    !!slug ||
+    !!withChartData ||
+    !!updatedAt ||
+    viewStats !== undefined ||
+    !!(spaceName && spaceUuid) ||
+    !!latestVersion;
+
+export const ResourceInfoPopupContent: FC<ResourceInfoPopupProps> = ({
+    resourceUuid,
+    title,
+    description,
+    slug,
+    updatedAt,
+    spaceName,
+    spaceUuid,
     projectUuid,
     viewStats,
+    viewStatsResourceType,
     firstViewedAt,
     withChartData = false,
+    latestVersion,
 }) => {
+    const projectRoute = useOptionalProjectRoute();
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ?? projectUuid;
+    const timeAgo = useTimeAgo(updatedAt ?? new Date());
     const label =
         firstViewedAt && viewStats
             ? `${viewStats} views since ${dayjs(firstViewedAt).format(
                   'MMM D, YYYY h:mm A',
               )}`
             : undefined;
-
-    if (!viewStats && !description && !withChartData) return null;
+    const hasMetadataRows =
+        !!updatedAt ||
+        viewStats !== undefined ||
+        !!(spaceName && spaceUuid) ||
+        !!latestVersion;
+    const shouldShowDivider =
+        !!slug && (hasMetadataRows || !!description || withChartData);
+    if (
+        !hasResourceInfoContent({
+            resourceUuid,
+            title,
+            description,
+            slug,
+            updatedAt,
+            spaceName,
+            spaceUuid,
+            projectUuid,
+            viewStats,
+            firstViewedAt,
+            withChartData,
+            latestVersion,
+        })
+    )
+        return null;
 
     return (
-        <HoverCard offset={-1} position="bottom" shadow="md" withinPortal>
-            <HoverCard.Target>
-                <MantineIcon icon={IconInfoCircle} color="ldGray.6" />
-            </HoverCard.Target>
-            <HoverCard.Dropdown maw={300}>
-                <Stack gap="xs">
-                    {viewStats && viewStats > 0 ? (
-                        <Stack gap="two">
-                            <Text fz="xs" fw={600} c="ldGray.6">
-                                Views:
-                            </Text>
-                            <Tooltip
-                                position="top-start"
-                                label={label}
-                                disabled={!viewStats || !firstViewedAt}
-                            >
-                                <Group gap="two">
-                                    <MantineIcon size={12} icon={IconEye} />
-                                    <Text fz="xs">{viewStats || '0'}</Text>
-                                </Group>
-                            </Tooltip>
-                        </Stack>
-                    ) : null}
-
-                    {description && (
-                        <Stack gap="two">
-                            <Text fz="xs" fw={600} c="ldGray.6">
-                                Description:{' '}
-                            </Text>
-                            <Text fz="xs" className={styles.preLineText}>
-                                {description}
-                            </Text>
-                        </Stack>
+        <Stack gap="sm">
+            {(title || description) && (
+                <Box>
+                    {title && (
+                        <Text fz="sm" fw={600} mb={4}>
+                            {title}
+                        </Text>
                     )}
+                    {description && (
+                        <Text fz="xs" c="dimmed" className={styles.preLineText}>
+                            {description}
+                        </Text>
+                    )}
+                </Box>
+            )}
 
-                    <>
-                        {withChartData && (
-                            <>
-                                <DashboardList
-                                    resourceItemId={resourceUuid}
-                                    projectUuid={projectUuid}
-                                />
-                            </>
-                        )}
-                    </>
-                </Stack>
+            <Stack gap={10}>
+                {updatedAt && (
+                    <InfoRow icon={IconClock} label="Last modified">
+                        {timeAgo}
+                    </InfoRow>
+                )}
+
+                {viewStats !== undefined ? (
+                    <InfoRow icon={IconEye} label="Views">
+                        <ViewsCountPopover
+                            resourceType={viewStatsResourceType}
+                            resourceUuid={resourceUuid}
+                            projectUuid={projectUuid}
+                            views={viewStats}
+                            fallbackTooltip={label}
+                        >
+                            {viewStats.toLocaleString()}
+                        </ViewsCountPopover>
+                    </InfoRow>
+                ) : null}
+
+                {spaceName && spaceUuid && (
+                    <InfoRow icon={IconFolder} label="Space">
+                        <Anchor
+                            component={Link}
+                            to={`/projects/${projectUrlIdentifier}/spaces/${spaceUuid}`}
+                            fz="xs"
+                            fw={500}
+                        >
+                            {spaceName}
+                        </Anchor>
+                    </InfoRow>
+                )}
+
+                {latestVersion && (
+                    <Group gap={6} wrap="nowrap">
+                        <MantineIcon
+                            icon={IconHistory}
+                            color="dimmed"
+                            size={14}
+                        />
+                        <Text fz="xs" c="dimmed" fw={600}>
+                            Version {latestVersion.number} (
+                            {versionStatusLabel(latestVersion.status)})
+                        </Text>
+                    </Group>
+                )}
+
+                {withChartData && (
+                    <DashboardList
+                        resourceItemId={resourceUuid}
+                        projectUuid={projectUuid}
+                    />
+                )}
+
+                {shouldShowDivider && <Divider mb={4} />}
+
+                {slug && (
+                    <InfoRow icon={IconHash} label="Slug">
+                        <CopyButton value={slug}>
+                            {({ copied, copy }) => (
+                                <Tooltip
+                                    position="top-start"
+                                    label={copied ? 'Copied slug' : 'Copy slug'}
+                                >
+                                    <UnstyledButton onClick={copy}>
+                                        <Group gap={6} wrap="nowrap">
+                                            <Text
+                                                fz="xs"
+                                                fw={500}
+                                                ff="monospace"
+                                            >
+                                                {slug}
+                                            </Text>
+                                            <MantineIcon
+                                                icon={
+                                                    copied
+                                                        ? IconCheck
+                                                        : IconCopy
+                                                }
+                                                color="dimmed"
+                                                size="sm"
+                                            />
+                                        </Group>
+                                    </UnstyledButton>
+                                </Tooltip>
+                            )}
+                        </CopyButton>
+                    </InfoRow>
+                )}
+            </Stack>
+        </Stack>
+    );
+};
+
+export const ResourceInfoPopup: FC<ResourceInfoPopupProps> = (props) => {
+    const compact = useMatches(
+        { base: true, sm: false },
+        { getInitialValueInEffect: false },
+    );
+    const [opened, { toggle, close }] = useDisclosure(false);
+    if (!hasResourceInfoContent(props)) return null;
+
+    if (compact)
+        return (
+            <Popover
+                opened={opened}
+                onClose={close}
+                width="min(320px, calc(100vw - 24px))"
+                position="bottom"
+                withArrow
+            >
+                <Popover.Target>
+                    <ActionIcon
+                        variant="subtle"
+                        color="gray"
+                        size="lg"
+                        aria-label="Content details"
+                        aria-expanded={opened}
+                        onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            toggle();
+                        }}
+                    >
+                        <MantineIcon icon={IconInfoCircle} />
+                    </ActionIcon>
+                </Popover.Target>
+                <Popover.Dropdown>
+                    <ResourceInfoPopupContent {...props} />
+                </Popover.Dropdown>
+            </Popover>
+        );
+
+    return (
+        <HoverCard offset={-1} position="bottom">
+            <HoverCard.Target>
+                <MantineIcon icon={IconInfoCircle} color="dimmed" />
+            </HoverCard.Target>
+            <HoverCard.Dropdown
+                w={320}
+                p="md"
+                className={styles.resourceInfoOverlay}
+            >
+                <ResourceInfoPopupContent {...props} />
             </HoverCard.Dropdown>
         </HoverCard>
     );

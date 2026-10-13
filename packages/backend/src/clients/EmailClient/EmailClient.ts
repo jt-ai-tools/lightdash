@@ -1,17 +1,24 @@
 import {
     AdminNotificationPayload,
     AdminNotificationType,
+    assertUnreachable,
     CreateProjectMember,
+    EmailSenderIdentity,
     getErrorMessage,
     InviteLink,
+    InviteLinkPurpose,
+    MissingConfigError,
     PasswordResetLink,
     ProjectMemberRole,
     sanitizeHtml,
     SchedulerFormat,
     SessionUser,
     SmptError,
+    type DeliveryNotice,
     type PartialFailure,
 } from '@lightdash/common';
+import fs from 'fs';
+import Handlebars from 'handlebars';
 import { marked } from 'marked';
 import * as nodemailer from 'nodemailer';
 import Mail from 'nodemailer/lib/mailer';
@@ -22,13 +29,60 @@ import SMTPPool from 'nodemailer/lib/smtp-pool';
 import path from 'path';
 import { LightdashConfig } from '../../config/parseConfig';
 import Logger from '../../logging/logger';
+import {
+    buildFailureCountPhrase,
+    toEmailFailureFields,
+} from '../../utils/partialFailureUtils';
+import {
+    buildPlainTextEmailBody,
+    type PlainTextEmailMode,
+} from './plainTextEmailBody';
 
 const RETRYABLE_ERROR_CODES = ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND'];
+const MILLISECONDS_PER_HOUR = 60 * 60 * 1000;
+
+const getInviteExpirationLabel = (expiresAt: Date): string => {
+    const hours = Math.max(
+        1,
+        Math.ceil((expiresAt.getTime() - Date.now()) / MILLISECONDS_PER_HOUR),
+    );
+    if (hours % 24 === 0) {
+        const days = hours / 24;
+        return `${days} ${days === 1 ? 'day' : 'days'}`;
+    }
+    return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+};
+
+/**
+ * Appends `?ref=<id>` (or `&ref=`) to the URL so support can paste the
+ * correlation ID into Cloud Logging and land on the failing job directly,
+ * instead of triangulating from project UUID + approximate timestamp.
+ */
+function appendCorrelationRef(url: string, correlationId?: string): string {
+    if (!correlationId) return url;
+    const separator = url.includes('?') ? '&' : '?';
+    return `${url}${separator}ref=${encodeURIComponent(correlationId)}`;
+}
 
 function isNodemailerSmtpError(
     error: unknown,
 ): error is SMTPConnection.SMTPError {
     return error instanceof Error;
+}
+
+function isRetryableSmtpError(error: unknown): boolean {
+    return (
+        isNodemailerSmtpError(error) &&
+        ((error.code &&
+            // Check if the error code is in the list of retryable error codes
+            RETRYABLE_ERROR_CODES.includes(error.code)) ||
+            // Check if the error message contains any of the retryable error codes
+            RETRYABLE_ERROR_CODES.some((code) =>
+                error.message.includes(code),
+            ) ||
+            // It can be either `Connection timeout` or `Timeout`
+            error.message.toLowerCase().includes('timeout'))
+    );
 }
 
 // Timeout configurations based on Nodemailer defaults, adjusted for scheduler compatibility
@@ -41,6 +95,8 @@ export const SMTP_CONNECTION_CONFIG = {
 export type AttachmentUrl = {
     path: string;
     filename: string;
+    /** Clean label shown to recipients (app deliveries); filename stays the download name. */
+    chartName?: string;
     localPath: string;
     truncated: boolean;
 };
@@ -149,25 +205,87 @@ export default class EmailClient {
             }
         });
 
-        // Dynamic import for ESM-only package
-        const { default: hbs } = await import('nodemailer-express-handlebars');
-        this.transporter.use(
-            'compile',
-            hbs({
-                viewEngine: {
-                    partialsDir: path.join(__dirname, './templates/'),
-                    defaultLayout: undefined,
-                    extname: '.html',
-                },
-                viewPath: path.join(__dirname, './templates/'),
-                extName: '.html',
-            }),
-        );
+        // Register partials from templates directory (files starting with _)
+        const templatesDir = path.join(__dirname, './templates/');
+        const partialFiles = fs
+            .readdirSync(templatesDir)
+            .filter((f) => f.startsWith('_') && f.endsWith('.html'));
+        partialFiles.forEach((file) => {
+            const partialName = file.replace('.html', '');
+            const partialContent = fs.readFileSync(
+                path.join(templatesDir, file),
+                'utf-8',
+            );
+            Handlebars.registerPartial(partialName, partialContent);
+        });
+
+        // Custom nodemailer plugin for Handlebars template compilation
+        this.transporter.use('compile', (mail, callback) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const mailData = mail.data as any;
+            if (mailData.template) {
+                try {
+                    const templatePath = path.join(
+                        templatesDir,
+                        `${mailData.template}.html`,
+                    );
+                    const source = fs.readFileSync(templatePath, 'utf-8');
+                    const compiled = Handlebars.compile(source);
+                    mailData.html = compiled(mailData.context || {});
+                    callback();
+                } catch (err) {
+                    callback(err as Error);
+                }
+            } else {
+                callback();
+            }
+        });
     }
 
-    private async sendEmail(
-        options: Mail.Options & EmailTemplate,
-    ): Promise<void> {
+    private static readonly STATIC_CID_IMAGES = [
+        {
+            filename: 'lightdash-logo.png',
+            cid: 'lightdash-logo',
+            contextKey: 'logoSrc',
+            hostPath: '/lightdash-logo.png',
+        },
+        {
+            filename: 'twitter.png',
+            cid: 'twitter-logo',
+            contextKey: 'twitterSrc',
+            hostPath: '/twitter.png',
+        },
+        {
+            filename: 'github.png',
+            cid: 'github-logo',
+            contextKey: 'githubSrc',
+            hostPath: '/github.png',
+        },
+        {
+            filename: 'linkedin.png',
+            cid: 'linkedin-logo',
+            contextKey: 'linkedinSrc',
+            hostPath: '/linkedin.png',
+        },
+    ] as const;
+
+    /**
+     * Translates a resolved per-organization sender identity (email
+     * whitelabelling) into nodemailer `from` / `replyTo` overrides. A null
+     * identity — or a null `from` within it — leaves the instance default From
+     * untouched.
+     */
+    private static senderMailFields(
+        sender?: EmailSenderIdentity | null,
+    ): Pick<Mail.Options, 'from' | 'replyTo'> {
+        if (!sender) return {};
+        return {
+            ...(sender.from ? { from: sender.from } : {}),
+            ...(sender.replyTo ? { replyTo: sender.replyTo } : {}),
+        };
+    }
+
+    private async deliverMail(emailOptions: Mail.Options): Promise<void> {
         if (this.initPromise) {
             await this.initPromise;
         }
@@ -178,22 +296,12 @@ export default class EmailClient {
             /* eslint-disable no-await-in-loop */
             for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
                 try {
-                    const info = await this.transporter.sendMail(options);
+                    const info = await this.transporter.sendMail(emailOptions);
                     Logger.debug(`Email sent: ${info.messageId}`);
                     return; // Success, exit retry loop
                 } catch (error) {
                     const isLastAttempt = attempt === maxRetries;
-                    const isRetryableError =
-                        isNodemailerSmtpError(error) &&
-                        ((error.code &&
-                            // Check if the error code is in the list of retryable error codes
-                            RETRYABLE_ERROR_CODES.includes(error.code)) ||
-                            // Check if the error message contains any of the retryable error codes
-                            RETRYABLE_ERROR_CODES.some((code) =>
-                                error.message.includes(code),
-                            ) ||
-                            // It can be either `Connection timeout` or `Timeout`
-                            error.message.toLowerCase().includes('timeout'));
+                    const isRetryableError = isRetryableSmtpError(error);
 
                     if (isLastAttempt || !isRetryableError) {
                         const isFileError =
@@ -243,6 +351,55 @@ export default class EmailClient {
         }
     }
 
+    private async sendEmail(
+        options: Mail.Options & EmailTemplate,
+    ): Promise<void> {
+        const useCid = this.lightdashConfig.smtp?.inlineImageCid === true;
+        const host = this.lightdashConfig.siteUrl;
+
+        const imageSources: Record<string, string> = {};
+        for (const img of EmailClient.STATIC_CID_IMAGES) {
+            imageSources[img.contextKey] = useCid
+                ? `cid:${img.cid}`
+                : `${host}${img.hostPath}`;
+        }
+
+        const emailOptions: Mail.Options & EmailTemplate = {
+            ...options,
+            context: { ...options.context, ...imageSources },
+            attachments: [
+                ...(Array.isArray(options.attachments)
+                    ? options.attachments
+                    : []),
+                ...(useCid
+                    ? EmailClient.STATIC_CID_IMAGES.map((img) => ({
+                          filename: img.filename,
+                          path: path.join(
+                              __dirname,
+                              `./templates/${img.filename}`,
+                          ),
+                          cid: img.cid,
+                          contentDisposition: 'inline' as const,
+                      }))
+                    : []),
+            ],
+        };
+
+        return this.deliverMail(emailOptions);
+    }
+
+    /**
+     * Sends a text-only email. No template is attached, so the compile plugin
+     * leaves `html` unset and nodemailer emits a single text/plain part
+     * (multipart/mixed once files are attached) — recipients never fall back to
+     * an HTML alternative. The branding images are skipped for the same reason.
+     */
+    private async sendPlainTextEmail(
+        options: Mail.Options & { text: string },
+    ): Promise<void> {
+        return this.deliverMail(options);
+    }
+
     public canSendEmail() {
         return !!this.transporter;
     }
@@ -287,6 +444,7 @@ export default class EmailClient {
         schedulerUrl: string,
         errorMessage?: string,
         disabledSync: boolean = true,
+        correlationId?: string,
     ) {
         // Sync failure but not disabled - will be retried
         if (!this.canSendEmail()) {
@@ -301,6 +459,8 @@ export default class EmailClient {
             throw new Error('Email transporter not configured');
         }
 
+        const urlWithRef = appendCorrelationRef(schedulerUrl, correlationId);
+
         // Sync has been disabled
         if (disabledSync) {
             return this.sendEmail({
@@ -311,14 +471,15 @@ export default class EmailClient {
                     host: this.lightdashConfig.siteUrl,
                     subject: 'Google Sheets Sync disabled',
                     description: `There's an error with your Google Sheets "${schedulerName}" sync. We've disabled it to prevent further errors.`,
-                    schedulerUrl,
+                    schedulerUrl: urlWithRef,
                 },
                 text: `Your Google Sheets ${schedulerName} sync has been disabled due to an error`,
             });
         }
 
+        const safeName = sanitizeHtml(schedulerName);
         const message = `
-            <p>Your Google Sheets sync <strong>"${schedulerName}"</strong> failed.</p>
+            <p>Your Google Sheets sync <strong>"${safeName}"</strong> failed.</p>
             <br />
             <br />
             <br />
@@ -329,7 +490,7 @@ export default class EmailClient {
                       )}</p><br /><br />`
                     : ''
             }
-            <p>Please check your <a href="${schedulerUrl}">Google Sheets sync settings</a> and verify your Google Sheets connection and permissions.</p>
+            <p>Please check your <a href="${urlWithRef}">Google Sheets sync settings</a> and verify your Google Sheets connection and permissions.</p>
         `;
 
         return this.sendEmail({
@@ -343,7 +504,7 @@ export default class EmailClient {
             },
             text: `Warning: Your Google Sheets sync "${schedulerName}" failed. ${
                 errorMessage ? `Error: ${errorMessage}.` : ''
-            } Please check your settings at ${schedulerUrl}`,
+            } Please check your settings at ${urlWithRef}`,
         });
     }
 
@@ -352,6 +513,7 @@ export default class EmailClient {
         schedulerName: string,
         schedulerUrl: string,
         errorMessage: string,
+        correlationId?: string,
     ) {
         if (!this.canSendEmail()) {
             Logger.error(
@@ -364,15 +526,18 @@ export default class EmailClient {
             throw new Error('Email transporter not configured');
         }
 
+        const urlWithRef = appendCorrelationRef(schedulerUrl, correlationId);
+
+        const safeName = sanitizeHtml(schedulerName);
         const message = `
-            <p>Your scheduled delivery <strong>"${schedulerName}"</strong> failed to send.</p>
+            <p>Your scheduled delivery <strong>"${safeName}"</strong> failed to send.</p>
             <br />
             <br />
             <br />
             <p><strong>Error:</strong> ${sanitizeHtml(errorMessage)}</p>
             <br />
             <br />
-            <p>Please check your <a href="${schedulerUrl}">scheduled delivery settings</a> and try again.</p>
+            <p>Please check your <a href="${urlWithRef}">scheduled delivery settings</a> and try again.</p>
         `;
 
         return this.sendEmail({
@@ -384,7 +549,44 @@ export default class EmailClient {
                 title: 'Scheduled delivery failure',
                 message,
             },
-            text: `Warning: Your scheduled delivery "${schedulerName}" failed to send. Error: ${errorMessage}. Please check your settings at ${schedulerUrl}`,
+            text: `Warning: Your scheduled delivery "${schedulerName}" failed to send. Error: ${errorMessage}. Please check your settings at ${urlWithRef}`,
+        });
+    }
+
+    public async sendDeliveryFailureNotificationToRecipient(
+        recipient: string,
+        contentName: string | null,
+        contactSentence: string | null,
+    ) {
+        if (!this.canSendEmail()) {
+            throw new MissingConfigError('Email transporter not configured');
+        }
+
+        const baseSentenceHtml = contentName
+            ? `The scheduled delivery for <strong>"${sanitizeHtml(
+                  contentName,
+              )}"</strong> failed to run, and the delivery owner has been notified.`
+            : 'A scheduled delivery failed to run, and the delivery owner has been notified.';
+        const baseSentenceText = contentName
+            ? `The scheduled delivery for "${contentName}" failed to run, and the delivery owner has been notified.`
+            : 'A scheduled delivery failed to run, and the delivery owner has been notified.';
+        const appendedHtml = contactSentence
+            ? ` ${sanitizeHtml(contactSentence)}`
+            : '';
+        const appendedText = contactSentence ? ` ${contactSentence}` : '';
+
+        return this.sendEmail({
+            to: recipient,
+            subject: contentName
+                ? `Scheduled delivery failed - "${contentName}"`
+                : 'Scheduled delivery failed',
+            template: 'genericNotification',
+            context: {
+                host: this.lightdashConfig.siteUrl,
+                title: 'Scheduled delivery failure',
+                message: `<p>${baseSentenceHtml}${appendedHtml}</p>`,
+            },
+            text: `${baseSentenceText}${appendedText}`,
         });
     }
 
@@ -392,7 +594,7 @@ export default class EmailClient {
         recipient: string,
         schedulerName: string,
         schedulerUrl: string,
-        deliveryType: 'slack' | 'email' | 'msteams',
+        deliveryType: 'slack' | 'email' | 'msteams' | 'googlechat',
         failedTargets: { target: string; error?: string }[],
         totalTargets: number,
     ) {
@@ -422,8 +624,9 @@ export default class EmailClient {
             )
             .join('');
 
+        const safeName = sanitizeHtml(schedulerName);
         const message = `
-            <p>Your scheduled delivery <strong>"${schedulerName}"</strong> failed to deliver to ${failedCount} of ${totalTargets} ${deliveryTypeLabel} target${
+            <p>Your scheduled delivery <strong>"${safeName}"</strong> failed to deliver to ${failedCount} of ${totalTargets} ${deliveryTypeLabel} target${
                 totalTargets > 1 ? 's' : ''
             }.</p>
             <br />
@@ -456,21 +659,51 @@ export default class EmailClient {
     public async sendInviteEmail(
         userThatInvited: Pick<
             SessionUser,
-            'firstName' | 'lastName' | 'organizationName'
+            'firstName' | 'lastName' | 'email' | 'organizationName'
         >,
         invite: InviteLink,
     ) {
-        return this.sendEmail({
-            to: invite.email,
-            subject: `You've been invited to join Lightdash`,
-            template: 'invitation',
-            context: {
-                orgName: userThatInvited.organizationName,
-                inviteUrl: `${invite.inviteUrl}?from=email`,
-                host: this.lightdashConfig.siteUrl,
-            },
-            text: `Your teammates at ${userThatInvited.organizationName} are using Lightdash to discover and share data insights. Click on the link below within the next 72 hours to join your team and start exploring your data! ${invite.inviteUrl}?from=email`,
-        });
+        const inviteUrl = `${invite.inviteUrl}?from=email`;
+        const expirationLabel = getInviteExpirationLabel(invite.expiresAt);
+        switch (invite.purpose) {
+            case InviteLinkPurpose.Member:
+                return this.sendEmail({
+                    to: invite.email,
+                    subject: `You've been invited to join Lightdash`,
+                    template: 'invitation',
+                    context: {
+                        orgName: userThatInvited.organizationName,
+                        inviteUrl,
+                        host: this.lightdashConfig.siteUrl,
+                        expirationLabel,
+                    },
+                    text: `Your teammates at ${userThatInvited.organizationName} are using Lightdash to discover and share data insights. Click on the link below within the next ${expirationLabel} to join your team and start exploring your data! ${inviteUrl}`,
+                });
+            case InviteLinkPurpose.Setup: {
+                const inviterName =
+                    `${userThatInvited.firstName} ${userThatInvited.lastName}`.trim() ||
+                    userThatInvited.email ||
+                    'A teammate';
+                return this.sendEmail({
+                    to: invite.email,
+                    subject: `${inviterName} needs your help setting up Lightdash for ${userThatInvited.organizationName}`,
+                    template: 'setupInvitation',
+                    context: {
+                        inviterName,
+                        orgName: userThatInvited.organizationName,
+                        inviteUrl,
+                        host: this.lightdashConfig.siteUrl,
+                        expirationLabel,
+                    },
+                    text: `${inviterName} is setting up Lightdash for ${userThatInvited.organizationName} and needs someone with data-warehouse access to connect their data. Lightdash is the Agentic BI platform for modern data teams — build and manage analytics straight from the tools you already use, with AI handling the busywork. Built on dbt. Loved by developers. Actually used by businesses. Accept the invite and we'll take you straight to connecting ${userThatInvited.organizationName}'s data warehouse — the last step before your team can start asking questions of their data. This link is valid for the next ${expirationLabel}. ${inviteUrl}`,
+                });
+            }
+            default:
+                return assertUnreachable(
+                    invite.purpose,
+                    `Unknown invite link purpose: ${invite.purpose}`,
+                );
+        }
     }
 
     public async sendProjectAccessEmail(
@@ -527,23 +760,86 @@ export default class EmailClient {
         message: string | undefined,
         date: string,
         frequency: string,
-        imageUrl: string,
+        imageUrl: string | undefined,
         url: string,
         schedulerUrl: string,
         includeLinks: boolean,
         pdfFile?: string,
         expirationDays?: number,
         deliveryType: string = 'Scheduled delivery',
+        imageBuffer?: Buffer,
+        sender?: EmailSenderIdentity | null,
+        plainText?: PlainTextEmailMode,
     ) {
+        if (plainText) {
+            return this.sendPlainTextEmail({
+                ...EmailClient.senderMailFields(sender),
+                to: recipient,
+                subject,
+                text: buildPlainTextEmailBody({
+                    title,
+                    message,
+                    cadence: plainText.cadence,
+                    // The chart image only exists inside the HTML body, so it
+                    // is offered as a link unless a PDF carries it.
+                    downloads:
+                        !pdfFile && imageUrl
+                            ? [{ filename: `${title}.png`, url: imageUrl }]
+                            : [],
+                    noResults: false,
+                }),
+                attachments: pdfFile
+                    ? [
+                          {
+                              filename: `${title}.pdf`,
+                              path: pdfFile,
+                              contentType: 'application/pdf',
+                          },
+                      ]
+                    : undefined,
+            });
+        }
+
+        const useCidImage =
+            this.lightdashConfig.smtp?.inlineImageCid === true &&
+            imageBuffer !== undefined;
+
+        const attachments: Array<{
+            filename: string;
+            path?: string;
+            content?: Buffer;
+            contentType?: string;
+            cid?: string;
+            contentDisposition?: 'inline' | 'attachment';
+        }> = [];
+
+        if (useCidImage) {
+            attachments.push({
+                filename: 'chart-image.png',
+                content: imageBuffer,
+                cid: 'chart-image',
+                contentDisposition: 'inline',
+            });
+        }
+
+        if (pdfFile) {
+            attachments.push({
+                filename: `${title}.pdf`,
+                path: pdfFile,
+                contentType: 'application/pdf',
+            });
+        }
+
         return this.sendEmail({
+            ...EmailClient.senderMailFields(sender),
             to: recipient,
             subject,
             template: 'imageNotification',
             context: {
                 title,
                 hasMessage: !!message,
-                message: message && marked(message),
-                imageUrl,
+                message: message && sanitizeHtml(marked(message)),
+                imageUrl: useCidImage ? 'cid:chart-image' : imageUrl,
                 description,
                 date,
                 frequency,
@@ -559,15 +855,7 @@ export default class EmailClient {
                 includeLinks,
             },
             text: title,
-            attachments: pdfFile
-                ? [
-                      {
-                          filename: `${title}.pdf`,
-                          path: pdfFile,
-                          contentType: 'application/pdf',
-                      },
-                  ]
-                : undefined,
+            attachments: attachments.length > 0 ? attachments : undefined,
         });
     }
 
@@ -586,16 +874,44 @@ export default class EmailClient {
         expirationDays?: number,
         asAttachment?: boolean,
         format?: SchedulerFormat,
+        sender?: EmailSenderIdentity | null,
+        plainText?: PlainTextEmailMode,
     ) {
         const csvUrl = attachment.path;
+        const noResults = attachment.path === '#no-results';
         const attachments =
             asAttachment &&
             (attachment.localPath || attachment.path) &&
-            attachment.path !== '#no-results'
+            !noResults
                 ? [EmailClient.createFileAttachment(attachment, format)]
                 : undefined;
 
+        if (plainText) {
+            return this.sendPlainTextEmail({
+                ...EmailClient.senderMailFields(sender),
+                to: recipient,
+                subject,
+                text: buildPlainTextEmailBody({
+                    title,
+                    message,
+                    cadence: plainText.cadence,
+                    downloads:
+                        attachments || noResults
+                            ? []
+                            : [
+                                  {
+                                      filename: attachment.filename,
+                                      url: csvUrl,
+                                  },
+                              ],
+                    noResults,
+                }),
+                attachments,
+            });
+        }
+
         return this.sendEmail({
+            ...EmailClient.senderMailFields(sender),
             to: recipient,
             subject,
             template: 'chartCsvNotification',
@@ -603,7 +919,7 @@ export default class EmailClient {
                 title,
                 description,
                 hasMessage: !!message,
-                message: message && marked(message),
+                message: message && sanitizeHtml(marked(message)),
                 date,
                 frequency,
                 url,
@@ -643,39 +959,80 @@ export default class EmailClient {
         asAttachment?: boolean,
         format?: SchedulerFormat,
         failures?: PartialFailure[],
+        notices?: DeliveryNotice[],
+        sender?: EmailSenderIdentity | null,
+        isApp: boolean = false,
+        plainText?: PlainTextEmailMode,
     ) {
-        const csvUrls = attachments.filter(
-            (attachment) => !attachment.truncated,
-        );
+        // App deliveries carry the query label; dashboards fall back to the
+        // (timestamped) download filename.
+        const withDisplayName = (attachment: AttachmentUrl) => ({
+            ...attachment,
+            displayName: attachment.chartName ?? attachment.filename,
+        });
 
-        const truncatedCsvUrls = attachments.filter(
-            (attachment) => attachment.truncated,
+        const csvUrls = attachments
+            .filter((attachment) => !attachment.truncated)
+            .map(withDisplayName);
+
+        const truncatedCsvUrls = attachments
+            .filter((attachment) => attachment.truncated)
+            .map(withDisplayName);
+
+        const attachableCsvUrls = csvUrls.filter(
+            (attachment) =>
+                (attachment.localPath || attachment.path) &&
+                attachment.path !== '#no-results',
         );
 
         const emailAttachments = asAttachment
-            ? csvUrls
-                  .filter(
-                      (attachment) =>
-                          (attachment.localPath || attachment.path) &&
-                          attachment.path !== '#no-results',
-                  )
-                  .map((attachment) =>
-                      EmailClient.createFileAttachment(attachment, format),
-                  )
+            ? attachableCsvUrls.map((attachment) =>
+                  EmailClient.createFileAttachment(attachment, format),
+              )
             : undefined;
 
         const allChartsFailed =
             csvUrls.length === 0 && failures && failures.length > 0;
 
+        if (plainText) {
+            const attached = new Set(asAttachment ? attachableCsvUrls : []);
+            return this.sendPlainTextEmail({
+                ...EmailClient.senderMailFields(sender),
+                to: recipient,
+                subject,
+                text: buildPlainTextEmailBody({
+                    title,
+                    message,
+                    cadence: plainText.cadence,
+                    downloads: [...csvUrls, ...truncatedCsvUrls]
+                        .filter(
+                            (csvAttachment) =>
+                                csvAttachment.path !== '#no-results' &&
+                                !attached.has(csvAttachment),
+                        )
+                        .map((csvAttachment) => ({
+                            filename: csvAttachment.displayName,
+                            url: csvAttachment.path,
+                        })),
+                    noResults: csvUrls.length === 0,
+                }),
+                attachments: emailAttachments,
+            });
+        }
+
         return this.sendEmail({
+            ...EmailClient.senderMailFields(sender),
             to: recipient,
             subject,
             template: 'dashboardCsvNotification',
             context: {
                 title,
                 description,
+                resultsHeadline: isApp
+                    ? 'The latest results for the queries in this app are ready to download!'
+                    : 'The latest results for the charts in this dashboard are ready to download!',
                 hasMessage: !!message,
-                message: message && marked(message),
+                message: message && sanitizeHtml(marked(message)),
                 date,
                 frequency,
                 csvUrls,
@@ -693,8 +1050,13 @@ export default class EmailClient {
                 includeLinks,
                 hasAttachments: emailAttachments && emailAttachments.length > 0,
                 attachmentCount: emailAttachments?.length || 0,
-                failures,
+                failures: failures?.map(toEmailFailureFields),
+                failureCountPhrase: failures
+                    ? buildFailureCountPhrase(failures)
+                    : undefined,
                 hasFailures: failures && failures.length > 0,
+                notices,
+                hasNotices: notices && notices.length > 0,
                 allChartsFailed,
             },
             text: title,
@@ -726,6 +1088,75 @@ export default class EmailClient {
         });
     }
 
+    async sendDomainVerificationEmail({
+        recipient,
+        passcode,
+        domain,
+    }: {
+        recipient: string;
+        passcode: string;
+        domain: string;
+    }): Promise<void> {
+        const subject = `Verify your domain ${domain}`;
+        const text = `Verify that your organization owns ${domain} by entering the following passcode in Lightdash: ${passcode}`;
+        return this.sendEmail({
+            to: recipient,
+            subject,
+            template: 'domainVerification',
+            context: {
+                passcode,
+                domain,
+                title: subject,
+                host: this.lightdashConfig.siteUrl,
+            },
+            text,
+        });
+    }
+
+    public async sendSchedulerModifiedByOtherUserEmail({
+        recipient,
+        modifyingUserName,
+        schedulerName,
+        actionVerb,
+        timestamp,
+        resourceUrl,
+    }: {
+        recipient: string;
+        modifyingUserName: string;
+        schedulerName: string;
+        actionVerb: 'updated' | 'deleted' | 'enabled' | 'disabled';
+        timestamp: string;
+        resourceUrl: string | undefined;
+    }) {
+        const safeModifier = sanitizeHtml(modifyingUserName);
+        const safeName = sanitizeHtml(schedulerName);
+        const message = `
+            <p style="margin: 0 0 12px 0;">
+                <strong>${safeModifier}</strong>
+                ${actionVerb} your scheduled delivery
+                <strong>&ldquo;${safeName}&rdquo;</strong>
+                on ${sanitizeHtml(timestamp)}.
+            </p>${
+                resourceUrl
+                    ? `\n            <p style="margin: 0;"><a href="${resourceUrl}" style="color: #7262FF; text-decoration: underline;">View the scheduled delivery</a></p>`
+                    : ''
+            }
+        `;
+        return this.sendEmail({
+            to: recipient,
+            subject: `Your scheduled delivery "${schedulerName}" was ${actionVerb}`,
+            template: 'genericNotification',
+            context: {
+                title: `Your scheduled delivery was ${actionVerb}`,
+                message,
+                host: this.lightdashConfig.siteUrl,
+            },
+            text: `${modifyingUserName} ${actionVerb} your scheduled delivery "${schedulerName}" on ${timestamp}.${
+                resourceUrl ? ` View it at ${resourceUrl}` : ''
+            }`,
+        });
+    }
+
     public async sendGenericNotificationEmail(
         to: string[],
         subject: string,
@@ -739,7 +1170,7 @@ export default class EmailClient {
             template: 'genericNotification',
             context: {
                 title,
-                message: marked(message),
+                message: sanitizeHtml(marked(message)),
                 host: this.lightdashConfig.siteUrl,
             },
             text: `${title}\n\n${message}`,

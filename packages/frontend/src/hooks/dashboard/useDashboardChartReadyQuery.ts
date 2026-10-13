@@ -1,13 +1,15 @@
 import {
-    FeatureFlags,
     getAvailableParametersFromTables,
-    getDimensions,
-    getItemId,
-    isDateItem,
+    getChartZoomableFields,
+    getDateZoomCapabilities,
+    getDateZoomXAxisFieldId,
+    hasReservedParameterReference,
     QueryExecutionContext,
+    resolveTileDateZoom,
     type ApiError,
     type ApiExecuteAsyncDashboardChartQueryResults,
     type ApiExploreResults,
+    type DateZoom,
     type ExecuteAsyncDashboardChartRequestParams,
     type SavedChart,
 } from '@lightdash/common';
@@ -15,11 +17,13 @@ import { useQuery } from '@tanstack/react-query';
 import { useEffect, useMemo } from 'react';
 import { lightdashApi } from '../../api';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
+import useDashboardTileStatusContext from '../../providers/Dashboard/useDashboardTileStatusContext';
 import { convertDateDashboardFilters } from '../../utils/dateFilter';
 import { useExplore } from '../useExplore';
+import { useQueryRetryConfig } from '../useQueryRetry';
 import { useSavedQuery } from '../useSavedQuery';
 import useSearchParams from '../useSearchParams';
-import { useServerFeatureFlag } from '../useServerOrClientFeatureFlag';
+import { useSessionTimezone } from '../useSessionTimezone';
 import useDashboardFiltersForTile from './useDashboardFiltersForTile';
 
 const executeAsyncDashboardChartQuery = async (
@@ -38,6 +42,7 @@ const postEmbedDashboardTileQuery = async (
     projectUuid: string,
     data: {
         tileUuid: string;
+        timezone?: string;
     } & Pick<
         ExecuteAsyncDashboardChartRequestParams,
         | 'dashboardFilters'
@@ -58,6 +63,10 @@ export type DashboardChartReadyQuery = {
     executeQueryResponse: ApiExecuteAsyncDashboardChartQueryResults;
     chart: SavedChart;
     explore: ApiExploreResults;
+    // The resolved date zoom for this tile (control grain + field, or the
+    // Default). Downstream consumers reuse it so visualization, downloads, and
+    // underlying data agree with the query that was executed.
+    dateZoom: DateZoom | undefined;
 };
 
 export const useDashboardChartReadyQuery = (
@@ -65,13 +74,22 @@ export const useDashboardChartReadyQuery = (
     chartUuid: string | null,
     contextOverride?: QueryExecutionContext,
 ) => {
+    const retryConfig = useQueryRetryConfig();
     const dashboardUuid = useDashboardContext((c) => c.dashboard?.uuid);
-    const invalidateCache = useDashboardContext((c) => c.invalidateCache);
+    const invalidateCache = useDashboardTileStatusContext(
+        (c) => c.invalidateCache,
+    );
     const dashboardFilters = useDashboardFiltersForTile(tileUuid);
     const chartSort = useDashboardContext((c) => c.chartSort);
     const parameterValues = useDashboardContext((c) => c.parameterValues);
     const addParameterReferences = useDashboardContext(
         (c) => c.addParameterReferences,
+    );
+    const setTileChartSavedParameters = useDashboardContext(
+        (c) => c.setTileChartSavedParameters,
+    );
+    const markTileLoaded = useDashboardTileStatusContext(
+        (c) => c.markTileLoaded,
     );
     const tileParameterReferences = useDashboardContext(
         (c) => c.tileParameterReferences,
@@ -81,14 +99,25 @@ export const useDashboardChartReadyQuery = (
         [chartSort, tileUuid],
     );
     const granularity = useDashboardContext((c) => c.dateZoomGranularity);
-    const autoRefresh = useDashboardContext((c) => c.isAutoRefresh);
+    const autoRefresh = useDashboardTileStatusContext((c) => c.isAutoRefresh);
     const context =
         useSearchParams<QueryExecutionContext>('context') || undefined;
-    const setChartsWithDateZoomApplied = useDashboardContext(
-        (c) => c.setChartsWithDateZoomApplied,
+    const setTilesWithDateZoomApplied = useDashboardContext(
+        (c) => c.setTilesWithDateZoomApplied,
+    );
+
+    // Configurable date zoom: tiles with a control resolve their control's
+    // grain; unassigned tiles (and dashboards with no config) fall through to
+    // the Default branch — the existing global picker.
+    const dateZoomConfig = useDashboardContext((c) => c.dateZoomConfig);
+    const controlGranularities = useDashboardContext(
+        (c) => c.controlGranularities,
     );
     const addParameterDefinitions = useDashboardContext(
         (c) => c.addParameterDefinitions,
+    );
+    const setChartZoomableFields = useDashboardContext(
+        (c) => c.setChartZoomableFields,
     );
 
     const sortKey =
@@ -96,12 +125,35 @@ export const useDashboardChartReadyQuery = (
             ?.map((ds) => `${ds.fieldId}.${ds.descending}`)
             ?.join(',') || '';
 
+    const projectUuid = useDashboardContext((c) => c.projectUuid);
+    const includeUnpublishedDraft = useDashboardContext(
+        (c) => c.includeUnpublishedDraft,
+    );
+    const sessionTimezone = useSessionTimezone();
     const chartQuery = useSavedQuery({
-        id: chartUuid ?? undefined,
+        uuidOrSlug: chartUuid ?? undefined,
+        projectUuid,
+        includeUnpublishedDraft,
     });
+
+    const chartSavedParameters = chartQuery.data?.parameters;
+    useEffect(() => {
+        if (chartQuery.data) {
+            setTileChartSavedParameters(tileUuid, chartSavedParameters ?? {});
+        }
+    }, [
+        chartQuery.data,
+        chartSavedParameters,
+        setTileChartSavedParameters,
+        tileUuid,
+    ]);
 
     const { data: explore, error: exploreError } = useExplore(
         chartQuery.data?.metricQuery?.exploreName,
+    );
+
+    const addAvailableCustomGranularities = useDashboardTileStatusContext(
+        (c) => c.addAvailableCustomGranularities,
     );
 
     useEffect(() => {
@@ -112,25 +164,89 @@ export const useDashboardChartReadyQuery = (
         }
     }, [explore, addParameterDefinitions]);
 
+    const dateZoomCapabilities = useMemo(() => {
+        if (!chartQuery.data || !explore) return undefined;
+        return getDateZoomCapabilities(explore, chartQuery.data.metricQuery);
+    }, [chartQuery.data, explore]);
+
+    // Report this tile's zoomable date fields up so the date-zoom control modal
+    // can offer exactly the fields the chart plots, not every explore dimension.
+    const chartZoomableFields = useMemo(() => {
+        if (!chartQuery.data || !explore) return undefined;
+        return getChartZoomableFields(explore, chartQuery.data.metricQuery);
+    }, [chartQuery.data, explore]);
+
+    useEffect(() => {
+        if (chartZoomableFields) {
+            setChartZoomableFields(tileUuid, chartZoomableFields);
+        }
+    }, [chartZoomableFields, setChartZoomableFields, tileUuid]);
+
+    // Target the chart's own x-axis date field so the backend re-grains the
+    // field the chart actually plots, rather than auto-picking the first date
+    // dimension in the query (which can differ when there are several).
+    const dateZoomXAxisFieldId = useMemo(
+        () =>
+            chartQuery.data
+                ? getDateZoomXAxisFieldId(chartQuery.data.chartConfig, explore)
+                : undefined,
+        [chartQuery.data, explore],
+    );
+
+    // Single source of truth for this tile's wire date zoom. Attached tiles zoom
+    // their control's grain on the target field; unassigned tiles fall through to
+    // the Default (the existing global picker + x-axis baseline).
+    const tileDateZoom = useMemo(
+        () =>
+            resolveTileDateZoom({
+                config: dateZoomConfig,
+                tileUuid,
+                runtimeGranularities: controlGranularities,
+                globalGranularity: granularity,
+                defaultXAxisFieldId: dateZoomXAxisFieldId,
+            }),
+        [
+            dateZoomConfig,
+            tileUuid,
+            controlGranularities,
+            granularity,
+            dateZoomXAxisFieldId,
+        ],
+    );
+
+    useEffect(() => {
+        if (!dateZoomCapabilities) return;
+
+        if (
+            Object.keys(dateZoomCapabilities.availableCustomGranularities)
+                .length > 0
+        ) {
+            addAvailableCustomGranularities(
+                dateZoomCapabilities.availableCustomGranularities,
+            );
+        }
+    }, [dateZoomCapabilities, addAvailableCustomGranularities]);
+
     const timezoneFixFilters =
         dashboardFilters && convertDateDashboardFilters(dashboardFilters);
 
-    const hasADateDimension = useMemo(() => {
-        const metricQueryDimensions = [
-            ...(chartQuery.data?.metricQuery?.dimensions ?? []),
-            ...(chartQuery.data?.metricQuery?.customDimensions ?? []),
-        ];
+    const hasADateDimension = dateZoomCapabilities
+        ? dateZoomCapabilities.hasDateDimension ||
+          dateZoomCapabilities.hasTimestampDimension
+        : false;
 
-        if (!explore) return false;
-        return getDimensions(explore).find(
-            (c) =>
-                metricQueryDimensions.includes(getItemId(c)) && isDateItem(c),
-        );
-    }, [
-        chartQuery.data?.metricQuery?.customDimensions,
-        chartQuery.data?.metricQuery?.dimensions,
-        explore,
-    ]);
+    // A chart is also affected by date zoom when its custom SQL references a reserved
+    // date-zoom parameter, even with no date dimension on the axis.
+    const referencesDateZoomReservedParam = useMemo(
+        () =>
+            hasReservedParameterReference(
+                tileParameterReferences?.[tileUuid] ?? [],
+            ),
+        [tileParameterReferences, tileUuid],
+    );
+
+    const isAffectedByDateZoom =
+        hasADateDimension || referencesDateZoomReservedParam;
 
     const chartParameterValues = useMemo(() => {
         if (!tileParameterReferences || !tileParameterReferences[tileUuid])
@@ -142,31 +258,12 @@ export const useDashboardChartReadyQuery = (
         );
     }, [parameterValues, tileParameterReferences, tileUuid]);
 
-    useEffect(() => {
-        if (!chartUuid) return;
-
-        setChartsWithDateZoomApplied((prev) => {
-            if (hasADateDimension) {
-                const nextSet = new Set(prev ?? []);
-                if (granularity) {
-                    nextSet.add(chartUuid);
-                } else {
-                    nextSet.delete(chartUuid);
-                }
-                return nextSet;
-            }
-            return prev;
-        });
-    }, [
-        hasADateDimension,
-        granularity,
-        chartUuid,
-        setChartsWithDateZoomApplied,
-    ]);
-
-    const { data: useSqlPivotResults } = useServerFeatureFlag(
-        FeatureFlags.UseSqlPivotResults,
-    );
+    // dateZoomApplied comes from the query response — the backend is the
+    // single source of truth for whether zoom was actually applied.
+    // We still need a pre-query estimate for the query key so we avoid
+    // unnecessary refetches when zoom won't have an effect.
+    const isZoomLikelyApplied =
+        isAffectedByDateZoom && tileDateZoom !== undefined;
 
     const queryKey = useMemo(
         () => [
@@ -179,10 +276,11 @@ export const useDashboardChartReadyQuery = (
             sortKey,
             contextOverride || context,
             autoRefresh,
-            hasADateDimension ? granularity : null,
+            isZoomLikelyApplied ? (tileDateZoom?.granularity ?? null) : null,
+            isZoomLikelyApplied ? (tileDateZoom?.xAxisFieldId ?? null) : null,
             invalidateCache,
             chartParameterValues,
-            useSqlPivotResults,
+            sessionTimezone,
         ],
         [
             chartQuery.data?.projectUuid,
@@ -194,11 +292,11 @@ export const useDashboardChartReadyQuery = (
             contextOverride,
             context,
             autoRefresh,
-            hasADateDimension,
-            granularity,
+            isZoomLikelyApplied,
+            tileDateZoom,
             invalidateCache,
             chartParameterValues,
-            useSqlPivotResults,
+            sessionTimezone,
         ],
     );
 
@@ -218,6 +316,8 @@ export const useDashboardChartReadyQuery = (
             const isEmbedContext =
                 requestedContext === QueryExecutionContext.EMBED;
 
+            const dateZoom = tileDateZoom;
+
             const executeQueryResponse = isEmbedContext
                 ? await postEmbedDashboardTileQuery(
                       chartQuery.data.projectUuid,
@@ -225,12 +325,11 @@ export const useDashboardChartReadyQuery = (
                           tileUuid,
                           dashboardFilters: timezoneFixFilters,
                           dashboardSorts,
-                          dateZoom: {
-                              granularity,
-                          },
+                          dateZoom,
                           invalidateCache,
                           parameters: parameterValues,
-                          pivotResults: useSqlPivotResults?.enabled,
+                          pivotResults: true,
+                          timezone: sessionTimezone ?? undefined,
                       },
                   )
                 : await executeAsyncDashboardChartQuery(
@@ -242,12 +341,13 @@ export const useDashboardChartReadyQuery = (
                           dashboardUuid: dashboardUuid!,
                           dashboardFilters: timezoneFixFilters,
                           dashboardSorts,
-                          dateZoom: {
-                              granularity,
-                          },
+                          dateZoom,
                           invalidateCache,
                           parameters: parameterValues,
-                          pivotResults: useSqlPivotResults?.enabled,
+                          pivotResults: true,
+                          ...(includeUnpublishedDraft && {
+                              includeUnpublishedDraft: true,
+                          }),
                       },
                   );
 
@@ -255,14 +355,43 @@ export const useDashboardChartReadyQuery = (
                 chart: chartQuery.data,
                 explore,
                 executeQueryResponse,
+                dateZoom: tileDateZoom,
             };
         },
         enabled: Boolean(
             chartUuid && dashboardUuid && chartQuery.data && explore,
         ),
-        retry: false,
+        ...retryConfig,
         refetchOnMount: false,
     });
+
+    // Backend reports it for overridden date dimensions; charts that only
+    // reference the reserved date-zoom param are in effect whenever the resolved
+    // tile grain is set (the same value substituted into their SQL on the wire).
+    const dateZoomApplied =
+        (queryResult.data?.executeQueryResponse?.dateZoomApplied ?? false) ||
+        (referencesDateZoomReservedParam && !!tileDateZoom?.granularity);
+
+    useEffect(() => {
+        if (!isAffectedByDateZoom) return;
+
+        // Keyed by tileUuid: a duplicated saved chart shares its chartUuid across
+        // tiles, but each tile needs its own applied state.
+        setTilesWithDateZoomApplied((prev) => {
+            const nextSet = new Set(prev ?? []);
+            if (dateZoomApplied) {
+                nextSet.add(tileUuid);
+            } else {
+                nextSet.delete(tileUuid);
+            }
+            return nextSet;
+        });
+    }, [
+        dateZoomApplied,
+        isAffectedByDateZoom,
+        tileUuid,
+        setTilesWithDateZoomApplied,
+    ]);
 
     useEffect(() => {
         if (queryResult.data?.executeQueryResponse?.parameterReferences) {
@@ -270,19 +399,23 @@ export const useDashboardChartReadyQuery = (
                 tileUuid,
                 queryResult.data.executeQueryResponse.parameterReferences,
             );
+            markTileLoaded(tileUuid);
         } else if (queryResult.error) {
             // On error, there are no references, but we count the tile as loaded
             addParameterReferences(tileUuid, []);
+            markTileLoaded(tileUuid);
         }
     }, [
         queryResult.data?.executeQueryResponse?.parameterReferences,
         addParameterReferences,
+        markTileLoaded,
         tileUuid,
         queryResult.error,
     ]);
 
     return {
         ...queryResult,
+        chartQuery,
         error: chartQuery.error || exploreError || queryResult.error,
     };
 };

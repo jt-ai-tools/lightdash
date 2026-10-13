@@ -1,0 +1,600 @@
+import { Ability } from '@casl/ability';
+import {
+    ChartType,
+    ConflictError,
+    ContentType,
+    CustomDimensionType,
+    DimensionType,
+    ExploreSplitError,
+    ForbiddenError,
+    MetricType,
+    NotFoundError,
+    OrganizationMemberRole,
+    PossibleAbilities,
+    type CreateSavedChartVersion,
+    type Explore,
+} from '@lightdash/common';
+import { analyticsMock } from '../../analytics/LightdashAnalytics.mock';
+import { fromSession } from '../../auth/account';
+import { GoogleDriveClient } from '../../clients/Google/GoogleDriveClient';
+import { SlackClient } from '../../clients/Slack/SlackClient';
+import { lightdashConfigMock } from '../../config/lightdashConfig.mock';
+import { AnalyticsModel } from '../../models/AnalyticsModel';
+import { CatalogModel } from '../../models/CatalogModel/CatalogModel';
+import { ContentVerificationModel } from '../../models/ContentVerificationModel';
+import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
+import { OrganizationModel } from '../../models/OrganizationModel';
+import { PinnedListModel } from '../../models/PinnedListModel';
+import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
+import { SavedChartModel } from '../../models/SavedChartModel';
+import { SchedulerModel } from '../../models/SchedulerModel';
+import { SpaceModel } from '../../models/SpaceModel';
+import { SchedulerClient } from '../../scheduler/SchedulerClient';
+import { PermissionsService } from '../PermissionsService/PermissionsService';
+import { SchedulerService } from '../SchedulerService/SchedulerService';
+import { SpacePermissionService } from '../SpaceService/SpacePermissionService';
+import { UserService } from '../UserService';
+import { SavedChartService } from './SavedChartService';
+
+const chartSummary = {
+    organizationUuid: 'org-uuid',
+    projectUuid: 'project-uuid',
+    uuid: 'chart-uuid',
+};
+
+const verificationInfo = {
+    verifiedBy: {
+        userUuid: 'user-uuid',
+        firstName: 'Test',
+        lastName: 'User',
+    },
+    verifiedAt: new Date(),
+};
+
+const savedChartData = {
+    ...chartSummary,
+    name: 'Orders',
+    slug: 'orders',
+    description: 'Orders chart',
+    spaceUuid: 'space-uuid',
+    metricQuery: {
+        metrics: [],
+        dimensions: [],
+        filters: { dimensions: {}, metrics: {}, tableCalculations: {} },
+        sorts: [],
+        limit: 500,
+        tableCalculations: [],
+    },
+    tableName: 'test_table',
+    dashboardUuid: null,
+    chartConfig: {
+        type: 'cartesian',
+        config: { eChartsConfig: { xAxis: [], yAxis: [], series: [] } },
+    },
+    tableConfig: { columnOrder: [] },
+};
+
+const adminUser = {
+    userUuid: 'user-uuid',
+    email: 'admin@test.com',
+    firstName: 'Admin',
+    lastName: 'User',
+    organizationUuid: 'org-uuid',
+    organizationName: 'Test Org',
+    organizationCreatedAt: new Date(),
+    isTrackingAnonymized: false,
+    isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
+    timezone: null,
+    isSetupComplete: true,
+    userId: 1,
+    role: OrganizationMemberRole.ADMIN,
+    ability: new Ability<PossibleAbilities>([
+        { subject: 'ContentVerification', action: 'manage' },
+        { subject: 'VerifiedContent', action: 'manage' },
+        {
+            subject: 'SavedChart',
+            action: ['view', 'update', 'delete', 'create'],
+        },
+    ]),
+    isActive: true,
+    abilityRules: [],
+    createdAt: new Date(),
+    updatedAt: new Date(),
+};
+
+const editorUser = {
+    ...adminUser,
+    userUuid: 'editor-uuid',
+    email: 'editor@test.com',
+    role: OrganizationMemberRole.EDITOR,
+    ability: new Ability<PossibleAbilities>([
+        { subject: 'SavedChart', action: ['view', 'update'] },
+    ]),
+};
+
+const savedChartModel = {
+    getSummary: vi.fn(async () => chartSummary),
+    get: vi.fn(async () => savedChartData),
+    createVersion: vi.fn(async () => savedChartData),
+    update: vi.fn(async () => savedChartData),
+    create: vi.fn(async () => savedChartData),
+};
+
+const contentVerificationModel = {
+    verify: vi.fn(async () => undefined),
+    unverify: vi.fn(async () => undefined),
+    getByContent: vi.fn(async () => verificationInfo),
+};
+
+const spacePermissionService = {
+    resolveAccess: vi.fn(async () => ({
+        organizationUuid: 'org-uuid',
+        projectUuid: 'project-uuid',
+        inheritsFromOrgOrProject: true,
+        access: [],
+        admins: [],
+        directOnly: false,
+    })),
+    getFirstViewableSpaceUuid: vi.fn(async () => 'space-uuid'),
+};
+
+const projectModel = {
+    getExploreFromCache: vi.fn(async (): Promise<Explore | null> => null),
+    getUuidBySlug: vi.fn(async () => 'resolved-project-uuid'),
+    getSummary: vi.fn(async () => ({
+        organizationUuid: 'org-uuid',
+        projectUuid: 'project-uuid',
+    })),
+};
+const analyticsModel = {
+    addChartViewEvent: vi.fn(async () => undefined),
+};
+const spaceModel = {
+    getSpaceSummary: vi.fn(async () => ({ uuid: 'space-uuid' })),
+};
+
+vi.spyOn(analyticsMock, 'track');
+
+describe('SavedChartService - Content Verification', () => {
+    const service = new SavedChartService({
+        featureFlagModel: {
+            get: vi.fn().mockResolvedValue({ enabled: false }),
+        },
+        analytics: analyticsMock,
+        lightdashConfig: lightdashConfigMock,
+        projectModel: projectModel as unknown as ProjectModel,
+        savedChartModel: savedChartModel as unknown as SavedChartModel,
+        spaceModel: spaceModel as unknown as SpaceModel,
+        analyticsModel: analyticsModel as unknown as AnalyticsModel,
+        pinnedListModel: {} as unknown as PinnedListModel,
+        schedulerModel: {} as unknown as SchedulerModel,
+        schedulerService: {} as unknown as SchedulerService,
+        schedulerClient: {} as unknown as SchedulerClient,
+        slackClient: {} as unknown as SlackClient,
+        dashboardModel: {} as unknown as DashboardModel,
+        catalogModel: {} as unknown as CatalogModel,
+        permissionsService: {} as unknown as PermissionsService,
+        googleDriveClient: {} as unknown as GoogleDriveClient,
+        userService: {} as unknown as UserService,
+        spacePermissionService:
+            spacePermissionService as unknown as SpacePermissionService,
+        contentVerificationModel:
+            contentVerificationModel as unknown as ContentVerificationModel,
+        organizationModel: {} as unknown as OrganizationModel,
+        contentAsCodeProjectSettingsModel: {
+            get: vi.fn(async () => undefined),
+        } as never,
+        contentAsCodeSnapshotModel: {} as never,
+        contentDraftModel: {} as never,
+    });
+
+    afterEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('enriches one existing chart event without changing the legacy view counter', async () => {
+        const track = vi.spyOn(analyticsMock, 'trackAccount');
+        const account = fromSession(adminUser, 'session-cookie');
+        try {
+            await service.get('chart-uuid', account);
+            expect(track).toHaveBeenCalledTimes(1);
+            expect(track).toHaveBeenCalledWith(
+                account,
+                expect.objectContaining({ event: 'saved_chart.view' }),
+                expect.objectContaining({
+                    contentId: savedChartData.uuid,
+                    contentName: savedChartData.name,
+                    context: 'backend',
+                    actorType: 'user',
+                }),
+            );
+            expect(analyticsModel.addChartViewEvent).toHaveBeenCalledTimes(1);
+        } finally {
+            track.mockRestore();
+        }
+    });
+
+    it('resolves a project slug before loading a saved chart', async () => {
+        await service.get('orders', fromSession(adminUser, 'session-cookie'), {
+            projectUuid: 'my-project',
+        });
+
+        expect(projectModel.getUuidBySlug).toHaveBeenCalledWith(
+            'org-uuid',
+            'my-project',
+        );
+        expect(savedChartModel.get).toHaveBeenCalledWith('orders', undefined, {
+            projectUuid: 'resolved-project-uuid',
+        });
+    });
+
+    it('keeps a project uuid unchanged when loading a saved chart', async () => {
+        const projectUuid = '5b3c6f00-7d53-4f87-b43a-75d774b1651e';
+
+        await service.get('orders', fromSession(adminUser, 'session-cookie'), {
+            projectUuid,
+        });
+
+        expect(projectModel.getUuidBySlug).not.toHaveBeenCalled();
+        expect(savedChartModel.get).toHaveBeenCalledWith('orders', undefined, {
+            projectUuid,
+        });
+    });
+
+    it('returns split candidates when a saved chart uses an original explore name', async () => {
+        vi.mocked(projectModel.getExploreFromCache).mockRejectedValueOnce(
+            new ExploreSplitError('test_table', [
+                'sourceA__test_table',
+                'sourceB__test_table',
+            ]),
+        );
+
+        await expect(
+            service.get(
+                'chart-uuid',
+                fromSession(adminUser, 'session-cookie'),
+                { projectUuid: 'project-uuid' },
+            ),
+        ).rejects.toMatchObject({
+            name: 'NotFoundError',
+            data: {
+                exploreName: 'test_table',
+                candidateExploreNames: [
+                    'sourceA__test_table',
+                    'sourceB__test_table',
+                ],
+            },
+        });
+    });
+
+    it('keeps saved chart loading unchanged for a plain missing explore', async () => {
+        vi.mocked(projectModel.getExploreFromCache).mockRejectedValueOnce(
+            new NotFoundError('Explore "test_table" does not exist.'),
+        );
+
+        await expect(
+            service.get(
+                'chart-uuid',
+                fromSession(adminUser, 'session-cookie'),
+                { projectUuid: 'project-uuid' },
+            ),
+        ).resolves.toMatchObject({
+            uuid: 'chart-uuid',
+            tableName: 'test_table',
+        });
+    });
+
+    it('duplicates a chart from its original slug base', async () => {
+        await service.duplicate(adminUser, 'project-uuid', 'chart-uuid', {
+            chartName: 'Copy of Orders',
+            chartDesc: 'Orders chart copy',
+        });
+
+        expect(savedChartModel.create).toHaveBeenCalledWith(
+            'project-uuid',
+            adminUser.userUuid,
+            expect.objectContaining({
+                name: 'Copy of Orders',
+                slug: 'orders',
+            }),
+        );
+    });
+
+    describe('CASL authorization', () => {
+        it('should allow verifyChart when user is admin', async () => {
+            const result = await service.verifyChart(adminUser, 'chart-uuid');
+
+            expect(result).toEqual(verificationInfo);
+            expect(contentVerificationModel.verify).toHaveBeenCalledWith(
+                ContentType.CHART,
+                'chart-uuid',
+                'project-uuid',
+                'user-uuid',
+            );
+        });
+
+        it('should throw ForbiddenError when user lacks manage:ContentVerification', async () => {
+            await expect(
+                service.verifyChart(editorUser, 'chart-uuid'),
+            ).rejects.toThrow(ForbiddenError);
+
+            await expect(
+                service.verifyChart(editorUser, 'chart-uuid'),
+            ).rejects.toThrow('Only admins can verify charts');
+
+            expect(contentVerificationModel.verify).not.toHaveBeenCalled();
+        });
+
+        it('should throw ForbiddenError on unverifyChart for non-admin', async () => {
+            await expect(
+                service.unverifyChart(editorUser, 'chart-uuid'),
+            ).rejects.toThrow(ForbiddenError);
+
+            expect(contentVerificationModel.unverify).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('custom SQL permissions on create', () => {
+        const chartCreator = {
+            ...editorUser,
+            ability: new Ability<PossibleAbilities>([
+                { subject: 'SavedChart', action: 'create' },
+            ]),
+        };
+        const account = fromSession(chartCreator, 'session-cookie');
+        const baseChart = {
+            name: 'Custom SQL chart',
+            tableName: 'orders',
+            metricQuery: {
+                exploreName: 'orders',
+                dimensions: [],
+                metrics: [],
+                filters: {},
+                sorts: [],
+                limit: 500,
+                tableCalculations: [],
+            },
+            chartConfig: {
+                type: ChartType.TABLE,
+            },
+            tableConfig: {
+                columnOrder: [],
+            },
+            spaceUuid: 'space-uuid',
+            dashboardUuid: null,
+        };
+
+        it('rejects missing metric references before creating or saving a chart version', async () => {
+            const explore = {
+                tables: {
+                    orders: { name: 'orders', dimensions: {}, metrics: {} },
+                },
+            } as unknown as Explore;
+            const metricQuery = {
+                ...baseChart.metricQuery,
+                additionalMetrics: [
+                    {
+                        name: 'adjusted_total',
+                        label: 'Adjusted total',
+                        table: 'orders',
+                        type: MetricType.SUM,
+                        sql: '${orders.deleted_dimension}',
+                    },
+                ],
+            };
+            vi.mocked(projectModel.getExploreFromCache).mockResolvedValueOnce(
+                explore,
+            );
+            await expect(
+                service.create(account, 'project-uuid', {
+                    ...baseChart,
+                    metricQuery,
+                }),
+            ).rejects.toThrow(
+                'Custom metric "Adjusted total" references missing fields: orders.deleted_dimension',
+            );
+            expect(savedChartModel.create).not.toHaveBeenCalled();
+
+            vi.mocked(projectModel.getExploreFromCache).mockResolvedValueOnce(
+                explore,
+            );
+            await expect(
+                service.createVersion(
+                    fromSession(adminUser, 'session-cookie'),
+                    'chart-uuid',
+                    {
+                        tableName: baseChart.tableName,
+                        metricQuery,
+                        chartConfig: baseChart.chartConfig,
+                        tableConfig: baseChart.tableConfig,
+                    },
+                ),
+            ).rejects.toThrow('orders.deleted_dimension');
+            expect(savedChartModel.createVersion).not.toHaveBeenCalled();
+        });
+
+        it('rejects custom SQL dimensions without CustomFields permission', async () => {
+            await expect(
+                service.create(account, 'project-uuid', {
+                    ...baseChart,
+                    metricQuery: {
+                        ...baseChart.metricQuery,
+                        customDimensions: [
+                            {
+                                id: 'custom_sql',
+                                name: 'Custom SQL',
+                                table: 'orders',
+                                type: CustomDimensionType.SQL,
+                                sql: "'value'",
+                                dimensionType: DimensionType.STRING,
+                            },
+                        ],
+                    },
+                }),
+            ).rejects.toThrow(
+                'User cannot save queries with custom SQL dimensions',
+            );
+
+            expect(savedChartModel.create).not.toHaveBeenCalled();
+        });
+
+        it('rejects SQL table calculations without CustomSqlTableCalculations permission', async () => {
+            await expect(
+                service.create(account, 'project-uuid', {
+                    ...baseChart,
+                    metricQuery: {
+                        ...baseChart.metricQuery,
+                        tableCalculations: [
+                            {
+                                name: 'custom_sql',
+                                displayName: 'Custom SQL',
+                                sql: "'value'",
+                            },
+                        ],
+                    },
+                }),
+            ).rejects.toThrow(
+                'User cannot save queries with SQL table calculations',
+            );
+
+            expect(savedChartModel.create).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('Preserve verification on edit', () => {
+        it('rejects a version ownership conflict using the authorized snapshot without unverifying or emitting success', async () => {
+            savedChartModel.createVersion.mockRejectedValueOnce(
+                new ConflictError('Chart location changed'),
+            );
+            const version: CreateSavedChartVersion = {
+                tableName: 'test_table',
+                metricQuery: {
+                    exploreName: 'test',
+                    dimensions: [],
+                    metrics: [],
+                    filters: {},
+                    sorts: [],
+                    limit: 500,
+                    tableCalculations: [],
+                },
+                chartConfig: { type: ChartType.CARTESIAN },
+                tableConfig: { columnOrder: [] },
+            };
+
+            await expect(
+                service.createVersion(
+                    fromSession(adminUser, 'session-cookie'),
+                    savedChartData.uuid,
+                    { ...version, preserveVerification: false },
+                ),
+            ).rejects.toThrow(ConflictError);
+
+            expect(savedChartModel.createVersion).toHaveBeenCalledWith(
+                savedChartData.uuid,
+                version,
+                expect.objectContaining({ userUuid: adminUser.userUuid }),
+                undefined,
+                {
+                    projectUuid: savedChartData.projectUuid,
+                    dashboardUuid: null,
+                    spaceUuid: savedChartData.spaceUuid,
+                },
+            );
+            expect(contentVerificationModel.unverify).not.toHaveBeenCalled();
+            expect(analyticsMock.track).not.toHaveBeenCalled();
+        });
+
+        it('should preserve chart verification when admin edits content via createVersion', async () => {
+            const result = await service.createVersion(
+                fromSession(adminUser, 'session-cookie'),
+                'chart-uuid',
+                {
+                    tableName: 'test_table',
+                    metricQuery: {
+                        exploreName: 'test',
+                        dimensions: [],
+                        metrics: [],
+                        filters: {},
+                        sorts: [],
+                        limit: 500,
+                        tableCalculations: [],
+                    },
+                    chartConfig: { type: ChartType.CARTESIAN },
+                    tableConfig: { columnOrder: [] },
+                },
+            );
+
+            expect(result.verification).toEqual(verificationInfo);
+            expect(contentVerificationModel.unverify).not.toHaveBeenCalled();
+        });
+
+        it('should auto-unverify chart when content is edited with preserveVerification=false', async () => {
+            await service.createVersion(
+                fromSession(adminUser, 'session-cookie'),
+                'chart-uuid',
+                {
+                    tableName: 'test_table',
+                    metricQuery: {
+                        exploreName: 'test',
+                        dimensions: [],
+                        metrics: [],
+                        filters: {},
+                        sorts: [],
+                        limit: 500,
+                        tableCalculations: [],
+                    },
+                    chartConfig: { type: ChartType.CARTESIAN },
+                    tableConfig: { columnOrder: [] },
+                    preserveVerification: false,
+                },
+            );
+
+            expect(contentVerificationModel.unverify).toHaveBeenCalledWith(
+                ContentType.CHART,
+                'chart-uuid',
+            );
+        });
+
+        it('should preserve chart verification when admin edits metadata via update', async () => {
+            const result = await service.update(adminUser, 'chart-uuid', {
+                name: 'updated chart name',
+            });
+
+            expect(result.verification).toEqual(verificationInfo);
+            expect(contentVerificationModel.unverify).not.toHaveBeenCalled();
+        });
+
+        it('should block editors without manage:VerifiedContent from editing verified charts', async () => {
+            await expect(
+                service.update(editorUser, 'chart-uuid', {
+                    name: 'updated chart name',
+                }),
+            ).rejects.toThrow(ForbiddenError);
+
+            expect(savedChartModel.update).not.toHaveBeenCalled();
+            expect(contentVerificationModel.unverify).not.toHaveBeenCalled();
+        });
+
+        it('should allow developers with manage:VerifiedContent to edit and auto-unverify', async () => {
+            const developerUser = {
+                ...editorUser,
+                userUuid: 'developer-uuid',
+                ability: new Ability<PossibleAbilities>([
+                    { subject: 'VerifiedContent', action: 'manage' },
+                    { subject: 'SavedChart', action: ['view', 'update'] },
+                ]),
+            };
+
+            await service.update(developerUser, 'chart-uuid', {
+                name: 'updated chart name',
+            });
+
+            expect(contentVerificationModel.unverify).toHaveBeenCalledWith(
+                ContentType.CHART,
+                'chart-uuid',
+            );
+        });
+    });
+});

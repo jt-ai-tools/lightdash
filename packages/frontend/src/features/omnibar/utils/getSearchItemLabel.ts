@@ -4,6 +4,8 @@ export const getSearchItemLabel = (itemType: SearchItemType) => {
     switch (itemType) {
         case SearchItemType.FIELD:
             return 'Fields';
+        case SearchItemType.DOCUMENT:
+            return 'Documents';
         case SearchItemType.DASHBOARD:
             return 'Dashboards';
         case SearchItemType.DASHBOARD_TAB:
@@ -18,6 +20,10 @@ export const getSearchItemLabel = (itemType: SearchItemType) => {
             return 'Pages';
         case SearchItemType.SQL_CHART:
             return 'SQL Charts';
+        case SearchItemType.DATA_APP:
+            return 'Data apps';
+        case SearchItemType.SETTINGS:
+            return 'Settings';
         default:
             return assertUnreachable(
                 itemType,
@@ -39,6 +45,7 @@ export const getSearchItemErrorLabel = (itemType: SearchItemType) => {
         case SearchItemType.SPACE:
         case SearchItemType.TABLE:
         case SearchItemType.PAGE:
+        case SearchItemType.DATA_APP:
 
         default:
             return new Error(`Unknown error item type: ${itemType}`);

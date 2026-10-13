@@ -2,7 +2,7 @@ import {
     MARKDOWN_TILE_CLASS,
     type DashboardMarkdownTile,
 } from '@lightdash/common';
-import { Box, Menu, useMantineColorScheme } from '@mantine-8/core';
+import { Box, Menu, useMantineColorScheme } from '@mantine/core';
 import { IconCopy } from '@tabler/icons-react';
 import MarkdownPreview from '@uiw/react-markdown-preview';
 import React, { useCallback, useMemo, useState, type FC } from 'react';
@@ -13,12 +13,12 @@ import { appendNewTilesToBottom } from '../../hooks/dashboard/useDashboard';
 import useDashboardStorage from '../../hooks/dashboard/useDashboardStorage';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
 import MantineIcon from '../common/MantineIcon';
-import TileBase from './TileBase/index';
 import styles from './DashboardMarkdownTile.module.css';
+import TileBase from './TileBase/index';
 
 export type Props = Pick<
     React.ComponentProps<typeof TileBase>,
-    'tile' | 'onEdit' | 'onDelete' | 'isEditMode'
+    'tile' | 'onEdit' | 'onDelete' | 'isEditMode' | 'minimal'
 > & {
     tile: DashboardMarkdownTile;
 };
@@ -45,7 +45,7 @@ const MarkdownTile: FC<Props> = (props) => {
     const setHaveTilesChanged = useDashboardContext(
         (c) => c.setHaveTilesChanged,
     );
-    const unsavedDashboardTiles = getUnsavedDashboardTiles();
+    const dashboardUuid = useDashboardContext((c) => c.dashboard?.uuid);
 
     const dashboardComments = useMemo(
         () =>
@@ -66,8 +66,11 @@ const MarkdownTile: FC<Props> = (props) => {
             uuid: uuid4(),
         };
 
+        const unsavedDashboardTiles = dashboardUuid
+            ? getUnsavedDashboardTiles(dashboardUuid)
+            : [];
         const existingTiles =
-            unsavedDashboardTiles?.length > 0
+            unsavedDashboardTiles.length > 0
                 ? unsavedDashboardTiles
                 : dashboardTiles;
 
@@ -77,7 +80,8 @@ const MarkdownTile: FC<Props> = (props) => {
         setHaveTilesChanged(true);
     }, [
         props.tile,
-        unsavedDashboardTiles,
+        dashboardUuid,
+        getUnsavedDashboardTiles,
         dashboardTiles,
         setDashboardTiles,
         setHaveTilesChanged,

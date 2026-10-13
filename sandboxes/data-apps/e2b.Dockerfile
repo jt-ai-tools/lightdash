@@ -1,0 +1,54 @@
+FROM node:24
+
+# Global tooling
+RUN npm install -g pnpm@11.17.0
+RUN npm install -g sfw@2.0.6
+RUN sfw npm install -g \
+    @anthropic-ai/claude-code@2.1.284 \
+    @openai/codex@0.147.0
+
+WORKDIR /app
+
+# Copy config files and pre-packed SDK tarball
+COPY template/package.json ./package.json
+COPY template/.npmrc ./.npmrc
+COPY template/pnpm-workspace.yaml ./pnpm-workspace.yaml
+COPY template/vite.config.js ./vite.config.js
+COPY template/tsconfig.json ./tsconfig.json
+COPY template/tailwind.config.js ./tailwind.config.js
+COPY template/postcss.config.js ./postcss.config.js
+COPY template/index.html ./index.html
+COPY template/skill.md ./skill.md
+COPY template/references/ ./references/
+COPY lightdash-query-sdk.tgz ./lightdash-query-sdk.tgz
+
+# Swap workspace:* for the local tarball, then install
+RUN sed -i 's|"workspace:[*]"|"file:lightdash-query-sdk.tgz"|' package.json && \
+    pnpm install --no-frozen-lockfile
+
+# Copy starter source files (overwritten by Claude during generation)
+COPY template/src/ ./src/
+
+# Bootstrap shadcn/ui (generates src/components/ui/ and src/lib/).
+# Keep in sync with template/scripts/bootstrap.sh; every Radix package these
+# components import must be declared in template/package.json.
+RUN npx shadcn@2.3.0 init --defaults --force
+RUN npx shadcn@2.3.0 add --overwrite --yes \
+    button badge card table dialog tabs select input label popover tooltip separator \
+    skeleton dropdown-menu sheet scroll-area switch checkbox avatar alert progress resizable
+
+# shadcn init --force rewrites tailwind.config.js to its legacy
+# hsl(var(--x)) convention, which clashes with index.css's raw oklch
+# variables — every color utility computes hsl(oklch(...)), invalid CSS
+# that browsers silently drop (dark-theme apps render black-on-black,
+# floating-surface chrome goes transparent). Restore the repo config so
+# raw `var(--x)` + complete oklch colors is the single convention.
+COPY template/tailwind.config.js ./tailwind.config.js
+
+# Coding-agent skills — first-party plus vendored (frontend-design @ Apache-2.0).
+# Claude reads these directly. Codex mirrors them into its native project skill
+# directory at runtime, so both agents keep using this single source of truth.
+COPY template/.claude/ ./.claude/
+
+# E2B sandbox runs as 'user' — make /app writable
+RUN chown -R user:user /app

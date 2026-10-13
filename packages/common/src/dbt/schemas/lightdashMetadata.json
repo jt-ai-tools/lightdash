@@ -34,9 +34,67 @@
                 ]
             }
         },
+        "FilterAutocomplete": {
+            "type": "object",
+            "properties": {
+                "values": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "type": "string"
+                            },
+                            "label": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["value"]
+                    }
+                },
+                "fetch_from_warehouse": {
+                    "type": "boolean"
+                },
+                "label_dimension": {
+                    "type": "string",
+                    "description": "Name of another dimension in the same table whose value is shown as the display label for each warehouse-fetched value."
+                },
+                "options_from_dimension": {
+                    "type": "object",
+                    "description": "Fetch autocomplete values from a dimension in another model. Cascading filters are not applied.",
+                    "properties": {
+                        "model": {
+                            "type": "string"
+                        },
+                        "dimension": {
+                            "type": "string"
+                        },
+                        "label_dimension": {
+                            "type": "string"
+                        }
+                    },
+                    "required": ["model", "dimension"]
+                }
+            }
+        },
+        "DefaultTimeDimension": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "interval": {
+                    "type": "string",
+                    "enum": ["DAY", "WEEK", "MONTH", "YEAR"]
+                }
+            },
+            "required": ["field", "interval"]
+        },
         "Compact": {
             "type": "string",
             "enum": [
+                "auto",
                 "thousands",
                 "millions",
                 "billions",
@@ -83,6 +141,17 @@
         },
         "Format": {
             "type": "string"
+        },
+        "Separator": {
+            "type": "string",
+            "enum": [
+                "default",
+                "commaPeriod",
+                "spacePeriod",
+                "periodComma",
+                "noSeparatorPeriod",
+                "apostrophePeriod"
+            ]
         },
         "Urls": {
             "type": "array",
@@ -172,6 +241,15 @@
                         }
                     ]
                 },
+                "convert_timezone": {
+                    "type": "boolean",
+                    "description": "When false, this dimension is rendered in its raw warehouse value and is not converted to the project timezone for display. Filter SQL still converts. Defaults to true."
+                },
+                "timestamp_domain": {
+                    "type": "string",
+                    "enum": ["aware", "naive"],
+                    "description": "Declares whether this timestamp column stores an instant ('aware') or a bare wall clock ('naive'); overrides the warehouse catalog."
+                },
                 "hidden": {
                     "type": "boolean"
                 },
@@ -183,6 +261,9 @@
                 },
                 "format": {
                     "$ref": "#/definitions/Format"
+                },
+                "separator": {
+                    "$ref": "#/definitions/Separator"
                 },
                 "group_label": {
                     "type": "string",
@@ -203,6 +284,9 @@
                 },
                 "any_attributes": {
                     "$ref": "#/definitions/AnyAttributes"
+                },
+                "filter_autocomplete": {
+                    "$ref": "#/definitions/FilterAutocomplete"
                 }
             }
         },
@@ -223,6 +307,15 @@
                 "sql": {
                     "type": "string"
                 },
+                "convert_timezone": {
+                    "type": "boolean",
+                    "description": "When false, this dimension is rendered in its raw warehouse value and is not converted to the project timezone for display. Filter SQL still converts. Defaults to true."
+                },
+                "timestamp_domain": {
+                    "type": "string",
+                    "enum": ["aware", "naive"],
+                    "description": "Declares whether this timestamp column stores an instant ('aware') or a bare wall clock ('naive'); overrides the warehouse catalog."
+                },
                 "hidden": {
                     "type": "boolean"
                 },
@@ -234,6 +327,9 @@
                 },
                 "format": {
                     "$ref": "#/definitions/Format"
+                },
+                "separator": {
+                    "$ref": "#/definitions/Separator"
                 },
                 "group_label": {
                     "type": "string",
@@ -254,6 +350,9 @@
                 },
                 "any_attributes": {
                     "$ref": "#/definitions/AnyAttributes"
+                },
+                "filter_autocomplete": {
+                    "$ref": "#/definitions/FilterAutocomplete"
                 }
             }
         },
@@ -274,6 +373,7 @@
                         "count_distinct",
                         "sum",
                         "sum_distinct",
+                        "average_distinct",
                         "min",
                         "max",
                         "number",
@@ -302,6 +402,9 @@
                 },
                 "format": {
                     "$ref": "#/definitions/Format"
+                },
+                "separator": {
+                    "$ref": "#/definitions/Separator"
                 },
                 "group_label": {
                     "type": "string",
@@ -341,6 +444,15 @@
                 },
                 "tags": {
                     "$ref": "#/definitions/Tags"
+                },
+                "default_time_dimension": {
+                    "$ref": "#/definitions/DefaultTimeDimension"
+                },
+                "required_attributes": {
+                    "$ref": "#/definitions/RequiredAttributes"
+                },
+                "any_attributes": {
+                    "$ref": "#/definitions/AnyAttributes"
                 }
             }
         },
@@ -364,6 +476,21 @@
                         "$ref": "#/definitions/LightdashMetric"
                     },
                     "default": {}
+                }
+            }
+        },
+        "LightdashColumnConfig": {
+            "type": "object",
+            "properties": {
+                "meta": {
+                    "oneOf": [
+                        {
+                            "$ref": "#/definitions/LightdashColumnMetadata"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
                 }
             }
         },
@@ -443,11 +570,35 @@
                 "sql_from": {
                     "type": "string"
                 },
+                "group_label": {
+                    "type": "string",
+                    "deprecated": true,
+                    "description": "Deprecated: use groups instead"
+                },
+                "groups": {
+                    "type": "array",
+                    "description": "Groups are used to group tables in the sidebar. You can create nested groups up to 5 levels. Define labels & descriptions for the group keys in lightdash.config.yml under table_groups.",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "maxItems": 5
+                },
+                "metrics": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/LightdashMetric"
+                    },
+                    "default": {}
+                },
                 "required_attributes": {
                     "$ref": "#/definitions/RequiredAttributes"
                 },
                 "any_attributes": {
                     "$ref": "#/definitions/AnyAttributes"
+                },
+                "default_time_dimension": {
+                    "$ref": "#/definitions/DefaultTimeDimension"
                 }
             },
             "default": {}

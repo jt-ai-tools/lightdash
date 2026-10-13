@@ -1,12 +1,17 @@
-import { SchedulerFormat, type ItemsMap } from '@lightdash/common';
-import { useDebouncedValue } from '@mantine-8/hooks';
-import { useState, type FC } from 'react';
+import { type ItemsMap } from '@lightdash/common';
+import { useDebouncedValue } from '@mantine/hooks';
+import { useMemo, useState, type FC } from 'react';
 import {
     selectParameterDefinitions,
     selectParameters,
     useExplorerSelector,
 } from '../../../features/explorer/store';
 import useDashboardContext from '../../../providers/Dashboard/useDashboardContext';
+import { readAppUrlState } from '../../apps/hooks/useAppUrlStateSync';
+import {
+    useAppSchedulerCreateMutation,
+    useAppSchedulers,
+} from '../hooks/useAppSchedulers';
 import {
     useChartSchedulerCreateMutation,
     useChartSchedulers,
@@ -16,6 +21,7 @@ import {
     useDashboardSchedulers,
 } from '../hooks/useDashboardSchedulers';
 import SchedulerModal from './SchedulerModal';
+import { DELIVERY_FORMATS } from './types';
 
 interface DashboardSchedulersProps {
     dashboardUuid: string;
@@ -36,6 +42,7 @@ export const DashboardSchedulersModal: FC<DashboardSchedulersProps> = ({
     const schedulersQuery = useDashboardSchedulers({
         dashboardUuid,
         searchQuery: debouncedSearchQuery,
+        includeLatestRun: true,
     });
     const createMutation = useDashboardSchedulerCreateMutation();
 
@@ -45,6 +52,12 @@ export const DashboardSchedulersModal: FC<DashboardSchedulersProps> = ({
     );
     const availableParameters = useDashboardContext(
         (c) => c.parameterDefinitions,
+    );
+    const filterableFieldsByTileUuid = useDashboardContext(
+        (c) => c.filterableFieldsByTileUuid,
+    );
+    const hiddenFilterableFieldIds = useDashboardContext(
+        (c) => c.hiddenFilterableFieldIds,
     );
 
     return (
@@ -56,6 +69,8 @@ export const DashboardSchedulersModal: FC<DashboardSchedulersProps> = ({
             isChart={false}
             currentParameterValues={currentParameterValues}
             availableParameters={availableParameters}
+            filterableFieldsByTileUuid={filterableFieldsByTileUuid}
+            hiddenFilterableFieldIds={hiddenFilterableFieldIds}
             searchQuery={searchQuery}
             onSearchQueryChange={setSearchQuery}
             {...modalProps}
@@ -74,12 +89,50 @@ interface ChartSchedulersProps {
     initialSchedulerUuid?: string;
 }
 
-// Formats for scheduled deliveries (excludes Google Sheets which has its own modal)
-const DELIVERY_FORMATS = [
-    SchedulerFormat.CSV,
-    SchedulerFormat.XLSX,
-    SchedulerFormat.IMAGE,
-];
+interface AppSchedulersProps {
+    projectUuid: string;
+    appUuid: string;
+    name: string;
+    isOpen: boolean;
+    onClose: () => void;
+    /** If provided, opens directly in edit mode for this scheduler */
+    initialSchedulerUuid?: string;
+    /** Count of ready queries captured by the live preview. */
+    capturedQueryCount?: number;
+}
+
+export const AppSchedulersModal: FC<AppSchedulersProps> = ({
+    projectUuid,
+    appUuid,
+    name,
+    ...modalProps
+}) => {
+    const schedulersQuery = useAppSchedulers({
+        projectUuid,
+        appUuid,
+        includeLatestRun: true,
+    });
+    const createMutation = useAppSchedulerCreateMutation(projectUuid);
+
+    // The modal only mounts while open, and its hosts (builder/viewer) sync
+    // app state into ?state= — so this is the view the user is looking at.
+    const currentAppState = useMemo(readAppUrlState, []);
+
+    return (
+        <SchedulerModal
+            resourceUuid={appUuid}
+            name={name}
+            schedulersQuery={schedulersQuery}
+            createMutation={createMutation}
+            isApp
+            currentAppState={currentAppState}
+            initialFormValues={
+                currentAppState ? { appState: currentAppState } : undefined
+            }
+            {...modalProps}
+        />
+    );
+};
 
 export const ChartSchedulersModal: FC<ChartSchedulersProps> = ({
     chartUuid,
@@ -92,6 +145,7 @@ export const ChartSchedulersModal: FC<ChartSchedulersProps> = ({
         chartUuid,
         searchQuery: debouncedSearchQuery,
         formats: DELIVERY_FORMATS,
+        includeLatestRun: true,
     });
     const createMutation = useChartSchedulerCreateMutation();
 

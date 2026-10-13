@@ -1,14 +1,14 @@
 import { type HealthState, type LightdashUser } from '@lightdash/common';
 import {
     init,
+    isInitialized,
     reactRouterV7BrowserTracingIntegration,
     replayIntegration,
     setTag,
     setTags,
     setUser,
-    spotlightBrowserIntegration,
 } from '@sentry/react';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import {
     createRoutesFromChildren,
     matchRoutes,
@@ -19,37 +19,23 @@ import {
 import {
     hasRecentChunkReload,
     isChunkLoadErrorObject,
+    RouteChunkLoadError,
 } from '../../features/chunkErrorHandler';
-
-const sentrySpotlightEnabled =
-    import.meta.env.DEV && import.meta.env.VITE_SENTRY_SPOTLIGHT;
-
-// Dummy DSN for Spotlight-only mode (no real Sentry account needed)
-const SPOTLIGHT_DUMMY_DSN = 'https://0@o0.ingest.sentry.io/0';
+import { useProjectUuid } from '../useProjectUuid';
 
 const useSentry = (
     sentryConfig: HealthState['sentry'] | undefined,
     user: LightdashUser | undefined,
+    disableDashboardTracing?: boolean,
 ) => {
-    const [isSentryLoaded, setIsSentryLoaded] = useState(false);
     useEffect(() => {
-        const dsn =
-            sentryConfig?.frontend.dsn ||
-            (sentrySpotlightEnabled ? SPOTLIGHT_DUMMY_DSN : '');
-        if (sentryConfig && !isSentryLoaded && dsn) {
+        const dsn = sentryConfig?.frontend.dsn;
+        if (sentryConfig && dsn && !isInitialized()) {
             init({
                 dsn,
                 release: sentryConfig.release,
                 environment: sentryConfig.environment,
                 integrations: [
-                    ...(sentrySpotlightEnabled
-                        ? [
-                              spotlightBrowserIntegration({
-                                  sidecarUrl: import.meta.env
-                                      .VITE_SENTRY_SPOTLIGHT,
-                              }),
-                          ]
-                        : []),
                     reactRouterV7BrowserTracingIntegration({
                         useEffect,
                         useLocation,
@@ -60,8 +46,14 @@ const useSentry = (
                     replayIntegration(),
                 ],
                 tracesSampler(samplingContext) {
-                    if (sentrySpotlightEnabled) {
-                        return 1.0;
+                    if (disableDashboardTracing) {
+                        const name =
+                            samplingContext.name ||
+                            samplingContext.transactionContext?.name ||
+                            window.location.pathname;
+                        if (name.includes('/dashboards/')) {
+                            return 0;
+                        }
                     }
 
                     if (samplingContext.parentSampled !== undefined) {
@@ -73,6 +65,14 @@ const useSentry = (
                 replaysOnErrorSampleRate: 1.0,
                 beforeSend(event, hint) {
                     const error = hint.originalException;
+                    if (error instanceof RouteChunkLoadError) {
+                        event.tags = {
+                            ...event.tags,
+                            'route.module': error.routeModule,
+                        };
+                        event.fingerprint = ['route-chunk-load-error'];
+                    }
+
                     // For chunk load errors, only send to Sentry if auto-reload already failed
                     if (
                         isChunkLoadErrorObject(error) &&
@@ -99,7 +99,6 @@ const useSentry = (
                     return event;
                 },
             });
-            setIsSentryLoaded(true);
         }
         if (user) {
             setUser({
@@ -112,15 +111,19 @@ const useSentry = (
                 'organization.uuid': user.organizationUuid,
             });
         }
-    }, [isSentryLoaded, setIsSentryLoaded, sentryConfig, user]);
+    }, [sentryConfig, user, disableDashboardTracing]);
 
-    const { projectUuid } = useParams<{ projectUuid?: string }>();
+    const { dashboardUuid } = useParams();
+    const projectUuid = useProjectUuid();
     const location = useLocation();
     useEffect(() => {
         if (projectUuid) {
             setTag('project.uuid', projectUuid);
         }
-    }, [location, projectUuid]);
+        if (dashboardUuid) {
+            setTag('dashboard.uuid', dashboardUuid);
+        }
+    }, [location, projectUuid, dashboardUuid]);
 };
 
 export default useSentry;

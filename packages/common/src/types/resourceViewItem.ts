@@ -1,12 +1,15 @@
+import { getAppDisplayName, type AppVersionStatus } from '../ee/apps/types';
 import assertUnreachable from '../utils/assertUnreachable';
 import {
     ContentType as ResourceViewItemType,
     type ChartSourceType,
+    type DataAppContent,
     type SummaryContent,
 } from './content';
+import { type ContentVerificationInfo } from './contentVerification';
 import { type DashboardBasicDetails } from './dashboard';
 import { type SpaceQuery } from './savedCharts';
-import { type Space, type SpaceSummary } from './space';
+import { type Space, type SpaceMemberRole, type SpaceSummary } from './space';
 
 export { ResourceViewItemType };
 
@@ -15,6 +18,7 @@ export enum ResourceItemCategory {
     RECENTLY_UPDATED = 'recentlyUpdated',
     PINNED = 'pinned',
     FAVORITES = 'favorites',
+    VERIFIED = 'verified',
 }
 
 export type ResourceViewChartItem = {
@@ -34,6 +38,7 @@ export type ResourceViewChartItem = {
         | 'updatedAt'
         | 'updatedByUser'
         | 'validationErrors'
+        | 'verification'
         | 'slug'
     > & { source?: ChartSourceType };
     category?: ResourceItemCategory;
@@ -44,6 +49,7 @@ export type ResourceViewDashboardItem = {
     data: Pick<
         DashboardBasicDetails,
         | 'uuid'
+        | 'slug'
         | 'spaceUuid'
         | 'description'
         | 'name'
@@ -54,6 +60,8 @@ export type ResourceViewDashboardItem = {
         | 'updatedAt'
         | 'updatedByUser'
         | 'validationErrors'
+        | 'verification'
+        | 'owner'
     >;
     category?: ResourceItemCategory;
 };
@@ -65,29 +73,77 @@ export type ResourceViewSpaceItem = {
         | 'projectUuid'
         | 'uuid'
         | 'name'
-        | 'isPrivate'
         | 'pinnedListUuid'
         | 'pinnedListOrder'
         | 'organizationUuid'
         | 'parentSpaceUuid'
         | 'path'
+        | 'inheritParentPermissions'
     > & {
         access: string[];
         accessListLength: number;
         dashboardCount: number;
         chartCount: number;
+        childSpaceCount: number;
+        appCount: number;
+        documentCount?: number;
     };
+};
+
+export type ResourceViewDocumentItem = {
+    type: ResourceViewItemType.DOCUMENT;
+    data: Omit<
+        ResourceViewDashboardItem['data'],
+        'validationErrors' | 'spaceUuid'
+    > & {
+        spaceUuid: string | null;
+        projectUuid: string;
+        organizationUuid: string;
+        createdByUserUuid: string | null;
+        directAccessRoles: SpaceMemberRole[];
+    };
+    category?: ResourceItemCategory;
+};
+
+export type ResourceViewDataAppItem = {
+    type: ResourceViewItemType.DATA_APP;
+    data: {
+        uuid: string;
+        name: string;
+        description: string | undefined;
+        spaceUuid: string | null;
+        createdByUserUuid: string | null;
+        updatedAt: Date;
+        updatedByUser: {
+            userUuid: string;
+            firstName: string;
+            lastName: string;
+        } | null;
+        views: number;
+        firstViewedAt: Date | null;
+        latestVersionNumber: number | null;
+        latestVersionStatus: AppVersionStatus | null;
+        latestReadyVersionNumber: number | null;
+        pinnedListUuid: string | null;
+        pinnedListOrder: number | null;
+        verification: ContentVerificationInfo | null;
+    };
+    category?: ResourceItemCategory;
 };
 
 type ResourceViewAcceptedItems =
     | ResourceViewSpaceItem['data']
     | ResourceViewChartItem['data']
-    | ResourceViewDashboardItem['data'];
+    | ResourceViewDashboardItem['data']
+    | ResourceViewDocumentItem['data']
+    | ResourceViewDataAppItem['data'];
 
 export type ResourceViewItem =
     | ResourceViewChartItem
     | ResourceViewDashboardItem
-    | ResourceViewSpaceItem;
+    | ResourceViewSpaceItem
+    | ResourceViewDocumentItem
+    | ResourceViewDataAppItem;
 
 export const isResourceViewItemChart = (
     item: ResourceViewItem,
@@ -102,6 +158,27 @@ export const isResourceViewSpaceItem = (
     item: ResourceViewItem,
 ): item is ResourceViewSpaceItem => item.type === ResourceViewItemType.SPACE;
 
+export const isResourceViewDataAppItem = (
+    item: ResourceViewItem,
+): item is ResourceViewDataAppItem =>
+    item.type === ResourceViewItemType.DATA_APP;
+
+export const isResourceViewDocumentItem = (
+    item: ResourceViewItem,
+): item is ResourceViewDocumentItem =>
+    item.type === ResourceViewItemType.DOCUMENT;
+
+/**
+ * Display name for any resource view item. Identical to `item.data.name` for
+ * every type except data apps, which fall back to a placeholder when unnamed
+ * (see `getAppDisplayName`). Use this anywhere a resource item's name is
+ * rendered so unnamed apps never show up blank.
+ */
+export const getResourceViewItemName = (item: ResourceViewItem): string =>
+    isResourceViewDataAppItem(item)
+        ? getAppDisplayName(item.data.name, item.data.uuid)
+        : item.data.name;
+
 export const wrapResource = <T extends ResourceViewAcceptedItems>(
     resource: T,
     type: ResourceViewItemType,
@@ -113,6 +190,13 @@ export const wrapResource = <T extends ResourceViewAcceptedItems>(
             return { type, data: resource as DashboardBasicDetails };
         case ResourceViewItemType.SPACE:
             return { type, data: resource as ResourceViewSpaceItem['data'] };
+        case ResourceViewItemType.DATA_APP:
+            return {
+                type,
+                data: resource as ResourceViewDataAppItem['data'],
+            };
+        case ResourceViewItemType.DOCUMENT:
+            return { type, data: resource as ResourceViewDocumentItem['data'] };
         default:
             return assertUnreachable(type, `Unknown resource type: ${type}`);
     }
@@ -125,25 +209,28 @@ export const wrapResourceView = (
     resources.map((resource) => wrapResource(resource, type));
 
 export const spaceToResourceViewItem = (
-    space: SpaceSummary,
+    space: Omit<SpaceSummary, 'inheritsFromOrgOrProject'>,
 ): ResourceViewSpaceItem['data'] => ({
     organizationUuid: space.organizationUuid,
     projectUuid: space.projectUuid,
     uuid: space.uuid,
     name: space.name,
-    isPrivate: space.isPrivate,
+    inheritParentPermissions: space.inheritParentPermissions,
     pinnedListUuid: space.pinnedListUuid,
     pinnedListOrder: space.pinnedListOrder,
     accessListLength: space.access.length,
     dashboardCount: space.dashboardCount,
     chartCount: space.chartCount,
+    childSpaceCount: space.childSpaceCount,
+    appCount: space.appCount,
+    documentCount: space.documentCount,
     access: space.access,
     parentSpaceUuid: space.parentSpaceUuid,
     path: space.path,
 });
 
 export type MostPopularAndRecentlyUpdated = {
-    mostPopular: (DashboardBasicDetails | SpaceQuery)[];
+    mostPopular: (DashboardBasicDetails | SpaceQuery | DataAppContent)[];
     recentlyUpdated: (DashboardBasicDetails | SpaceQuery)[];
 };
 
@@ -152,6 +239,25 @@ export const contentToResourceViewItem = (content: SummaryContent) => {
         content.lastUpdatedBy || content.createdBy || undefined;
 
     switch (content.contentType) {
+        case ResourceViewItemType.DOCUMENT:
+            return wrapResource(
+                {
+                    ...content,
+                    description: content.description || undefined,
+                    spaceUuid: content.space?.uuid ?? null,
+                    projectUuid: content.project.uuid,
+                    organizationUuid: content.organization.uuid,
+                    createdByUserUuid: content.createdBy?.uuid ?? null,
+                    pinnedListUuid: content.pinnedList?.uuid ?? null,
+                    pinnedListOrder: null,
+                    updatedAt: content.lastUpdatedAt || content.createdAt,
+                    updatedByUser: updatedByUser && {
+                        ...updatedByUser,
+                        userUuid: updatedByUser.uuid,
+                    },
+                },
+                ResourceViewItemType.DOCUMENT,
+            );
         case ResourceViewItemType.CHART:
             const chartViewItem: ResourceViewChartItem['data'] & {
                 projectUuid: string;
@@ -167,6 +273,7 @@ export const contentToResourceViewItem = (content: SummaryContent) => {
                     ...updatedByUser,
                     userUuid: updatedByUser.uuid,
                 },
+                verification: content.verification,
                 projectUuid: content.project.uuid, // Required for permission checks in ResourceActionMenu
                 organizationUuid: content.organization.uuid,
             };
@@ -186,6 +293,8 @@ export const contentToResourceViewItem = (content: SummaryContent) => {
                     ...updatedByUser,
                     userUuid: updatedByUser.uuid,
                 },
+                verification: content.verification,
+                owner: content.owner,
                 projectUuid: content.project.uuid,
                 organizationUuid: content.organization.uuid,
             };
@@ -201,26 +310,39 @@ export const contentToResourceViewItem = (content: SummaryContent) => {
                     projectUuid: content.project.uuid,
                     pinnedListUuid: content.pinnedList?.uuid || null,
                     pinnedListOrder: content.pinnedList?.order || null,
-                    userAccess: undefined, // This propery is not needed for the resource view item
+                    userAccess: undefined, // This property is not needed for the resource view item
+                    projectMemberAccessRole: null,
                     parentSpaceUuid: content.parentSpaceUuid,
                     path: content.path,
                 }),
                 ResourceViewItemType.SPACE,
             );
+        case ResourceViewItemType.DATA_APP:
+            const dataAppViewItem: ResourceViewDataAppItem['data'] = {
+                uuid: content.uuid,
+                name: content.name,
+                description: content.description || undefined,
+                spaceUuid: content.space?.uuid ?? null,
+                createdByUserUuid: content.createdBy?.uuid ?? null,
+                updatedAt: content.lastUpdatedAt || content.createdAt,
+                updatedByUser: updatedByUser
+                    ? {
+                          userUuid: updatedByUser.uuid,
+                          firstName: updatedByUser.firstName,
+                          lastName: updatedByUser.lastName,
+                      }
+                    : null,
+                views: content.views,
+                firstViewedAt: content.firstViewedAt,
+                latestVersionNumber: content.latestVersionNumber,
+                latestVersionStatus: content.latestVersionStatus,
+                latestReadyVersionNumber: content.latestReadyVersionNumber,
+                pinnedListUuid: content.pinnedList?.uuid || null,
+                pinnedListOrder: content.pinnedList?.order || null,
+                verification: content.verification,
+            };
+            return wrapResource(dataAppViewItem, ResourceViewItemType.DATA_APP);
         default:
             return assertUnreachable(content, `Unsupported content type`);
-    }
-};
-
-export const resourceToContent = (resource: ResourceViewItem) => {
-    switch (resource.type) {
-        case ResourceViewItemType.CHART:
-            return resource.data;
-        case ResourceViewItemType.DASHBOARD:
-            return resource.data;
-        case ResourceViewItemType.SPACE:
-            return resource.data;
-        default:
-            return assertUnreachable(resource, `Unsupported resource type`);
     }
 };

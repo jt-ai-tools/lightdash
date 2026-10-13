@@ -16,13 +16,17 @@ export const lightdashConfigWithNoSMTP: Pick<
     smtp: undefined,
     siteUrl: 'https://test.lightdash.cloud',
     query: {
+        underlyingDataMaxDimensions: 50,
         maxPageSize: 500,
         maxLimit: 100,
         defaultLimit: 500,
         csvCellsLimit: 100,
+        csvMaxLimit: 5000000,
         timezone: undefined,
-        useSqlPivotResults: false,
-        showExecutionTime: false,
+
+        retryQueryOnTransientErrors: false,
+        enableTimezoneSupport: undefined,
+        exploreSummaryProjectionMinStoredBytesPerExplore: 2048,
     },
 };
 
@@ -41,6 +45,7 @@ const smtpBase: SmtpConfig = {
         email: 'email',
     },
     allowInvalidCertificate: false,
+    inlineImageCid: false,
 };
 
 export const lightdashConfigWithBasicSMTP: Pick<
@@ -52,13 +57,17 @@ export const lightdashConfigWithBasicSMTP: Pick<
     },
     siteUrl: 'https://test.lightdash.cloud',
     query: {
+        underlyingDataMaxDimensions: 50,
         maxPageSize: 500,
         maxLimit: 100,
         defaultLimit: 500,
         csvCellsLimit: 100,
+        csvMaxLimit: 5000000,
         timezone: undefined,
-        useSqlPivotResults: false,
-        showExecutionTime: false,
+
+        retryQueryOnTransientErrors: false,
+        enableTimezoneSupport: undefined,
+        exploreSummaryProjectionMinStoredBytesPerExplore: 2048,
     },
 };
 
@@ -76,13 +85,17 @@ export const lightdashConfigWithOauth2SMTP: Pick<
     },
     siteUrl: 'https://test.lightdash.cloud',
     query: {
+        underlyingDataMaxDimensions: 50,
         maxPageSize: 500,
         maxLimit: 100,
         defaultLimit: 500,
         csvCellsLimit: 100,
+        csvMaxLimit: 5000000,
         timezone: undefined,
-        useSqlPivotResults: false,
-        showExecutionTime: false,
+
+        retryQueryOnTransientErrors: false,
+        enableTimezoneSupport: undefined,
+        exploreSummaryProjectionMinStoredBytesPerExplore: 2048,
     },
 };
 
@@ -96,13 +109,17 @@ export const lightdashConfigWithSecurePortSMTP: Pick<
     },
     siteUrl: 'https://test.lightdash.cloud',
     query: {
+        underlyingDataMaxDimensions: 50,
         maxPageSize: 500,
         maxLimit: 100,
         defaultLimit: 500,
         csvCellsLimit: 100,
+        csvMaxLimit: 5000000,
         timezone: undefined,
-        useSqlPivotResults: false,
-        showExecutionTime: false,
+
+        retryQueryOnTransientErrors: false,
+        enableTimezoneSupport: undefined,
+        exploreSummaryProjectionMinStoredBytesPerExplore: 2048,
     },
 };
 

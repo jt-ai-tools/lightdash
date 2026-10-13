@@ -3,25 +3,30 @@ import {
     getConditionalFormattingColor,
     getConditionalFormattingConfig,
     getConditionalFormattingDescription,
+    getConditionalFormattingTextStyle,
     getItemId,
     getReadableTextColor,
+    getRowConditionalFormattingColor,
+    getRowConditionalFormattingConfig,
     isNumericItem,
+    type ConditionalFormattingColorRange,
+    type ConditionalFormattingMinMax,
     type ConditionalFormattingRowFields,
     type ResultRow,
 } from '@lightdash/common';
 import {
-    Button,
     Center,
     Group,
     Loader,
     Skeleton,
+    Button,
     Tooltip,
-    useMantineColorScheme,
+    useComputedColorScheme,
 } from '@mantine/core';
 import { IconChevronDown, IconChevronRight } from '@tabler/icons-react';
 import { flexRender, type Row } from '@tanstack/react-table';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import React, { useEffect, useMemo, type FC } from 'react';
+import React, { useCallback, useEffect, useMemo, type FC } from 'react';
 import {
     getColorFromRange,
     transformColorsForDarkMode,
@@ -29,10 +34,15 @@ import {
 import { getConditionalRuleLabelFromItem } from '../../Filters/FilterInputs/utils';
 import MantineIcon from '../../MantineIcon';
 import {
+    getRowSpanMerges,
+    type RowSpanMerge,
+} from '../../PivotTable/getRowSpanMerges';
+import {
     FROZEN_COLUMN_BACKGROUND,
     ROW_HEIGHT_PX,
     SMALL_TEXT_LENGTH,
 } from '../constants';
+import { getGroupedDimensionColumnIds } from '../getGroupedDimensionColumnIds';
 import { Tr } from '../Table.styles';
 import { type TableContext } from '../types';
 import { useTableContext } from '../useTableContext';
@@ -59,23 +69,30 @@ export const VirtualizedArea: FC<{ cellCount: number; padding: number }> = ({
 
 interface TableRowProps {
     index: number;
+    virtualIndex: number;
     row: Row<ResultRow>;
-
+    measureElement: (node: HTMLElement | null) => void;
     cellContextMenu?: TableContext['cellContextMenu'];
     conditionalFormattings: TableContext['conditionalFormattings'];
     minMaxMap: TableContext['minMaxMap'];
     minimal?: boolean;
+    // Per-column rowSpan-merge info for row-grouping mode, keyed by column id;
+    // null when not in row-grouping mode.
+    rowSpanMergesByColumnId?: Map<string, RowSpanMerge[]> | null;
 }
 
 const TableRow: FC<TableRowProps> = ({
     row,
     index,
+    virtualIndex,
+    measureElement,
     cellContextMenu,
     conditionalFormattings,
     minMaxMap,
     minimal = false,
+    rowSpanMergesByColumnId,
 }) => {
-    const { colorScheme } = useMantineColorScheme();
+    const colorScheme = useComputedColorScheme();
     const rowFields = useMemo(
         () =>
             row
@@ -96,72 +113,143 @@ const TableRow: FC<TableRowProps> = ({
                 }, {}),
         [row],
     );
+    const getEffectiveColorFromRange = useCallback(
+        (
+            val: number,
+            colorRange: ConditionalFormattingColorRange,
+            minMaxRange: ConditionalFormattingMinMax,
+        ) => {
+            const effectiveColorRange =
+                colorScheme === 'dark'
+                    ? transformColorsForDarkMode(colorRange)
+                    : colorRange;
+            return getColorFromRange(val, effectiveColorRange, minMaxRange);
+        },
+        [colorScheme],
+    );
+
+    const rowBackgroundColor = useMemo(
+        () =>
+            getRowConditionalFormattingColor({
+                conditionalFormattings,
+                rowFields,
+                minMaxMap,
+            }),
+        [conditionalFormattings, rowFields, minMaxMap],
+    );
+
+    const rowConditionalFormattingConfig = useMemo(
+        () =>
+            getRowConditionalFormattingConfig({
+                conditionalFormattings,
+                rowFields,
+                minMaxMap,
+            }),
+        [conditionalFormattings, rowFields, minMaxMap],
+    );
 
     return (
-        <Tr $index={index}>
+        <Tr $index={index} ref={measureElement} data-index={virtualIndex}>
             {row.getVisibleCells().map((cell) => {
+                const rowSpanMerge = rowSpanMergesByColumnId?.get(
+                    cell.column.id,
+                )?.[index];
+                // Absorbed (non-block-start) merged cell: the block-start cell's
+                // rowSpan already covers this row, so render no <td> here.
+                if (rowSpanMerge && !rowSpanMerge.isBlockStart) {
+                    return null;
+                }
+
                 const meta = cell.column.columnDef.meta;
                 const field = meta?.item;
                 const cellValue = cell.getValue() as ResultRow[0] | undefined;
 
-                const conditionalFormattingConfig =
+                const cellConditionalFormattingConfig =
                     getConditionalFormattingConfig({
                         field,
                         value: cellValue?.value?.raw,
                         minMaxMap,
                         conditionalFormattings,
                         rowFields,
+                        applyTo: ConditionalFormattingColorApplyTo.CELL,
+                    });
+                const textConditionalFormattingConfig =
+                    getConditionalFormattingConfig({
+                        field,
+                        value: cellValue?.value?.raw,
+                        minMaxMap,
+                        conditionalFormattings,
+                        rowFields,
+                        applyTo: ConditionalFormattingColorApplyTo.TEXT,
                     });
 
-                const conditionalFormattingResult =
+                const cellConditionalFormattingResult =
                     getConditionalFormattingColor({
                         field,
                         value: cellValue?.value?.raw,
                         minMaxMap,
-                        config: conditionalFormattingConfig,
-                        getColorFromRange: (val, colorRange, minMaxRange) => {
-                            const effectiveColorRange =
-                                colorScheme === 'dark'
-                                    ? transformColorsForDarkMode(colorRange)
-                                    : colorRange;
-                            return getColorFromRange(
-                                val,
-                                effectiveColorRange,
-                                minMaxRange,
-                            );
-                        },
+                        config: cellConditionalFormattingConfig,
+                        getColorFromRange: getEffectiveColorFromRange,
                     });
-
-                const applyToText =
-                    conditionalFormattingResult?.applyTo ===
-                    ConditionalFormattingColorApplyTo.TEXT;
+                const textConditionalFormattingResult =
+                    getConditionalFormattingColor({
+                        field,
+                        value: cellValue?.value?.raw,
+                        minMaxMap,
+                        config: textConditionalFormattingConfig,
+                        getColorFromRange: getEffectiveColorFromRange,
+                    });
 
                 // Frozen/locked rows should have a fixed background, unless there is a conditional formatting color applied to cell
                 let backgroundColor: string | undefined;
-                if (conditionalFormattingResult && !applyToText) {
-                    backgroundColor = conditionalFormattingResult.color;
+                if (cellConditionalFormattingResult) {
+                    backgroundColor = cellConditionalFormattingResult.color;
+                } else if (rowBackgroundColor) {
+                    backgroundColor = rowBackgroundColor;
                 } else if (meta?.frozen) {
                     backgroundColor = FROZEN_COLUMN_BACKGROUND;
                 }
 
-                const tooltipContent = getConditionalFormattingDescription(
-                    field,
-                    conditionalFormattingConfig,
-                    rowFields,
-                    getConditionalRuleLabelFromItem,
-                );
+                const tooltipContent = [
+                    getConditionalFormattingDescription(
+                        field,
+                        cellConditionalFormattingConfig,
+                        rowFields,
+                        getConditionalRuleLabelFromItem,
+                    ),
+                    getConditionalFormattingDescription(
+                        field,
+                        textConditionalFormattingConfig,
+                        rowFields,
+                        getConditionalRuleLabelFromItem,
+                    ),
+                ]
+                    .filter(
+                        (description, index, descriptions) =>
+                            description &&
+                            descriptions.indexOf(description) === index,
+                    )
+                    .join('; ');
 
                 const toggleExpander = row.getToggleExpandedHandler();
                 // When conditional formatting is applied to cell, use calculated contrast color
                 // When applied to text, use the formatting color directly
                 let fontColor: string | undefined;
-                if (conditionalFormattingResult) {
-                    fontColor = applyToText
-                        ? conditionalFormattingResult.color
-                        : getReadableTextColor(
-                              conditionalFormattingResult.color,
-                          );
+                if (textConditionalFormattingResult) {
+                    fontColor = textConditionalFormattingResult.color;
+                } else if (cellConditionalFormattingResult) {
+                    fontColor = getReadableTextColor(
+                        cellConditionalFormattingResult.color,
+                    );
+                } else if (rowBackgroundColor) {
+                    fontColor = getReadableTextColor(rowBackgroundColor);
                 }
+
+                const textStyle = getConditionalFormattingTextStyle([
+                    cellConditionalFormattingConfig,
+                    textConditionalFormattingConfig,
+                    rowConditionalFormattingConfig,
+                ]);
 
                 const suppressContextMenu =
                     cell.getIsPlaceholder() || cell.getIsAggregated();
@@ -169,14 +257,23 @@ const TableRow: FC<TableRowProps> = ({
                 return (
                     <BodyCell
                         minimal={minimal}
+                        rowSpan={rowSpanMerge?.rowSpan}
                         key={cell.id}
                         style={meta?.style}
                         backgroundColor={backgroundColor}
                         fontColor={fontColor}
+                        textStyle={textStyle}
                         className={meta?.className}
                         index={index}
                         cell={cell}
-                        isNumericItem={isNumericItem(meta?.item)}
+                        isNumericItem={
+                            isNumericItem(meta?.item) &&
+                            !(
+                                meta?.item &&
+                                'richText' in meta.item &&
+                                meta.item.richText
+                            )
+                        }
                         hasData={!!meta?.item}
                         cellContextMenu={
                             suppressContextMenu ? undefined : cellContextMenu
@@ -185,13 +282,12 @@ const TableRow: FC<TableRowProps> = ({
                             (cellValue?.value?.formatted || '').length >
                             SMALL_TEXT_LENGTH
                         }
-                        tooltipContent={tooltipContent}
+                        tooltipContent={tooltipContent || undefined}
                     >
                         {cell.getIsGrouped() ? (
-                            <Group spacing="xxs">
+                            <Group gap="xxs">
                                 <Button
-                                    compact
-                                    size="xs"
+                                    size="compact-xs"
                                     variant="subtle"
                                     styles={(theme) => ({
                                         root: {
@@ -199,7 +295,7 @@ const TableRow: FC<TableRowProps> = ({
                                             paddingLeft: theme.spacing.two,
                                             paddingRight: theme.spacing.xxs,
                                         },
-                                        leftIcon: {
+                                        section: {
                                             marginRight: 0,
                                         },
                                     })}
@@ -210,7 +306,7 @@ const TableRow: FC<TableRowProps> = ({
                                         e.preventDefault();
                                         toggleExpander();
                                     }}
-                                    leftIcon={
+                                    leftSection={
                                         <MantineIcon
                                             size={14}
                                             icon={
@@ -255,9 +351,12 @@ const SCROLL_THRESHOLD = 100;
 const VirtualizedTableBody: FC<{
     tableContainerRef: React.RefObject<HTMLDivElement | null>;
     minimal?: boolean;
-}> = ({ tableContainerRef, minimal }) => {
+    showSubtotals?: boolean;
+    showRowGrouping?: boolean;
+}> = ({ tableContainerRef, minimal, showSubtotals, showRowGrouping }) => {
     const {
         table,
+        columns,
         cellContextMenu,
         conditionalFormattings,
         minMaxMap,
@@ -266,6 +365,30 @@ const VirtualizedTableBody: FC<{
         fetchMoreRows,
     } = useTableContext();
     const { rows } = table.getRowModel();
+
+    // Row-grouping (no subtotals): merge repeated dimension values with rowSpan,
+    // matching the pivot table. Renders a flat row model (no TanStack grouping),
+    // so rowSpans line up with the source rows.
+    const groupingOnlyMode = !!showRowGrouping && !showSubtotals;
+    const columnOrder = table.getState().columnOrder;
+    const rowSpanMergesByColumnId = useMemo(() => {
+        if (!groupingOnlyMode) return null;
+        const groupedColumnIds = getGroupedDimensionColumnIds(
+            columns,
+            columnOrder,
+        );
+        if (groupedColumnIds.length === 0) return null;
+        return getRowSpanMerges(
+            rows.length,
+            groupedColumnIds,
+            (rowIndex, columnId) =>
+                (
+                    rows[rowIndex]?.getValue(columnId) as
+                        | { value?: { raw?: unknown } }
+                        | undefined
+                )?.value?.raw,
+        );
+    }, [groupingOnlyMode, columns, columnOrder, rows]);
 
     const rowVirtualizer = useVirtualizer({
         getScrollElement: () => tableContainerRef.current,
@@ -300,14 +423,14 @@ const VirtualizedTableBody: FC<{
     ]);
 
     const virtualRows = rowVirtualizer.getVirtualItems();
-    const paddingTop =
-        virtualRows.length > 0 ? virtualRows?.[0]?.start || 0 : 0;
-    const paddingBottom =
-        virtualRows.length > 0
-            ? rowVirtualizer.getTotalSize() -
-              (virtualRows?.[virtualRows.length - 1]?.end || 0)
-            : 0;
     const cellsCount = rows[0]?.getVisibleCells().length || 0;
+
+    const measureElement = useCallback(
+        (node: HTMLElement | null) => {
+            rowVirtualizer.measureElement(node);
+        },
+        [rowVirtualizer],
+    );
 
     const skeletonRows = useMemo(() => {
         const tableColumnsCount = table.getAllColumns().length;
@@ -332,6 +455,39 @@ const VirtualizedTableBody: FC<{
         });
     }, [table]);
 
+    // Use before/after padding rows to maintain correct total scroll height
+    // while only rendering visible rows
+    const paddingTop = virtualRows.length > 0 ? virtualRows[0]?.start || 0 : 0;
+    const paddingBottom =
+        virtualRows.length > 0
+            ? rowVirtualizer.getTotalSize() -
+              (virtualRows[virtualRows.length - 1]?.end || 0)
+            : 0;
+
+    // Row-grouping mode renders every row (no virtualization) so the merged
+    // dimension cells' rowSpans span their full block — virtualization would
+    // unmount the absorbed rows and break the span.
+    if (groupingOnlyMode) {
+        return (
+            <tbody>
+                {rows.map((row, index) => (
+                    <TableRow
+                        minimal={minimal}
+                        key={index}
+                        index={index}
+                        virtualIndex={index}
+                        measureElement={measureElement}
+                        row={row}
+                        cellContextMenu={cellContextMenu}
+                        conditionalFormattings={conditionalFormattings}
+                        minMaxMap={minMaxMap}
+                        rowSpanMergesByColumnId={rowSpanMergesByColumnId}
+                    />
+                ))}
+            </tbody>
+        );
+    }
+
     return (
         <tbody>
             {paddingTop > 0 && (
@@ -340,7 +496,8 @@ const VirtualizedTableBody: FC<{
 
             {virtualRows.length === 0 && isFetchingRows
                 ? skeletonRows
-                : virtualRows.map(({ index }) => {
+                : virtualRows.map((virtualRow) => {
+                      const { index } = virtualRow;
                       // If this is the last row and we're loading, show the loader
                       if (
                           isFetchingRows &&
@@ -348,7 +505,11 @@ const VirtualizedTableBody: FC<{
                           isInfiniteScrollEnabled
                       ) {
                           return (
-                              <tr key={index}>
+                              <tr
+                                  key={index}
+                                  data-index={virtualRow.index}
+                                  ref={measureElement}
+                              >
                                   <td
                                       colSpan={
                                           table.getVisibleFlatColumns().length
@@ -356,7 +517,6 @@ const VirtualizedTableBody: FC<{
                                   >
                                       <Center>
                                           <Tooltip
-                                              withinPortal
                                               position="top"
                                               label={`Loading more rows...`}
                                           >
@@ -373,6 +533,8 @@ const VirtualizedTableBody: FC<{
                               minimal={minimal}
                               key={index}
                               index={index}
+                              virtualIndex={virtualRow.index}
+                              measureElement={measureElement}
                               row={rows[index]}
                               cellContextMenu={cellContextMenu}
                               conditionalFormattings={conditionalFormattings}
@@ -394,13 +556,22 @@ const VirtualizedTableBody: FC<{
 interface TableBodyProps {
     minimal?: boolean;
     tableContainerRef: React.RefObject<HTMLDivElement | null>;
+    showSubtotals?: boolean;
+    showRowGrouping?: boolean;
 }
 
-const TableBody: FC<TableBodyProps> = ({ minimal, tableContainerRef }) => {
+const TableBody: FC<TableBodyProps> = ({
+    minimal,
+    tableContainerRef,
+    showSubtotals,
+    showRowGrouping,
+}) => {
     return (
         <VirtualizedTableBody
             tableContainerRef={tableContainerRef}
             minimal={minimal}
+            showSubtotals={showSubtotals}
+            showRowGrouping={showRowGrouping}
         />
     );
 };

@@ -1,9 +1,6 @@
-import { Group, Text, Tooltip, useMantineTheme } from '@mantine-8/core';
+import { Group, Text, Tooltip, useMantineTheme } from '@mantine/core';
 import {
     IconAlertTriangleFilled,
-    IconArrowDown,
-    IconArrowsSort,
-    IconArrowUp,
     IconCircleCheckFilled,
     IconClock,
     IconHash,
@@ -12,33 +9,25 @@ import {
     IconUser,
 } from '@tabler/icons-react';
 import { format } from 'date-fns';
-import {
-    MantineReactTable,
-    useMantineReactTable,
-    type MRT_ColumnDef,
-    type MRT_SortingState,
-    type MRT_Virtualizer,
-} from 'mantine-react-table';
-import {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-    type FC,
-    type UIEvent,
-} from 'react';
+import { useCallback, useMemo, useRef, useState, type FC } from 'react';
+import { useInfiniteScroll } from '../../hooks/useInfiniteScroll';
 import { useProject } from '../../hooks/useProject';
 import {
     useProjectCompileLogs,
     type ProjectCompileLog,
 } from '../../hooks/useProjectCompileLogs';
+import {
+    ContentTable,
+    useContentTable,
+    type ContentTableColumnDef,
+    type ContentTableSortingState,
+    type ContentTableVirtualizer,
+} from '../common/ContentTable';
 import MantineIcon from '../common/MantineIcon';
 import { CompilationHistoryTopToolbar } from './CompilationHistoryTopToolbar';
 import { CompilationLogDrawer } from './CompilationLogDrawer';
 import { CompilationSourceBadge } from './CompilationSourceBadge';
-
-type CompilationSource = 'cli_deploy' | 'refresh_dbt' | 'create_project';
+import { type CompilationSource } from './types';
 
 type CompilationHistoryTableProps = {
     projectUuid: string;
@@ -50,13 +39,14 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
     projectUuid,
 }) => {
     const theme = useMantineTheme();
-    const tableContainerRef = useRef<HTMLDivElement>(null);
     const rowVirtualizerInstanceRef =
-        useRef<MRT_Virtualizer<HTMLDivElement, HTMLTableRowElement>>(null);
+        useRef<ContentTableVirtualizer<HTMLDivElement, HTMLTableRowElement>>(
+            null,
+        );
 
     const { data: project } = useProject(projectUuid);
 
-    const [sorting, setSorting] = useState<MRT_SortingState>([
+    const [sorting, setSorting] = useState<ContentTableSortingState>([
         { id: 'createdAt', desc: true },
     ]);
 
@@ -89,12 +79,6 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
         return sorting[0].desc ? 'desc' : 'asc';
     }, [sorting]);
 
-    const hasActiveFilters = selectedSource !== null;
-
-    const resetFilters = useCallback(() => {
-        setSelectedSource(null);
-    }, []);
-
     const { data, fetchNextPage, isError, isFetching, isLoading } =
         useProjectCompileLogs({
             projectUuid,
@@ -112,38 +96,14 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
     const totalDBRowCount = data?.pages?.[0]?.pagination?.totalResults ?? 0;
     const totalFetched = compileLogs.length;
 
-    // Temporary workaround to resolve a memoization issue with react-mantine-table.
-    // In certain scenarios, the content fails to render properly even when the data is updated.
-    // This issue may be addressed in a future library update.
-    const [tableData, setTableData] = useState<ProjectCompileLog[]>([]);
-    useEffect(() => {
-        setTableData(compileLogs);
-    }, [compileLogs]);
+    const { containerRef: tableContainerRef, onScroll } = useInfiniteScroll({
+        fetchNextPage,
+        isFetching,
+        hasMore: totalFetched < totalDBRowCount,
+        threshold: 400,
+    });
 
-    // Callback to fetch more data when scrolling
-    const fetchMoreOnBottomReached = useCallback(
-        (containerRefElement?: HTMLDivElement | null) => {
-            if (containerRefElement) {
-                const { scrollHeight, scrollTop, clientHeight } =
-                    containerRefElement;
-                // Fetch more when within 400px of bottom
-                if (
-                    scrollHeight - scrollTop - clientHeight < 400 &&
-                    !isFetching &&
-                    totalFetched < totalDBRowCount
-                ) {
-                    void fetchNextPage();
-                }
-            }
-        },
-        [fetchNextPage, isFetching, totalFetched, totalDBRowCount],
-    );
-
-    useEffect(() => {
-        fetchMoreOnBottomReached(tableContainerRef.current);
-    }, [fetchMoreOnBottomReached]);
-
-    const columns: MRT_ColumnDef<ProjectCompileLog>[] = useMemo(
+    const columns: ContentTableColumnDef<ProjectCompileLog>[] = useMemo(
         () => [
             {
                 accessorKey: 'createdAt',
@@ -152,7 +112,7 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
                 size: 180,
                 Header: ({ column }) => (
                     <Group gap="two" align="flex-start">
-                        <MantineIcon icon={IconClock} color="ldGray.6" />
+                        <MantineIcon icon={IconClock} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -169,7 +129,7 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
                 size: 140,
                 Header: ({ column }) => (
                     <Group gap="two" align="flex-start">
-                        <MantineIcon icon={IconRadar} color="ldGray.6" />
+                        <MantineIcon icon={IconRadar} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -186,7 +146,7 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
                 size: 200,
                 Header: ({ column }) => (
                     <Group gap="two" align="flex-start">
-                        <MantineIcon icon={IconUser} color="ldGray.6" />
+                        <MantineIcon icon={IconUser} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -199,7 +159,7 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
                 size: 100,
                 Header: ({ column }) => (
                     <Group gap="two" align="flex-start">
-                        <MantineIcon icon={IconHash} color="ldGray.6" />
+                        <MantineIcon icon={IconHash} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -213,7 +173,7 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
                 size: 100,
                 Header: ({ column }) => (
                     <Group gap="two" align="flex-start">
-                        <MantineIcon icon={IconHash} color="ldGray.6" />
+                        <MantineIcon icon={IconHash} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -226,7 +186,7 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
                 size: 120,
                 Header: ({ column }) => (
                     <Group gap="two" align="flex-start">
-                        <MantineIcon icon={IconHash} color="ldGray.6" />
+                        <MantineIcon icon={IconHash} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -239,7 +199,7 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
                 size: 100,
                 Header: ({ column }) => (
                     <Group gap="two" align="flex-start">
-                        <MantineIcon icon={IconProgress} color="ldGray.6" />
+                        <MantineIcon icon={IconProgress} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -274,19 +234,11 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
         [theme],
     );
 
-    const table = useMantineReactTable({
+    const table = useContentTable({
         columns,
-        data: tableData,
+        data: compileLogs,
         enableColumnResizing: false,
-        enableRowNumbers: false,
         enablePagination: false,
-        enableFilters: false,
-        enableFullScreenToggle: false,
-        enableDensityToggle: false,
-        enableColumnActions: false,
-        enableColumnFilters: false,
-        enableHiding: false,
-        enableGlobalFilterModes: false,
         enableSorting: true,
         enableMultiSort: false,
         manualSorting: true,
@@ -298,32 +250,12 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
             <CompilationHistoryTopToolbar
                 selectedSource={selectedSource}
                 setSelectedSource={setSelectedSource}
-                isFetching={isFetching || isLoading}
-                currentResultsCount={totalFetched}
-                hasActiveFilters={hasActiveFilters}
-                resetFilters={resetFilters}
             />
         ),
-        mantinePaperProps: {
-            shadow: undefined,
-            style: {
-                border: `1px solid ${theme.colors.ldGray[2]}`,
-                borderRadius: theme.spacing.sm,
-                boxShadow: theme.shadows.subtle,
-                display: 'flex',
-                flexDirection: 'column',
-            },
-        },
-        mantineTableHeadRowProps: {
-            sx: {
-                boxShadow: 'none',
-            },
-        },
         mantineTableContainerProps: {
             ref: tableContainerRef,
             style: { maxHeight: 'calc(100dvh - 370px)' },
-            onScroll: (event: UIEvent<HTMLDivElement>) =>
-                fetchMoreOnBottomReached(event.target as HTMLDivElement),
+            onScroll,
         },
         mantineTableProps: {
             highlightOnHover: true,
@@ -341,7 +273,6 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
                 backgroundColor: theme.colors.ldGray[0],
                 fontWeight: 600,
                 fontSize: theme.fontSizes.xs,
-                justifyContent: 'center',
             },
             sx: {
                 // Removing mantine table borders for last cell
@@ -364,19 +295,8 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
             },
         },
 
-        icons: {
-            IconArrowsSort: () => (
-                <MantineIcon icon={IconArrowsSort} size="md" color="ldGray.5" />
-            ),
-            IconSortAscending: () => (
-                <MantineIcon icon={IconArrowUp} size="md" color="blue.6" />
-            ),
-            IconSortDescending: () => (
-                <MantineIcon icon={IconArrowDown} size="md" color="blue.6" />
-            ),
-        },
         rowVirtualizerInstanceRef,
-        rowVirtualizerProps: { overscan: 10 },
+        rowVirtualizerProps: { estimateSize: () => 40, overscan: 10 },
         state: {
             isLoading,
             showAlertBanner: isError,
@@ -393,7 +313,7 @@ const CompilationHistoryTable: FC<CompilationHistoryTableProps> = ({
 
     return (
         <>
-            <MantineReactTable table={table} />
+            <ContentTable table={table} />
             <CompilationLogDrawer
                 opened={drawerOpened}
                 onClose={handleDrawerClose}

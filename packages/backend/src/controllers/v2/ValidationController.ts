@@ -2,6 +2,8 @@ import {
     ApiErrorPayload,
     ApiPaginatedValidateResponse,
     ApiSingleValidationResponse,
+    ApiValidationSummaryResponse,
+    assertRegisteredAccount,
     ValidationErrorType,
     ValidationSourceType,
 } from '@lightdash/common';
@@ -18,6 +20,7 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { toSessionUser } from '../../auth/account';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -40,6 +43,8 @@ export class ValidationControllerV2 extends BaseController {
      * @param sortDirection sort direction
      * @param sourceTypes comma-separated list of source types to filter by
      * @param errorTypes comma-separated list of error types to filter by
+     * @param tableName filter to errors caused by this model/table
+     * @param fieldName filter to errors caused by this field
      * @param includeChartConfigWarnings whether to include chart configuration warnings
      * @param fromSettings boolean for analytics tracking
      */
@@ -57,9 +62,12 @@ export class ValidationControllerV2 extends BaseController {
         @Query() sortDirection?: 'asc' | 'desc',
         @Query() sourceTypes?: string,
         @Query() errorTypes?: string,
+        @Query() tableName?: string,
+        @Query() fieldName?: string,
         @Query() includeChartConfigWarnings?: boolean,
         @Query() fromSettings?: boolean,
     ): Promise<ApiPaginatedValidateResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         const parsedSourceTypes = sourceTypes
@@ -85,7 +93,7 @@ export class ValidationControllerV2 extends BaseController {
         return {
             status: 'ok',
             results: await this.services.getValidationService().getPaginated(
-                req.user!,
+                toSessionUser(req.account),
                 projectUuid,
                 { page, pageSize },
                 {
@@ -94,6 +102,8 @@ export class ValidationControllerV2 extends BaseController {
                     sortDirection,
                     sourceTypes: parsedSourceTypes,
                     errorTypes: parsedErrorTypes,
+                    tableName,
+                    fieldName,
                     includeChartConfigWarnings,
                     fromSettings,
                 },
@@ -102,27 +112,58 @@ export class ValidationControllerV2 extends BaseController {
     }
 
     /**
-     * Get a single validation result by ID.
-     * @summary Get validation result
+     * Get validation errors grouped by root cause (e.g. all errors caused by
+     * one deleted model), with counts and a capped list of affected content.
+     * @summary Get validation summary
      * @param projectUuid the projectId for the validation
-     * @param validationId the validation result ID
      * @param req express request
      */
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
-    @Get('{validationId}')
-    @OperationId('GetValidationResult')
-    async get(
+    @Get('summary')
+    @OperationId('GetValidationSummary')
+    async summary(
         @Path() projectUuid: string,
-        @Path() validationId: number,
         @Request() req: express.Request,
-    ): Promise<ApiSingleValidationResponse> {
+    ): Promise<ApiValidationSummaryResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getValidationService()
-                .getById(req.user!, projectUuid, validationId),
+                .getValidationSummary(toSessionUser(req.account), projectUuid),
+        };
+    }
+
+    /**
+     * Get a single validation result.
+     * @summary Get validation result
+     * @param projectUuid the projectId for the validation
+     * @param validationIdOrUuid the validation UUID, or a legacy integer id
+     *   for rows created before the UUID migration (PROD-7386).
+     * @param req express request
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('{validationIdOrUuid}')
+    @OperationId('GetValidationResult')
+    async get(
+        @Path() projectUuid: string,
+        @Path() validationIdOrUuid: number | string,
+        @Request() req: express.Request,
+    ): Promise<ApiSingleValidationResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getValidationService()
+                .getValidation(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    validationIdOrUuid,
+                ),
         };
     }
 }

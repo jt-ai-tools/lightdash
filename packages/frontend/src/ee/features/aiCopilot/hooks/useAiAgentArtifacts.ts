@@ -1,4 +1,10 @@
-import type { AiArtifact, ApiError, ApiSuccessEmpty } from '@lightdash/common';
+import type {
+    AiArtifact,
+    AllVizChartConfig,
+    ApiError,
+    ApiSuccessEmpty,
+    ApiUpdateComposerVizConfigRequest,
+} from '@lightdash/common';
 import { IconArrowRight } from '@tabler/icons-react';
 import {
     useMutation,
@@ -8,9 +14,22 @@ import {
 } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { lightdashApi } from '../../../../api';
+import {
+    getAiAccessRefusal,
+    isAiAgentAuthorizationError,
+} from '../../../../features/aiAccess/errors';
 import useToaster from '../../../../hooks/toaster/useToaster';
+import useIsEmbedded from '../../../providers/Embed/useIsEmbedded';
+import { getAiAgentApiBase, getAiAgentPageBase } from './aiAgentRouting';
 
-const AI_AGENT_ARTIFACT_KEY = 'aiAgentArtifact';
+export const AI_AGENT_ARTIFACT_KEY = 'aiAgentArtifact';
+
+export type AiAgentArtifactVersionRef = {
+    projectUuid: string;
+    agentUuid: string;
+    artifactUuid: string;
+    versionUuid: string;
+};
 
 const getAiAgentArtifact = async (
     projectUuid: string,
@@ -19,7 +38,9 @@ const getAiAgentArtifact = async (
 ): Promise<AiArtifact> => {
     return lightdashApi<AiArtifact>({
         version: 'v1',
-        url: `/projects/${projectUuid}/aiAgents/${agentUuid}/artifacts/${artifactUuid}`,
+        url: `${getAiAgentApiBase(
+            projectUuid,
+        )}/${agentUuid}/artifacts/${artifactUuid}`,
         method: 'GET',
         body: undefined,
     });
@@ -33,11 +54,37 @@ const getAiAgentArtifactVersion = async (
 ): Promise<AiArtifact> => {
     return lightdashApi<AiArtifact>({
         version: 'v1',
-        url: `/projects/${projectUuid}/aiAgents/${agentUuid}/artifacts/${artifactUuid}/versions/${versionUuid}`,
+        url: `${getAiAgentApiBase(
+            projectUuid,
+        )}/${agentUuid}/artifacts/${artifactUuid}/versions/${versionUuid}`,
         method: 'GET',
         body: undefined,
     });
 };
+
+/** Key and fetcher shared by every observer of one artifact version. */
+export const aiAgentArtifactVersionQuery = ({
+    projectUuid,
+    agentUuid,
+    artifactUuid,
+    versionUuid,
+}: AiAgentArtifactVersionRef) => ({
+    queryKey: [
+        AI_AGENT_ARTIFACT_KEY,
+        projectUuid,
+        agentUuid,
+        artifactUuid,
+        'version',
+        versionUuid,
+    ],
+    queryFn: () =>
+        getAiAgentArtifactVersion(
+            projectUuid,
+            agentUuid,
+            artifactUuid,
+            versionUuid,
+        ),
+});
 
 type UseAiAgentArtifactProps = {
     projectUuid: string;
@@ -54,40 +101,39 @@ export const useAiAgentArtifact = ({
     versionUuid,
     options,
 }: UseAiAgentArtifactProps) => {
+    const isEmbed = useIsEmbedded();
     const navigate = useNavigate();
     const { showToastApiError } = useToaster();
 
-    const queryKey = versionUuid
-        ? [
-              AI_AGENT_ARTIFACT_KEY,
-              projectUuid,
-              agentUuid,
-              artifactUuid,
-              'version',
-              versionUuid,
-          ]
-        : [AI_AGENT_ARTIFACT_KEY, projectUuid, agentUuid, artifactUuid];
-
-    const queryFn = versionUuid
-        ? () =>
-              getAiAgentArtifactVersion(
+    const { queryKey, queryFn } =
+        versionUuid && artifactUuid
+            ? aiAgentArtifactVersionQuery({
                   projectUuid,
                   agentUuid,
-                  artifactUuid!,
+                  artifactUuid,
                   versionUuid,
-              )
-        : () => getAiAgentArtifact(projectUuid, agentUuid, artifactUuid!);
+              })
+            : {
+                  queryKey: [
+                      AI_AGENT_ARTIFACT_KEY,
+                      projectUuid,
+                      agentUuid,
+                      artifactUuid,
+                  ],
+                  queryFn: () =>
+                      getAiAgentArtifact(projectUuid, agentUuid, artifactUuid!),
+              };
 
     return useQuery<AiArtifact, ApiError>({
         queryKey,
         queryFn,
         ...options,
         onError: (error) => {
-            if (error.error?.statusCode === 403) {
+            if (isAiAgentAuthorizationError(error.error)) {
                 void navigate(
-                    `/projects/${projectUuid}/ai-agents/not-authorized`,
+                    `${getAiAgentPageBase(projectUuid, isEmbed)}/not-authorized`,
                 );
-            } else {
+            } else if (!getAiAccessRefusal(error.error)) {
                 showToastApiError({
                     title: versionUuid
                         ? 'Failed to fetch artifact version'
@@ -126,6 +172,7 @@ export const useSetArtifactVersionVerified = (
     agentUuid: string,
     { showSuccessAction = true }: { showSuccessAction?: boolean } = {},
 ) => {
+    const isEmbed = useIsEmbedded();
     const queryClient = useQueryClient();
     const navigate = useNavigate();
     const { showToastApiError, showToastSuccess } = useToaster();
@@ -192,16 +239,67 @@ export const useSetArtifactVersionVerified = (
             });
         },
         onError: ({ error }) => {
-            if (error?.statusCode === 403) {
+            if (isAiAgentAuthorizationError(error)) {
                 void navigate(
-                    `/projects/${projectUuid}/ai-agents/not-authorized`,
+                    `${getAiAgentPageBase(projectUuid, isEmbed)}/not-authorized`,
                 );
-            } else {
+            } else if (!getAiAccessRefusal(error)) {
                 showToastApiError({
                     title: 'Failed to update answer verification',
                     apiError: error,
                 });
             }
+        },
+    });
+};
+
+type ArtifactVersionRef = {
+    projectUuid: string;
+    agentUuid: string;
+    artifactUuid: string;
+    versionUuid: string;
+};
+
+/** Writes the terminal node's viz config onto a composer artifact version. */
+export const useUpdateComposerVizConfig = ({
+    projectUuid,
+    agentUuid,
+    artifactUuid,
+    versionUuid,
+}: ArtifactVersionRef) => {
+    const queryClient = useQueryClient();
+    const { showToastApiError } = useToaster();
+
+    return useMutation<ApiSuccessEmpty, ApiError, AllVizChartConfig>({
+        mutationKey: [
+            AI_AGENT_ARTIFACT_KEY,
+            'vizConfig',
+            artifactUuid,
+            versionUuid,
+        ],
+        mutationFn: (vizConfig) =>
+            lightdashApi<ApiSuccessEmpty>({
+                url: `${getAiAgentApiBase(projectUuid)}/${agentUuid}/artifacts/${artifactUuid}/versions/${versionUuid}/viz-config`,
+                method: 'PATCH',
+                body: JSON.stringify({
+                    vizConfig,
+                } satisfies ApiUpdateComposerVizConfigRequest),
+            }),
+        onSuccess: () => {
+            void queryClient.invalidateQueries({
+                queryKey: [
+                    AI_AGENT_ARTIFACT_KEY,
+                    projectUuid,
+                    agentUuid,
+                    artifactUuid,
+                ],
+            });
+        },
+        onError: ({ error }) => {
+            showToastApiError({
+                title: 'Chart change not saved',
+                apiError: error,
+            });
         },
     });
 };

@@ -1,4 +1,6 @@
+import { assertRegisteredAccount } from '@lightdash/common';
 import express, { type Router } from 'express';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -13,11 +15,42 @@ dashboardRouter.get(
     isAuthenticated,
     async (req, res, next) => {
         try {
+            // Embed JWTs authenticate but carry no session user; their
+            // dashboards are served by the embed routes.
+            assertRegisteredAccount(req.account);
             res.json({
                 status: 'ok',
                 results: await req.services
                     .getDashboardService()
-                    .getByIdOrSlug(req.user!, req.params.dashboardUuidOrSlug),
+                    .getByIdOrSlug(req.user!, req.params.dashboardUuidOrSlug, {
+                        projectUuid:
+                            typeof req.query.projectUuid === 'string'
+                                ? req.query.projectUuid
+                                : undefined,
+                    }),
+            });
+        } catch (e) {
+            next(e);
+        }
+    },
+);
+
+dashboardRouter.get(
+    '/:dashboardUuidOrSlug/view-stats',
+    allowApiKeyAuthentication,
+    isAuthenticated,
+    async (req, res, next) => {
+        try {
+            res.json({
+                status: 'ok',
+                results: await req.services
+                    .getDashboardService()
+                    .getViewStats(req.user!, req.params.dashboardUuidOrSlug, {
+                        projectUuid:
+                            typeof req.query.projectUuid === 'string'
+                                ? req.query.projectUuid
+                                : undefined,
+                    }),
             });
         } catch (e) {
             next(e);
@@ -29,6 +62,7 @@ dashboardRouter.get(
     '/:dashboardUuid/views',
     allowApiKeyAuthentication,
     isAuthenticated,
+    requireOAuthScopeOperation('dashboardRouter.getDashboardViews'),
     async (req, res, next) => {
         req.services
             .getAnalyticsService()
@@ -46,6 +80,7 @@ dashboardRouter.get(
 dashboardRouter.patch(
     '/:dashboardUuidOrSlug',
     allowApiKeyAuthentication,
+    requireOAuthScopeOperation('dashboardRouter PATCH /:dashboardUuidOrSlug'),
     isAuthenticated,
     unauthorisedInDemo,
     async (req, res, next) => {
@@ -108,6 +143,7 @@ dashboardRouter.delete(
 dashboardRouter.post(
     '/availableFilters',
     allowApiKeyAuthentication,
+    requireOAuthScopeOperation('dashboardRouter POST /availableFilters'),
     isAuthenticated,
     async (req, res, next) => {
         try {
@@ -128,6 +164,7 @@ dashboardRouter.post(
 dashboardRouter.post(
     '/:dashboardUuid/export',
     allowApiKeyAuthentication,
+    requireOAuthScopeOperation('dashboardRouter POST /:dashboardUuid/export'),
     isAuthenticated,
     async (req, res, next) => {
         try {
@@ -157,12 +194,21 @@ dashboardRouter.post(
     isAuthenticated,
     async (req, res, next) => {
         try {
+            const { selectedTabs } = req.body;
+            const validatedSelectedTabs =
+                Array.isArray(selectedTabs) &&
+                selectedTabs.length > 0 &&
+                selectedTabs.every((t: unknown) => typeof t === 'string')
+                    ? (selectedTabs as string[])
+                    : null;
+
             const results = await req.services
                 .getCsvService()
                 .scheduleExportCsvDashboard(
-                    req.user!,
+                    req.account!,
                     req.params.dashboardUuid,
                     req.body.filters,
+                    validatedSelectedTabs,
                     req.body.dateZoomGranularity,
                 );
 

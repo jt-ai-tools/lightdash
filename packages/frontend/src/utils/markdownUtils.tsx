@@ -1,12 +1,18 @@
 import {
     Divider,
-    type MantineStyleProp,
     rem,
     Title,
     useMantineTheme,
-} from '@mantine-8/core';
+    type MantineStyleProp,
+} from '@mantine/core';
 import type MarkdownPreview from '@uiw/react-markdown-preview';
 import type MDEditor from '@uiw/react-md-editor';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
+import type { PluggableList } from 'unified';
+
+export const markdownSanitizeRehypePlugins = [
+    [rehypeSanitize, defaultSchema],
+] satisfies PluggableList;
 
 /**
  * Removes header auto-linking when rendering markdown via ReactMarkdownPreview.
@@ -77,6 +83,5 @@ export const useMdEditorStyle = (): React.CSSProperties => {
     return {
         fontSize: rem(theme.fontSizes.sm),
         backgroundColor: 'transparent',
-        padding: 0,
     };
 };

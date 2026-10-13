@@ -1,8 +1,12 @@
-import { NavLink, Text, useMantineTheme } from '@mantine/core';
-import { IconTable } from '@tabler/icons-react';
+import {
+    Group,
+    NavLink,
+    Text,
+    useComputedColorScheme,
+    useMantineTheme,
+} from '@mantine/core';
 import { memo, useCallback, useMemo, type FC } from 'react';
 import { useToggle } from 'react-use';
-import MantineIcon from '../../../../common/MantineIcon';
 import { TableItemDetailPreview } from '../ItemDetailPreview';
 import type { TableHeaderItem } from './types';
 
@@ -19,8 +23,27 @@ const VirtualTableHeaderComponent: FC<VirtualTableHeaderProps> = ({
     onToggle,
 }) => {
     const theme = useMantineTheme();
+    const colorScheme = useComputedColorScheme();
     const { table, isExpanded } = item.data;
     const [isHover, toggleHover] = useToggle(false);
+
+    // Matches what the tree renders: hidden fields are excluded
+    const fieldCount = useMemo(
+        () =>
+            Object.values(table.dimensions).filter((d) => !d.hidden).length +
+            Object.values(table.metrics).filter((m) => !m.hidden).length,
+        [table.dimensions, table.metrics],
+    );
+
+    const tableMetadata = useMemo(
+        () => ({
+            name: table.name,
+            dbtPackageName: table.dbtPackageName,
+            ymlPath: table.ymlPath,
+            sqlPath: table.sqlPath,
+        }),
+        [table.name, table.dbtPackageName, table.ymlPath, table.sqlPath],
+    );
 
     const handleMouseEnter = useCallback(
         () => toggleHover(true),
@@ -30,9 +53,14 @@ const VirtualTableHeaderComponent: FC<VirtualTableHeaderProps> = ({
         () => toggleHover(false),
         [toggleHover],
     );
-    const handleClosePreview = useCallback(
-        () => toggleHover(false),
-        [toggleHover],
+    const handleKeyDown = useCallback(
+        (event: React.KeyboardEvent<HTMLElement>) => {
+            if (event.nativeEvent.code === 'Space') {
+                event.preventDefault();
+                onToggle();
+            }
+        },
+        [onToggle],
     );
 
     const stickyStyle = useMemo(
@@ -40,12 +68,12 @@ const VirtualTableHeaderComponent: FC<VirtualTableHeaderProps> = ({
             top: 0,
             position: 'sticky' as const,
             backgroundColor:
-                theme.colorScheme === 'dark'
+                colorScheme === 'dark'
                     ? theme.colors.dark[7]
                     : theme.colors.background[0],
             zIndex: 1,
         }),
-        [theme.colorScheme, theme.colors],
+        [colorScheme, theme.colors],
     );
 
     const label = (
@@ -53,21 +81,30 @@ const VirtualTableHeaderComponent: FC<VirtualTableHeaderProps> = ({
             label={table.label}
             description={table.description}
             showPreview={isHover}
-            closePreview={handleClosePreview}
+            closePreview={handleMouseLeave}
+            tableMetadata={tableMetadata}
         >
-            <Text truncate fw={600}>
-                {table.label}
-            </Text>
+            <Group gap="xs" wrap="nowrap">
+                <Text truncate fz="sm" fw={600}>
+                    {table.label}
+                </Text>
+                {!isExpanded && (
+                    <Text size="xs" c="dimmed" fw={400}>
+                        {fieldCount} {fieldCount === 1 ? 'field' : 'fields'}
+                    </Text>
+                )}
+            </Group>
         </TableItemDetailPreview>
     );
 
     return (
         <NavLink
+            component="button"
             opened={isExpanded}
             onClick={onToggle}
+            onKeyDown={handleKeyDown}
             onMouseEnter={handleMouseEnter}
             onMouseLeave={handleMouseLeave}
-            icon={<MantineIcon icon={IconTable} size="lg" color="ldGray.7" />}
             label={label}
             style={stickyStyle}
         >

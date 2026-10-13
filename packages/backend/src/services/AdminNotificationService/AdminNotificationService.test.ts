@@ -4,9 +4,9 @@ import {
     OrganizationMemberRole,
     ProjectMemberRole,
 } from '@lightdash/common';
+import { analyticsMock } from '../../analytics/LightdashAnalytics.mock';
 import EmailClient from '../../clients/EmailClient/EmailClient';
 import { lightdashConfigMock } from '../../config/lightdashConfig.mock';
-import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
 import { OrganizationMemberProfileModel } from '../../models/OrganizationMemberProfileModel';
 import { OrganizationModel } from '../../models/OrganizationModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
@@ -26,41 +26,40 @@ import {
     mockTargetUserUuid,
 } from './AdminNotificationService.mock';
 
-const sendAdminChangeNotificationEmail = jest.fn<
-    Promise<void>,
-    [string[], AdminNotificationPayload]
->();
+const sendAdminChangeNotificationEmail =
+    vi.fn<
+        (
+            recipients: string[],
+            payload: AdminNotificationPayload,
+        ) => Promise<void>
+    >();
 
 const emailClient = {
     sendAdminChangeNotificationEmail,
 };
 
-const featureFlagModel = {
-    get: jest.fn(async () => ({ enabled: true })),
-};
-
 const organizationMemberProfileModel = {
-    getOrganizationAdmins: jest.fn(async () => [mockOrgAdmin1, mockOrgAdmin2]),
+    getOrganizationAdmins: vi.fn(async () => [mockOrgAdmin1, mockOrgAdmin2]),
 };
 
 const organizationModel = {
-    get: jest.fn(async () => mockOrganization),
+    get: vi.fn(async () => mockOrganization),
 };
 
 const projectModel = {
-    getSummary: jest.fn(async () => mockProjectSummary),
-    getProjectAccess: jest.fn(async () => [mockProjectAdmin]),
+    getSummary: vi.fn(async () => mockProjectSummary),
+    getProjectAccess: vi.fn(async () => [mockProjectAdmin]),
 };
 
 const userModel = {
-    getUserDetailsByUuid: jest.fn(async () => mockTargetUser),
+    getUserDetailsByUuid: vi.fn(async () => mockTargetUser),
 };
 
 describe('AdminNotificationService', () => {
     const service = new AdminNotificationService({
         lightdashConfig: lightdashConfigMock,
+        analytics: analyticsMock,
         emailClient: emailClient as unknown as EmailClient,
-        featureFlagModel: featureFlagModel as unknown as FeatureFlagModel,
         organizationMemberProfileModel:
             organizationMemberProfileModel as unknown as OrganizationMemberProfileModel,
         organizationModel: organizationModel as unknown as OrganizationModel,
@@ -69,39 +68,7 @@ describe('AdminNotificationService', () => {
     });
 
     afterEach(() => {
-        jest.clearAllMocks();
-    });
-
-    it('should not send org notification when feature flag is disabled', async () => {
-        (featureFlagModel.get as jest.Mock).mockResolvedValueOnce({
-            enabled: false,
-        });
-
-        await service.notifyOrgAdminRoleChange(
-            mockSessionAccount,
-            mockTargetUserUuid,
-            mockOrganizationUuid,
-            OrganizationMemberRole.MEMBER,
-            OrganizationMemberRole.ADMIN,
-        );
-
-        expect(sendAdminChangeNotificationEmail).not.toHaveBeenCalled();
-    });
-
-    it('should not send org notification when feature flag check throws', async () => {
-        (featureFlagModel.get as jest.Mock).mockRejectedValueOnce(
-            new Error('Feature flag error'),
-        );
-
-        await service.notifyOrgAdminRoleChange(
-            mockSessionAccount,
-            mockTargetUserUuid,
-            mockOrganizationUuid,
-            OrganizationMemberRole.MEMBER,
-            OrganizationMemberRole.ADMIN,
-        );
-
-        expect(sendAdminChangeNotificationEmail).not.toHaveBeenCalled();
+        vi.clearAllMocks();
     });
 
     it('should send notification when promoting user to org admin', async () => {
@@ -227,7 +194,7 @@ describe('AdminNotificationService', () => {
     });
 
     it('should not throw when email sending fails', async () => {
-        (sendAdminChangeNotificationEmail as jest.Mock).mockRejectedValueOnce(
+        sendAdminChangeNotificationEmail.mockRejectedValueOnce(
             new Error('SMTP error'),
         );
 
@@ -243,7 +210,7 @@ describe('AdminNotificationService', () => {
     });
 
     it('should not throw when fetching org data fails', async () => {
-        (organizationModel.get as jest.Mock).mockRejectedValueOnce(
+        (organizationModel.get as import('vitest').Mock).mockRejectedValueOnce(
             new Error('DB error'),
         );
 
@@ -256,23 +223,6 @@ describe('AdminNotificationService', () => {
                 OrganizationMemberRole.ADMIN,
             ),
         ).resolves.not.toThrow();
-    });
-
-    it('should not send project notification when feature flag is disabled', async () => {
-        (featureFlagModel.get as jest.Mock).mockResolvedValueOnce({
-            enabled: false,
-        });
-
-        await service.notifyProjectAdminRoleChange({
-            account: mockSessionAccount,
-            targetUserUuid: mockTargetUserUuid,
-            projectUuid: mockProjectUuid,
-            organizationUuid: mockOrganizationUuid,
-            previousRole: ProjectMemberRole.EDITOR,
-            newRole: ProjectMemberRole.ADMIN,
-        });
-
-        expect(sendAdminChangeNotificationEmail).not.toHaveBeenCalled();
     });
 
     it('should send notification when promoting user to project admin', async () => {
@@ -338,11 +288,11 @@ describe('AdminNotificationService', () => {
     it('should deduplicate recipients when same user is org and project admin', async () => {
         const sameEmail = 'shared@example.com';
         (
-            organizationMemberProfileModel.getOrganizationAdmins as jest.Mock
+            organizationMemberProfileModel.getOrganizationAdmins as import('vitest').Mock
         ).mockResolvedValueOnce([{ ...mockOrgAdmin1, email: sameEmail }]);
-        (projectModel.getProjectAccess as jest.Mock).mockResolvedValueOnce([
-            { ...mockProjectAdmin, email: sameEmail },
-        ]);
+        (
+            projectModel.getProjectAccess as import('vitest').Mock
+        ).mockResolvedValueOnce([{ ...mockProjectAdmin, email: sameEmail }]);
 
         await service.notifyProjectAdminRoleChange({
             account: mockSessionAccount,
@@ -392,28 +342,13 @@ describe('AdminNotificationService', () => {
     });
 
     describe('notifyConnectionSettingsChange', () => {
-        it('should not send when feature flag is disabled', async () => {
-            (featureFlagModel.get as jest.Mock).mockResolvedValueOnce({
-                enabled: false,
-            });
-
-            await service.notifyConnectionSettingsChange({
-                organizationUuid: mockOrganizationUuid,
-                projectUuid: mockProjectUuid,
-                projectName: 'Test Project',
-                changedBy: mockSessionAccount,
-            });
-
-            expect(sendAdminChangeNotificationEmail).not.toHaveBeenCalled();
-        });
-
         it('should not send when no recipients found', async () => {
             (
-                organizationMemberProfileModel.getOrganizationAdmins as jest.Mock
+                organizationMemberProfileModel.getOrganizationAdmins as import('vitest').Mock
             ).mockResolvedValueOnce([]);
-            (projectModel.getProjectAccess as jest.Mock).mockResolvedValueOnce(
-                [],
-            );
+            (
+                projectModel.getProjectAccess as import('vitest').Mock
+            ).mockResolvedValueOnce([]);
 
             await service.notifyConnectionSettingsChange({
                 organizationUuid: mockOrganizationUuid,

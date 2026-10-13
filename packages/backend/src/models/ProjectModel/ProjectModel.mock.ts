@@ -4,6 +4,7 @@ import {
     BigqueryCredentials,
     CreateBigqueryCredentials,
     CreatePostgresCredentials,
+    CreateWarehouseCredentials,
     DbtCloudIDEProjectConfig,
     DbtProjectType,
     DefaultSupportedDbtVersion,
@@ -23,6 +24,7 @@ import {
 } from '@lightdash/common';
 import { ProjectTable } from '../../database/entities/projects';
 import { EncryptionUtil } from '../../utils/EncryptionUtil/EncryptionUtil';
+import { type ResolvedCredentialRead } from '../WarehouseConnectionRouter/WarehouseConnectionRouter';
 
 const dbtCloudIDEProjectConfigMock: DbtCloudIDEProjectConfig = {
     type: DbtProjectType.DBT_CLOUD_IDE,
@@ -43,14 +45,15 @@ const bigqueryCredentials: CreateBigqueryCredentials = {
 };
 
 export const encryptionUtilMock = {
-    encrypt: jest.fn(() => Buffer.from('encrypted')),
-    decrypt: jest.fn((encrypted: Buffer) => encrypted.toString()),
+    encrypt: vi.fn(() => Buffer.from('encrypted')),
+    decrypt: vi.fn((encrypted: Buffer) => encrypted.toString()),
 } as AnyType as EncryptionUtil;
 
 export const projectUuid = 'project uuid';
 
 export const projectMock = {
     name: 'my project',
+    slug: 'my-project',
     project_type: ProjectType.DEFAULT,
     dbt_connection: Buffer.from(JSON.stringify(dbtCloudIDEProjectConfigMock)),
     encrypted_credentials: Buffer.from(JSON.stringify(bigqueryCredentials)),
@@ -58,6 +61,11 @@ export const projectMock = {
     organization_uuid: 'organizationUuid',
     dbt_version: DefaultSupportedDbtVersion,
     scheduler_timezone: 'UTC',
+    query_timezone: null,
+    use_project_timezone_in_filters: false,
+    scheduler_failure_notify_recipients: false,
+    scheduler_failure_include_contact: false,
+    scheduler_failure_contact_override: null,
     has_default_user_spaces: false,
 };
 
@@ -86,6 +94,7 @@ export const expectedTablesConfiguration: TablesConfiguration = {
 export const expectedProject: Project = {
     organizationUuid: 'organizationUuid',
     projectUuid,
+    slug: 'my-project',
     name: 'my project',
     type: ProjectType.DEFAULT,
     dbtConnection: {
@@ -105,8 +114,18 @@ export const expectedProject: Project = {
     } as AnyType as BigqueryCredentials,
     dbtVersion: DefaultSupportedDbtVersion,
     schedulerTimezone: 'UTC',
+    queryTimezone: null,
+    useProjectTimezoneInFilters: false,
+    schedulerFailureNotifyRecipients: false,
+    schedulerFailureIncludeContact: false,
+    schedulerFailureContactOverride: null,
     createdByUserUuid: null,
     hasDefaultUserSpaces: false,
+    colorPaletteUuid: null,
+    expiresAt: null,
+    provisioningSource: null,
+    agentSqlScope: null,
+    connectionRoute: 'single',
 };
 
 const metricFilter: MetricFilterRule = {
@@ -419,4 +438,43 @@ export const CompletePostgresCredentials: CreatePostgresCredentials = {
     port: 5432,
     dbname: 'dbname',
     schema: 'schema',
+};
+
+export const singleRouteProjectModelMethods = {
+    async getWarehouseCredentialsForProjectUncached(
+        this: {
+            getWarehouseCredentialsForProject: (
+                requestedProjectUuid: string,
+            ) => Promise<CreateWarehouseCredentials>;
+        },
+        requestedProjectUuid: string,
+    ) {
+        return this.getWarehouseCredentialsForProject(requestedProjectUuid);
+    },
+    async requireSingleConnectionRoute() {
+        return 'single' as const;
+    },
+    async getConnectionRoute() {
+        return 'single' as const;
+    },
+    async resolveWarehouseCredentialRead() {
+        return { kind: 'original' as const };
+    },
+    async resolveWarehouseCredentialReadWithRoute(): Promise<ResolvedCredentialRead> {
+        return {
+            route: 'single' as const,
+            target: { kind: 'original' as const },
+            originalWarehouseConnectionUuid: null,
+        };
+    },
+    async getWarehouseCredentialsForBinding(
+        this: {
+            getWarehouseCredentialsForProject: (
+                requestedProjectUuid: string,
+            ) => unknown;
+        },
+        requestedProjectUuid: string,
+    ) {
+        return this.getWarehouseCredentialsForProject(requestedProjectUuid);
+    },
 };

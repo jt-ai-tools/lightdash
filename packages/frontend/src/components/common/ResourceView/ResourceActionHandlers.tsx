@@ -1,4 +1,5 @@
 import {
+    ContentReviewContentType,
     assertUnreachable,
     ChartSourceType,
     ContentType,
@@ -7,32 +8,71 @@ import {
     type ResourceViewItem,
     type Space,
 } from '@lightdash/common';
+import { Center, Loader } from '@mantine/core';
 import {
     IconFolderCog,
     IconFolderPlus,
     IconFolderX,
 } from '@tabler/icons-react';
 import { useCallback, useEffect, type FC } from 'react';
-import { useParams } from 'react-router';
+import { RequestReviewModal } from '../../../ee/features/contentReview';
+import { MoveAppToSpaceModal } from '../../../features/apps/components/MoveAppToSpaceModal';
+import { useAppPinningMutation } from '../../../features/apps/hooks/useAppPinningMutation';
 import { DeleteSqlChartModal } from '../../../features/sqlRunner/components/DeleteSqlChartModal';
 import { useChartPinningMutation } from '../../../hooks/pinning/useChartPinningMutation';
 import { useDashboardPinningMutation } from '../../../hooks/pinning/useDashboardPinningMutation';
+import { useDocumentPinningMutation } from '../../../hooks/pinning/useDocumentPinningMutation';
 import { useSpacePinningMutation } from '../../../hooks/pinning/useSpaceMutation';
 import { useContentAction } from '../../../hooks/useContent';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
+import { useSpace } from '../../../hooks/useSpaces';
 import AddTilesToDashboardModal from '../../SavedDashboards/AddTilesToDashboardModal';
-import SpaceActionModal from '../SpaceActionModal';
-import { ActionType } from '../SpaceActionModal/types';
-import TransferItemsModal from '../TransferItemsModal/TransferItemsModal';
+import AppDeleteModal from '../modal/AppDeleteModal';
+import AppUpdateModal from '../modal/AppUpdateModal';
 import ChartDeleteModal from '../modal/ChartDeleteModal';
 import ChartDuplicateModal from '../modal/ChartDuplicateModal';
 import ChartUpdateModal from '../modal/ChartUpdateModal';
 import DashboardDeleteModal from '../modal/DashboardDeleteModal';
 import DashboardDuplicateModal from '../modal/DashboardDuplicateModal';
 import DashboardUpdateModal from '../modal/DashboardUpdateModal';
+import DocumentDeleteModal from '../modal/DocumentDeleteModal';
+import ShareSpaceModal from '../ShareSpaceModal';
+import SpaceActionModal from '../SpaceActionModal';
+import { ActionType } from '../SpaceActionModal/types';
+import TransferItemsModal from '../TransferItemsModal/TransferItemsModal';
 import {
     ResourceViewItemAction,
     type ResourceViewItemActionState,
 } from './types';
+
+const ShareSpaceAction: FC<{
+    projectUuid: string;
+    spaceUuid: string;
+    onClose: () => void;
+}> = ({ projectUuid, spaceUuid, onClose }) => {
+    const { data: space, isLoading } = useSpace(projectUuid, spaceUuid);
+
+    if (isLoading) {
+        return (
+            <Center p="xl">
+                <Loader />
+            </Center>
+        );
+    }
+
+    if (!space) {
+        return null;
+    }
+
+    return (
+        <ShareSpaceModal
+            space={space}
+            projectUuid={projectUuid}
+            opened
+            onClose={onClose}
+        />
+    );
+};
 
 interface ResourceActionHandlersProps {
     action: ResourceViewItemActionState;
@@ -43,14 +83,16 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
     action,
     onAction,
 }) => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
 
     const { mutateAsync: contentAction, isLoading: isContentActionLoading } =
         useContentAction(projectUuid);
 
     const { mutate: pinChart } = useChartPinningMutation();
+    const { mutate: pinDocument } = useDocumentPinningMutation();
     const { mutate: pinDashboard } = useDashboardPinningMutation();
     const { mutate: pinSpace } = useSpacePinningMutation(projectUuid);
+    const { mutate: pinApp } = useAppPinningMutation();
 
     const handleReset = useCallback(() => {
         onAction({ type: ResourceViewItemAction.CLOSE });
@@ -73,6 +115,7 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
                         },
                     });
                 case ResourceViewItemType.DASHBOARD:
+                case ResourceViewItemType.DOCUMENT:
                     return contentAction({
                         action: {
                             type: 'move',
@@ -80,7 +123,7 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
                         },
                         item: {
                             uuid: item.data.uuid,
-                            contentType: ContentType.DASHBOARD,
+                            contentType: item.type,
                         },
                     });
                 case ResourceViewItemType.SPACE:
@@ -92,6 +135,17 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
                         item: {
                             uuid: item.data.uuid,
                             contentType: ContentType.SPACE,
+                        },
+                    });
+                case ResourceViewItemType.DATA_APP:
+                    return contentAction({
+                        action: {
+                            type: 'move',
+                            targetSpaceUuid: spaceUuid,
+                        },
+                        item: {
+                            uuid: item.data.uuid,
+                            contentType: ContentType.DATA_APP,
                         },
                     });
                 default:
@@ -118,19 +172,38 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
         if (action.type !== ResourceViewItemAction.PIN_TO_HOMEPAGE) return;
 
         switch (action.item.type) {
+            case ResourceViewItemType.DOCUMENT:
+                return pinDocument({
+                    projectUuid: action.item.data.projectUuid,
+                    documentUuid: action.item.data.uuid,
+                });
             case ResourceViewItemType.CHART:
                 return pinChart({ uuid: action.item.data.uuid });
             case ResourceViewItemType.DASHBOARD:
                 return pinDashboard({ uuid: action.item.data.uuid });
             case ResourceViewItemType.SPACE:
                 return pinSpace(action.item.data.uuid);
+            case ResourceViewItemType.DATA_APP:
+                if (!projectUuid) return undefined;
+                return pinApp({
+                    projectUuid,
+                    appUuid: action.item.data.uuid,
+                });
             default:
                 return assertUnreachable(
                     action.item,
                     'Resource type not supported',
                 );
         }
-    }, [action, pinChart, pinDashboard, pinSpace]);
+    }, [
+        action,
+        pinChart,
+        pinDashboard,
+        pinDocument,
+        pinSpace,
+        pinApp,
+        projectUuid,
+    ]);
 
     useEffect(() => {
         if (action.type === ResourceViewItemAction.PIN_TO_HOMEPAGE) {
@@ -146,6 +219,8 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
     switch (action.type) {
         case ResourceViewItemAction.UPDATE:
             switch (action.item.type) {
+                case ResourceViewItemType.DOCUMENT:
+                    return null;
                 case ResourceViewItemType.CHART:
                     return (
                         <ChartUpdateModal
@@ -178,6 +253,22 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
                             parentSpaceUuid={action.item.data.parentSpaceUuid}
                         />
                     );
+                case ResourceViewItemType.DATA_APP:
+                    if (!projectUuid) return null;
+                    return (
+                        <AppUpdateModal
+                            opened
+                            projectUuid={projectUuid}
+                            uuid={action.item.data.uuid}
+                            initialName={action.item.data.name}
+                            initialDescription={
+                                action.item.data.description ?? ''
+                            }
+                            iconPicker={null}
+                            onClose={handleReset}
+                            onConfirm={handleReset}
+                        />
+                    );
                 default:
                     return assertUnreachable(
                         action.item,
@@ -186,6 +277,17 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
             }
         case ResourceViewItemAction.DELETE:
             switch (action.item.type) {
+                case ResourceViewItemType.DOCUMENT:
+                    return (
+                        <DocumentDeleteModal
+                            opened
+                            projectUuid={action.item.data.projectUuid}
+                            uuid={action.item.data.uuid}
+                            name={action.item.data.name}
+                            onClose={handleReset}
+                            onConfirm={handleReset}
+                        />
+                    );
                 case ResourceViewItemType.CHART:
                     if (action.item.data.source === ChartSourceType.SQL) {
                         return (
@@ -231,7 +333,17 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
                             parentSpaceUuid={null}
                         />
                     );
-
+                case ResourceViewItemType.DATA_APP:
+                    return (
+                        <AppDeleteModal
+                            opened
+                            projectUuid={projectUuid}
+                            uuid={action.item.data.uuid}
+                            name={action.item.data.name}
+                            onClose={handleReset}
+                            onConfirm={handleReset}
+                        />
+                    );
                 default:
                     return assertUnreachable(
                         action.item,
@@ -293,6 +405,19 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
             }
 
         case ResourceViewItemAction.TRANSFER_TO_SPACE:
+            // Data apps get their own move modal, which adds the
+            // "Include app thumbnail" option.
+            if (action.item.type === ResourceViewItemType.DATA_APP) {
+                return (
+                    <MoveAppToSpaceModal
+                        projectUuid={projectUuid}
+                        opened
+                        onClose={handleReset}
+                        app={action.item.data}
+                        previewVersion={null}
+                    />
+                );
+            }
             return (
                 <TransferItemsModal
                     projectUuid={projectUuid}
@@ -304,6 +429,33 @@ const ResourceActionHandlers: FC<ResourceActionHandlersProps> = ({
                         await moveToSpace(action.item, spaceUuid);
                         handleReset();
                     }}
+                />
+            );
+
+        case ResourceViewItemAction.REQUEST_REVIEW:
+            return (
+                <RequestReviewModal
+                    projectUuid={projectUuid}
+                    contentType={
+                        action.item.type === ResourceViewItemType.DASHBOARD
+                            ? ContentReviewContentType.DASHBOARD
+                            : action.item.data.source === ChartSourceType.SQL
+                              ? ContentReviewContentType.SQL_CHART
+                              : ContentReviewContentType.CHART
+                    }
+                    contentUuid={action.item.data.uuid}
+                    contentName={action.item.data.name}
+                    opened
+                    onClose={handleReset}
+                />
+            );
+
+        case ResourceViewItemAction.SHARE:
+            return (
+                <ShareSpaceAction
+                    projectUuid={projectUuid}
+                    spaceUuid={action.item.data.uuid}
+                    onClose={handleReset}
                 />
             );
 

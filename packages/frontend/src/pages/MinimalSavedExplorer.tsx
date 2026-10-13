@@ -1,9 +1,30 @@
-import { Box, MantineProvider, type MantineThemeOverride } from '@mantine/core';
-import { useElementSize } from '@mantine/hooks';
-import { memo, useEffect, useMemo, useRef, useState, type FC } from 'react';
+import {
+    applyChartFilterOverridesToMetricQuery,
+    ChartType,
+    isChartScheduler,
+    SessionStorageKeys,
+    type Filters,
+    type ParametersValuesMap,
+} from '@lightdash/common';
+import { Box } from '@mantine/core';
+import { useSessionStorage } from '@mantine/hooks';
+import { IconAlertCircle } from '@tabler/icons-react';
+import {
+    memo,
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type FC,
+} from 'react';
 import { Provider } from 'react-redux';
 import { useParams } from 'react-router';
+import { validate as isUuidString } from 'uuid';
+import LoadingChart from '../components/common/LoadingChart';
+import ScreenshotProgressIndicator from '../components/common/ScreenshotProgressIndicator';
 import ScreenshotReadyIndicator from '../components/common/ScreenshotReadyIndicator';
+import SuboptimalState from '../components/common/SuboptimalState/SuboptimalState';
 import LightdashVisualization from '../components/LightdashVisualization';
 import VisualizationProvider from '../components/LightdashVisualization/VisualizationProvider';
 import MetricQueryDataProvider from '../components/MetricQueryData/MetricQueryDataProvider';
@@ -15,19 +36,19 @@ import {
     selectSavedChart,
     useExplorerSelector,
 } from '../features/explorer/store';
+import { useScheduler } from '../features/scheduler/hooks/useScheduler';
 import { useExplorerQuery } from '../hooks/useExplorerQuery';
 import { useExplorerQueryEffects } from '../hooks/useExplorerQueryEffects';
+import { useProject } from '../hooks/useProject';
+import { ProjectRouteContext } from '../hooks/useProjectRoute';
+import { useProjects } from '../hooks/useProjects';
+import { useProjectUuid } from '../hooks/useProjectUuid';
+import { useResizeObserver } from '../hooks/useResizeObserver';
 import { useSavedQuery } from '../hooks/useSavedQuery';
+import useSearchParams from '../hooks/useSearchParams';
 import useApp from '../providers/App/useApp';
 import { ExplorerSection } from '../providers/Explorer/types';
-
-const themeOverride: MantineThemeOverride = {
-    globalStyles: () => ({
-        'html, body': {
-            backgroundColor: 'white',
-        },
-    }),
-};
+import { getProjectUrlIdentifier } from '../utils/projectUrl';
 
 type Props = {
     savedQueryUuid?: string;
@@ -39,20 +60,22 @@ const MinimalExplorerContent = memo(() => {
 
     const { health } = useApp();
 
-    const {
-        ref: measureRef,
-        width: containerWidth,
-        height: containerHeight,
-    } = useElementSize();
+    // The in-repo useResizeObserver tracks ref changes via setState (unlike
+    // @mantine/hooks' useElementSize, whose [ref.current] effect dep doesn't
+    // re-run on ref attachment). Without this, containerWidth/containerHeight
+    // stay at 0 and Vega-Lite charts render at 0x0 in the minimal/export view.
+    const [measureRef, { width: containerWidth, height: containerHeight }] =
+        useResizeObserver<HTMLDivElement>();
 
     // Get query state from hook
-    const { query, queryResults, explore } = useExplorerQuery();
+    const { query, queryResults, explore, exploreError } = useExplorerQuery();
 
     const resultsData = useMemo(
         () => ({
             ...queryResults,
             metricQuery: query.data?.metricQuery,
             fields: query.data?.fields,
+            resolvedTimezone: query.data?.resolvedTimezone ?? undefined,
         }),
         [queryResults, query.data],
     );
@@ -69,7 +92,25 @@ const MinimalExplorerContent = memo(() => {
     const hasQueryError = !!query.error || !!queryResults.error;
 
     const [isScreenshotReady, setIsScreenshotReady] = useState(false);
+    const [chartHasPainted, setChartHasPainted] = useState(false);
     const hasSignaledReady = useRef(false);
+
+    // Custom (Vega-Lite) charts render asynchronously: react-vega is lazy-imported,
+    // then Vega compiles the spec and constructs its view before the chart paints.
+    // For this type we wait for the chart's own paint signal — gating only on
+    // data-loaded fires the screenshot indicator before Vega has rendered, which
+    // produces blank export PNGs.
+    const needsPaintSignal =
+        savedChart?.chartConfig.type === ChartType.CUSTOM ||
+        savedChart?.chartConfig.type === ChartType.DATA_APP_VIZ;
+
+    const handleChartScreenshotReady = useCallback(() => {
+        setChartHasPainted(true);
+    }, []);
+
+    const handleChartScreenshotError = useCallback(() => {
+        setChartHasPainted(true);
+    }, []);
 
     useEffect(() => {
         if (hasSignaledReady.current) return;
@@ -77,6 +118,10 @@ const MinimalExplorerContent = memo(() => {
 
         const isSuccessfullyLoaded = savedChart && !isLoadingQueryResults;
         if (!isSuccessfullyLoaded && !hasQueryError) {
+            return;
+        }
+
+        if (needsPaintSignal && !hasQueryError && !chartHasPainted) {
             return;
         }
 
@@ -88,10 +133,30 @@ const MinimalExplorerContent = memo(() => {
         hasQueryError,
         health.isInitialLoading,
         health.data,
+        needsPaintSignal,
+        chartHasPainted,
     ]);
 
+    // Without the explore the query never runs, so surface the error instead of loading forever
+    if (exploreError) {
+        return (
+            <>
+                <SuboptimalState
+                    icon={IconAlertCircle}
+                    title="Error loading chart"
+                    description={exploreError.error.message}
+                />
+                <ScreenshotReadyIndicator
+                    tilesTotal={1}
+                    tilesReady={0}
+                    tilesErrored={1}
+                />
+            </>
+        );
+    }
+
     if (!savedChart || health.isInitialLoading || !health.data) {
-        return null;
+        return <LoadingChart />;
     }
 
     return (
@@ -101,32 +166,46 @@ const MinimalExplorerContent = memo(() => {
             explore={explore}
             queryUuid={query.data?.queryUuid}
             parameters={query.data?.usedParametersValues}
+            resolvedTimezone={query.data?.resolvedTimezone}
         >
             <VisualizationProvider
                 minimal
                 chartConfig={savedChart.chartConfig}
                 initialPivotDimensions={savedChart.pivotConfig?.columns}
+                initialPivotRows={savedChart.pivotConfig?.rows}
                 resultsData={resultsData}
                 isLoading={isLoadingQueryResults}
                 columnOrder={savedChart.tableConfig.columnOrder}
-                pivotTableMaxColumnLimit={health.data.pivotTable.maxColumnLimit}
                 savedChartUuid={savedChart.uuid}
                 colorPalette={savedChart.colorPalette}
                 parameters={query.data?.usedParametersValues}
                 containerWidth={containerWidth}
                 containerHeight={containerHeight}
             >
-                <MantineProvider inherit theme={themeOverride}>
-                    <Box mih="inherit" h="100%">
-                        <LightdashVisualization
-                            ref={measureRef}
-                            // get rid of the classNames once you remove analytics providers
-                            className="sentry-block ph-no-capture"
-                            data-testid="visualization"
-                        />
-                    </Box>
-                </MantineProvider>
+                <Box mih="inherit" h="100%">
+                    <LightdashVisualization
+                        ref={measureRef}
+                        // get rid of the classNames once you remove analytics providers
+                        className="sentry-block ph-no-capture"
+                        data-testid="visualization"
+                        onScreenshotReady={handleChartScreenshotReady}
+                        onScreenshotError={handleChartScreenshotError}
+                    />
+                </Box>
 
+                <ScreenshotProgressIndicator
+                    expectedTileUuids={[savedChart.uuid]}
+                    readyTileUuids={
+                        isScreenshotReady && !hasQueryError
+                            ? [savedChart.uuid]
+                            : []
+                    }
+                    erroredTileUuids={
+                        isScreenshotReady && hasQueryError
+                            ? [savedChart.uuid]
+                            : []
+                    }
+                />
                 {isScreenshotReady && (
                     <ScreenshotReadyIndicator
                         tilesTotal={1}
@@ -145,38 +224,125 @@ const MinimalSavedExplorer: FC<Props> = ({
 }) => {
     const params = useParams<{
         savedQueryUuid: string;
+        projectUuid: string;
     }>();
     const savedQueryUuid = queryUuidProps || params.savedQueryUuid!;
+    const projectIdentifier = useProjectUuid();
+    const isProjectUuid = isUuidString(projectIdentifier ?? '');
+    const projectsQuery = useProjects({
+        enabled: !!projectIdentifier && !isProjectUuid,
+    });
+    const projectUuid = isProjectUuid
+        ? projectIdentifier
+        : projectsQuery.data?.find(
+              (project) => project.slug === projectIdentifier,
+          )?.projectUuid;
+    const projectQuery = useProject(projectUuid);
+    const projectRouteContext = useMemo(
+        () =>
+            projectUuid && projectQuery.data
+                ? {
+                      project: projectQuery.data,
+                      projectUuid,
+                      projectUrlIdentifier: getProjectUrlIdentifier(
+                          projectQuery.data,
+                      ),
+                  }
+                : null,
+        [projectQuery.data, projectUuid],
+    );
 
     const { data, isInitialLoading, isError, error } = useSavedQuery({
-        id: savedQueryUuid,
+        uuidOrSlug: savedQueryUuid,
+        projectUuid,
     });
+
+    // Scheduled deliveries render with the delivery's filter and parameter
+    // overrides: saved schedulers pass their uuid, send-now seeds session
+    // storage. Read synchronously so the first query already carries them.
+    const schedulerUuid = useSearchParams('schedulerUuid');
+    const [sendNowSchedulerChartFilters] = useSessionStorage<
+        Filters | undefined
+    >({
+        key: SessionStorageKeys.SEND_NOW_SCHEDULER_CHART_FILTERS,
+        getInitialValueInEffect: false,
+    });
+    const [sendNowSchedulerParameters] = useSessionStorage<
+        ParametersValuesMap | undefined
+    >({
+        key: SessionStorageKeys.SEND_NOW_SCHEDULER_PARAMETERS,
+        getInitialValueInEffect: false,
+    });
+    const { data: scheduler, isInitialLoading: isLoadingScheduler } =
+        useScheduler(schedulerUuid, {
+            enabled: !!schedulerUuid && !sendNowSchedulerChartFilters,
+        });
+    const chartScheduler =
+        schedulerUuid && scheduler && isChartScheduler(scheduler)
+            ? scheduler
+            : undefined;
+    const schedulerFilters = chartScheduler
+        ? chartScheduler.filters
+        : sendNowSchedulerChartFilters;
+    const schedulerParameters = chartScheduler
+        ? chartScheduler.parameters
+        : sendNowSchedulerParameters;
+
+    const savedChart = useMemo(() => {
+        if (!data) return undefined;
+        if (!schedulerFilters && !schedulerParameters) return data;
+        return {
+            ...data,
+            metricQuery: schedulerFilters
+                ? applyChartFilterOverridesToMetricQuery(
+                      data.metricQuery,
+                      schedulerFilters,
+                  )
+                : data.metricQuery,
+            parameters: schedulerParameters
+                ? { ...data.parameters, ...schedulerParameters }
+                : data.parameters,
+        };
+    }, [data, schedulerFilters, schedulerParameters]);
 
     // Create store once with useState
     const [store] = useState(() => createExplorerStore());
 
-    // Reset store state when data changes
+    // White page background for screenshot/PDF exports, regardless of theme
     useEffect(() => {
-        if (!data) return;
+        document.documentElement.style.backgroundColor = 'white';
+        document.body.style.backgroundColor = 'white';
+    }, []);
+
+    // Reset store state when data changes. With overrides the chart runs as an
+    // edited query so the overridden metric query is what gets executed.
+    useEffect(() => {
+        if (!savedChart) return;
 
         const initialState = buildInitialExplorerState({
-            savedChart: data,
+            savedChart,
             minimal: true,
+            isEditMode: savedChart !== data,
             expandedSections: [ExplorerSection.VISUALIZATION],
         });
 
         store.dispatch(explorerActions.reset(initialState));
-    }, [data, store]);
+    }, [savedChart, data, store]);
 
-    // Early return if no data yet
-    if (isInitialLoading || !data) {
-        return null;
-    }
-
-    if (isError) {
+    if (
+        projectsQuery.isError ||
+        projectQuery.isError ||
+        isError ||
+        (!projectUuid && !projectsQuery.isInitialLoading)
+    ) {
         return (
             <>
-                <span>{error.error.message}</span>
+                <span>
+                    {projectsQuery.error?.error.message ??
+                        projectQuery.error?.error.message ??
+                        error?.error.message ??
+                        `Cannot find project: ${projectIdentifier}`}
+                </span>
                 <ScreenshotReadyIndicator
                     tilesTotal={1}
                     tilesReady={0}
@@ -186,12 +352,24 @@ const MinimalSavedExplorer: FC<Props> = ({
         );
     }
 
+    // Early return if no data yet
+    if (
+        projectsQuery.isInitialLoading ||
+        projectQuery.isInitialLoading ||
+        isInitialLoading ||
+        isLoadingScheduler ||
+        !projectRouteContext ||
+        !data
+    ) {
+        return <LoadingChart />;
+    }
+
     return (
-        <Provider store={store} key={`minimal-${savedQueryUuid}`}>
-            <MantineProvider inherit theme={themeOverride}>
+        <ProjectRouteContext.Provider value={projectRouteContext}>
+            <Provider store={store} key={`minimal-${savedQueryUuid}`}>
                 <MinimalExplorerContent />
-            </MantineProvider>
-        </Provider>
+            </Provider>
+        </ProjectRouteContext.Provider>
     );
 };
 

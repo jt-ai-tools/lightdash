@@ -1,12 +1,12 @@
 import { AnyType } from '@lightdash/common';
 import * as Sentry from '@sentry/node';
 import EventEmitter from 'events';
-
 import { WorkerEvents } from 'graphile-worker';
 import { Job, Worker } from 'graphile-worker/dist/interfaces';
 import ExecutionContext from 'node-execution-context';
 import Logger from '../logging/logger';
 import { ExecutionContextInfo } from '../logging/winston';
+import { SchedulerWorkerHealth } from './SchedulerWorkerHealth';
 
 class EventEmitterWithExecutionContent
     extends EventEmitter
@@ -120,5 +120,34 @@ schedulerWorkerEventEmitter.on('job:complete', ({ worker, job }) => {
         `Worker ${worker.workerId} concluded job ${job.id} (${job.task_identifier})`,
     );
 });
+
+// graphile-worker 0.13's nudge assert message (worker.js). When the LISTEN
+// client receives a NOTIFY and nudges a terminated worker pool, this error
+// surfaces through pool:listen:error. It means the pool is permanently dead —
+// 0.13 never respawns dead workers — as opposed to an ordinary LISTEN
+// connection error, which the reconnect loop can recover from.
+export const POOL_TERMINATED_ERROR_SIGNATURE =
+    'nudge called after worker terminated';
+
+// Worker-aware liveness signals: graphile-worker 0.13 emits
+// pool:listen:success when LISTEN is established and pool:listen:error
+// when the LISTEN client dies. Job start/complete feed the activity clock.
+export function wireWorkerHealthEvents(
+    emitter: WorkerEvents,
+    health: SchedulerWorkerHealth,
+): void {
+    emitter.on('pool:listen:success', () => health.markListenUp());
+    emitter.on('pool:listen:error', ({ error }) => {
+        const message =
+            error instanceof Error ? error.message : String(error ?? '');
+        if (message.includes(POOL_TERMINATED_ERROR_SIGNATURE)) {
+            health.markPoolDead(message);
+            return;
+        }
+        health.markListenLost();
+    });
+    emitter.on('job:start', () => health.markJobStarted());
+    emitter.on('job:complete', () => health.markJobCompleted());
+}
 
 export default schedulerWorkerEventEmitter;

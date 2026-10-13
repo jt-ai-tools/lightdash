@@ -39,6 +39,21 @@ export const selectUnsavedChartVersion = createSelector(
     (explorer) => explorer.unsavedChartVersion,
 );
 
+export const selectIsDataAppVizVersionReadyForSave = createSelector(
+    [selectUnsavedChartVersion],
+    ({ chartConfig }) =>
+        chartConfig.type !== ChartType.DATA_APP_VIZ ||
+        chartConfig.config?.dataAppVizUuid === undefined ||
+        (Number.isInteger(chartConfig.config.dataAppVizVersion) &&
+            chartConfig.config.dataAppVizVersion !== undefined &&
+            chartConfig.config.dataAppVizVersion > 0),
+);
+
+export const selectUnsavedColorPaletteUuid = createSelector(
+    [selectExplorerState],
+    (explorer) => explorer.unsavedColorPaletteUuid,
+);
+
 export const selectMetricQuery = createSelector(
     [selectUnsavedChartVersion],
     (unsavedChartVersion) => unsavedChartVersion.metricQuery,
@@ -78,7 +93,24 @@ export const selectIsResultsExpanded = createSelector(
 
 export const selectIsVisualizationConfigOpen = createSelector(
     [selectExplorerState],
-    (explorer) => explorer.isVisualizationConfigOpen,
+    (explorer) => explorer.isVisualizationConfigOpen === true,
+);
+
+export const selectChartSidebarStep = createSelector(
+    [selectExplorerState],
+    (explorer) => explorer.chartSidebarStep,
+);
+
+export const selectChartTypeAuthoring = createSelector(
+    [selectExplorerState],
+    (explorer) => explorer.chartTypeAuthoring,
+);
+
+// Authoring only takes over the Explorer in edit mode.
+export const selectIsChartTypeAuthoring = createSelector(
+    [selectExplorerState],
+    (explorer) =>
+        explorer.chartTypeAuthoring !== null && explorer.isEditMode === true,
 );
 
 // FiltersCard specific selectors
@@ -232,6 +264,27 @@ export const selectPivotConfig = createSelector(
     (unsavedChartVersion) => unsavedChartVersion.pivotConfig,
 );
 
+// Pre-aggregate selectors
+const selectPreAggregate = createSelector(
+    [selectExplorerState],
+    (explorer) => explorer.preAggregate,
+);
+
+export const selectPreAggregateCheck = createSelector(
+    [selectPreAggregate],
+    (preAggregate) => preAggregate.check,
+);
+
+export const selectPreAggVisible = createSelector(
+    [selectPreAggregateCheck],
+    (check) => check.status === 'error' || check.status === 'ready',
+);
+
+export const selectPreAggCacheEnabled = createSelector(
+    [selectPreAggregate],
+    (preAggregate) => preAggregate.usePreAggregateCache,
+);
+
 // Navigation context selectors
 export const selectFromDashboard = createSelector(
     [selectExplorerState],
@@ -334,9 +387,15 @@ export const selectMissingCustomDimensions = createSelector(
 
             const isCustomSqlDimensionMissing =
                 isCustomSqlDimension(customDimension) &&
-                getAllReferences(customDimension.sql)
-                    .map((ref) => convertFieldRefToFieldId(ref))
-                    .some((refFieldId) => !fieldIds.includes(refFieldId));
+                getAllReferences(customDimension.sql).some((ref) => {
+                    try {
+                        return !fieldIds.includes(
+                            convertFieldRefToFieldId(ref),
+                        );
+                    } catch {
+                        return true;
+                    }
+                });
 
             return isCustomBinDimensionMissing || isCustomSqlDimensionMissing;
         });
@@ -477,23 +536,26 @@ const hasMapExtentChanged = (
     return latChanged || lngChanged || zoomChanged;
 };
 
-// Selector to check if unsaved chart has changes compared to saved chart
-// Returns true if there are unsaved changes, false otherwise
-export const selectHasUnsavedChanges = createSelector(
+export const selectHasPaletteChanges = createSelector(
+    [selectSavedChart, selectUnsavedColorPaletteUuid],
+    (savedChart, unsavedColorPaletteUuid) => {
+        // Unsaved chart: any chosen palette is a change.
+        if (!savedChart) return unsavedColorPaletteUuid !== null;
+        return unsavedColorPaletteUuid !== savedChart.colorPaletteUuid;
+    },
+);
+
+export const selectHasVersionChanges = createSelector(
     [selectUnsavedChartVersion, selectSavedChart, selectMapExtent],
     (unsavedChartVersion, savedChart, mapExtent) => {
         if (!savedChart) {
-            // No saved chart means this is a new chart - no "unsaved changes"
             return false;
         }
 
-        // Check if map extent has changed (lightweight comparison of 3 numbers)
         if (hasMapExtentChanged(mapExtent, savedChart)) {
             return true;
         }
 
-        // Compare normalized versions of saved and unsaved
-        // Strip map extent fields since they're checked separately above
         return !deepEqual(
             removeEmptyProperties({
                 tableName: savedChart.tableName,
@@ -517,6 +579,11 @@ export const selectHasUnsavedChanges = createSelector(
             }),
         );
     },
+);
+
+export const selectHasUnsavedChanges = createSelector(
+    [selectHasVersionChanges, selectHasPaletteChanges],
+    (versionDirty, paletteDirty) => versionDirty || paletteDirty,
 );
 
 /**

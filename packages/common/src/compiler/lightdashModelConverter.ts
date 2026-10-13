@@ -21,6 +21,7 @@ import {
  */
 export function convertLightdashModelToDbtModel(
     model: LightdashModel,
+    sourcePath?: string,
 ): DbtModelNode {
     // Generate a unique ID for this model
     const uniqueId = `model.lightdash.${model.name}`;
@@ -79,6 +80,7 @@ export function convertLightdashModelToDbtModel(
         sets: model.sets,
         order_fields_by: model.order_fields_by,
         group_label: model.group_label,
+        groups: model.groups,
         sql_filter: model.sql_filter,
         sql_where: model.sql_where,
         sql_from: sqlFrom, // from_sql maps directly to sql_from
@@ -91,9 +93,11 @@ export function convertLightdashModelToDbtModel(
         required_filters: model.required_filters,
         default_filters: model.default_filters,
         explores: model.explores,
+        hidden: model.hidden,
         ai_hint: model.ai_hint,
         parameters: model.parameters,
         primary_key: model.primary_key,
+        pre_aggregates: model.pre_aggregates,
     };
 
     // Create a DbtModelNode that mimics what dbt would produce
@@ -113,8 +117,8 @@ export function convertLightdashModelToDbtModel(
             meta: modelConfig,
         },
         tags: [],
-        path: `lightdash/models/${model.name}.yml`,
-        patch_path: `lightdash://${model.name}.yml`,
+        path: sourcePath ?? `lightdash/models/${model.name}.yml`,
+        patch_path: `lightdash://${sourcePath ?? `${model.name}.yml`}`,
         depends_on: {
             nodes: [],
             macros: [],
@@ -128,7 +132,7 @@ export function convertLightdashModelToDbtModel(
         raw_code: sqlFrom,
         language: 'sql' as const,
         package_name: 'lightdash',
-        original_file_path: `lightdash/models/${model.name}.yml`,
+        original_file_path: sourcePath ?? `lightdash/models/${model.name}.yml`,
         checksum: {
             name: 'sha256',
             checksum: '',

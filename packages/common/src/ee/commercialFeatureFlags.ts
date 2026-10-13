@@ -4,6 +4,11 @@ export enum CommercialFeatureFlags {
     AiCopilot = 'ai-copilot',
     ServiceAccounts = 'service-accounts',
     OrganizationWarehouseCredentials = 'organization-warehouse-credentials',
-    AgentReasoning = 'agent-reasoning',
-    MultiAgentChannel = 'multi-agent-channel',
+    CustomRoles = 'custom-roles',
+    HomepageBuilder = 'homepage-builder',
+    /**
+     * Org opt-in: the primary-slot org custom role's scope list fully decides
+     * `manage:PersonalAccessToken` instead of inheriting the deployment default.
+     */
+    PatScopeAuthoritative = 'pat-scope-authoritative',
 }

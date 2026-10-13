@@ -6,8 +6,11 @@ import {
 import { Group, Stack, Text } from '@mantine/core';
 import React, { type FC } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from '../../../providers/PortalTarget/usePortalTarget';
 import { GrabIcon } from '../common/GrabIcon';
-import ColumnConfiguration from './ColumnConfiguration';
+import ColumnConfiguration, {
+    type ColumnConfigurationProps,
+} from './ColumnConfiguration';
 
 type DraggablePortalHandlerProps = {
     snapshot: DraggableStateSnapshot;
@@ -16,7 +19,8 @@ type DraggablePortalHandlerProps = {
 const DraggablePortalHandler: FC<
     React.PropsWithChildren<DraggablePortalHandlerProps>
 > = ({ children, snapshot }) => {
-    if (snapshot.isDragging) return createPortal(children, document.body);
+    const portalTarget = usePortalTarget();
+    if (snapshot.isDragging) return createPortal(children, portalTarget);
     return <>{children}</>;
 };
 
@@ -26,6 +30,10 @@ type DroppableItemsListProps = {
     isDragging: boolean;
     disableReorder: boolean;
     placeholder?: string;
+    draggableItemIds?: string[];
+    getColumnConfigurationProps?: (
+        itemId: string,
+    ) => Omit<ColumnConfigurationProps, 'fieldId'>;
 };
 
 const DroppableItemsList: FC<DroppableItemsListProps> = ({
@@ -34,14 +42,16 @@ const DroppableItemsList: FC<DroppableItemsListProps> = ({
     isDragging,
     disableReorder,
     placeholder,
+    draggableItemIds,
+    getColumnConfigurationProps,
 }) => {
     const hasItems = itemIds.length > 0;
     return (
         <Stack
-            spacing="xs"
-            sx={(theme) => ({
+            gap="xs"
+            style={(theme) => ({
                 padding: theme.spacing.xs,
-                backgroundColor: theme.colors.ldGray['0'],
+                backgroundColor: theme.colors.ldGray?.[0],
                 borderRadius: theme.radius.sm,
             })}
         >
@@ -49,7 +59,7 @@ const DroppableItemsList: FC<DroppableItemsListProps> = ({
                 {(dropProps, droppableSnapshot) => (
                     <Stack
                         {...dropProps.droppableProps}
-                        spacing="xs"
+                        gap="xs"
                         ref={dropProps.innerRef}
                         mih={isDragging ? '30px' : undefined}
                         bg={
@@ -61,7 +71,7 @@ const DroppableItemsList: FC<DroppableItemsListProps> = ({
                         }
                     >
                         {!isDragging && !hasItems ? (
-                            <Text size="xs" color="ldGray.6" m="xs" ta="center">
+                            <Text size="xs" c="dimmed" m="xs" ta="center">
                                 {placeholder}
                             </Text>
                         ) : null}
@@ -70,6 +80,10 @@ const DroppableItemsList: FC<DroppableItemsListProps> = ({
                                 key={itemId}
                                 draggableId={itemId}
                                 index={index}
+                                isDragDisabled={
+                                    draggableItemIds !== undefined &&
+                                    !draggableItemIds.includes(itemId)
+                                }
                             >
                                 {(
                                     {
@@ -81,8 +95,8 @@ const DroppableItemsList: FC<DroppableItemsListProps> = ({
                                 ) => (
                                     <DraggablePortalHandler snapshot={snapshot}>
                                         <Group
-                                            noWrap
-                                            spacing="xs"
+                                            wrap="nowrap"
+                                            gap="xs"
                                             ref={innerRef}
                                             {...draggableProps}
                                             style={{
@@ -95,14 +109,22 @@ const DroppableItemsList: FC<DroppableItemsListProps> = ({
                                                 ...draggableProps.style,
                                             }}
                                         >
-                                            <GrabIcon
-                                                dragHandleProps={
-                                                    dragHandleProps
-                                                }
-                                            />
+                                            {draggableItemIds === undefined ||
+                                            draggableItemIds.includes(
+                                                itemId,
+                                            ) ? (
+                                                <GrabIcon
+                                                    dragHandleProps={
+                                                        dragHandleProps
+                                                    }
+                                                />
+                                            ) : null}
 
                                             <ColumnConfiguration
                                                 fieldId={itemId}
+                                                {...getColumnConfigurationProps?.(
+                                                    itemId,
+                                                )}
                                             />
                                         </Group>
                                     </DraggablePortalHandler>

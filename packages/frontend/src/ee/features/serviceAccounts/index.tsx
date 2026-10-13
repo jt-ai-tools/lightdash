@@ -1,11 +1,10 @@
-import { Button, Group, Stack, Title } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
-import { IconUsersGroup } from '@tabler/icons-react';
-
-import { EmptyState } from '../../../components/common/EmptyState';
-import MantineIcon from '../../../components/common/MantineIcon';
-
+import { IconPlus, IconUsersGroup } from '@tabler/icons-react';
 import { useState } from 'react';
+import MantineIcon from '../../../components/common/MantineIcon';
+import { SettingsEmptyState } from '../../../components/common/Settings/SettingsEmptyState';
+import { SettingsPage } from '../../../components/common/Settings/SettingsPage';
 import { ServiceAccountsCreateModal } from './ServiceAccountsCreateModal';
 import { ServiceAccountsTable } from './ServiceAccountsTable';
 import { useServiceAccounts } from './useServiceAccounts';
@@ -25,39 +24,43 @@ export function ServiceAccountsPage() {
         setToken(data.token);
     };
 
-    const hasAccounts = listAccounts?.data?.length ?? 0 > 0;
+    const accountsData = listAccounts?.data;
+    // First-load vs background refetch: only block UI on the first fetch.
+    // Subsequent refetches keep the existing rows visible (and ContentTable's
+    // loading state will dim them via state.isLoading inside the table) so
+    // the page doesn't flash on every revalidation.
+    const isInitialLoading = listAccounts.isLoading && !accountsData;
+    const hasAccounts = (accountsData?.length ?? 0) > 0;
 
+    // The table owns filtered empty states; this page-level state is only for
+    // organizations that have not created a service account yet.
     return (
-        <Stack mb="lg">
-            {hasAccounts ? (
-                <>
-                    <Group position="apart">
-                        <Title size="h5">Service accounts</Title>
-                        <Button onClick={open} size="xs">
-                            Add service account
-                        </Button>
-                    </Group>
-                    <ServiceAccountsTable
-                        accounts={listAccounts?.data ?? []}
-                        onDelete={deleteAccount.mutate}
-                        isDeleting={deleteAccount.isLoading}
-                    />
-                </>
-            ) : (
-                <EmptyState
-                    icon={
-                        <MantineIcon
-                            icon={IconUsersGroup}
-                            color="ldGray.6"
-                            stroke={1}
-                            size="5xl"
-                        />
-                    }
-                    title="No service accounts"
-                    description="You haven't created any service accounts yet. Create your first service account"
+        <SettingsPage
+            title="Service accounts"
+            description="Manage non-human accounts used for automated access to Lightdash."
+            actions={
+                <Button
+                    size="xs"
+                    leftSection={<MantineIcon icon={IconPlus} />}
+                    onClick={open}
                 >
-                    <Button onClick={open}>Create service account</Button>
-                </EmptyState>
+                    Add service account
+                </Button>
+            }
+        >
+            {!isInitialLoading && !hasAccounts ? (
+                <SettingsEmptyState
+                    icon={IconUsersGroup}
+                    title="No service accounts"
+                    description="Create a service account for automated access to Lightdash."
+                />
+            ) : (
+                <ServiceAccountsTable
+                    accounts={accountsData ?? []}
+                    isLoading={isInitialLoading}
+                    onDelete={deleteAccount.mutate}
+                    isDeleting={deleteAccount.isLoading}
+                />
             )}
 
             <ServiceAccountsCreateModal
@@ -67,6 +70,6 @@ export function ServiceAccountsPage() {
                 isWorking={createAccount.isLoading}
                 token={token}
             />
-        </Stack>
+        </SettingsPage>
     );
 }

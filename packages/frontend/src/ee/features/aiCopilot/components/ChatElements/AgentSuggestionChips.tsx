@@ -1,0 +1,98 @@
+import type { AgentSuggestion } from '@lightdash/common';
+import { Box, Button } from '@mantine/core';
+import { IconArrowUpRight } from '@tabler/icons-react';
+import { useEffect, useMemo, useRef } from 'react';
+import MantineIcon from '../../../../../components/common/MantineIcon';
+import styles from './AgentSuggestionChips.module.css';
+
+type Props = {
+    chips: AgentSuggestion[];
+    onChipClick: (chip: AgentSuggestion, index: number) => void;
+    onImpression?: (chipCount: number) => void;
+    align?: 'center' | 'left';
+    showPromptAffordance?: boolean;
+    maxVisible?: number;
+    disabled?: boolean;
+};
+
+const chipKey = (chip: AgentSuggestion, idx: number) =>
+    chip.kind === 'navigate'
+        ? `nav-${chip.url}-${chip.label}-${idx}`
+        : `prom-${chip.tool}-${chip.label}-${idx}`;
+
+const renderLeftIcon = (chip: AgentSuggestion) => {
+    if (chip.kind !== 'navigate') return undefined;
+    return <MantineIcon icon={IconArrowUpRight} size={13} stroke={1.75} />;
+};
+
+const renderRightIcon = (
+    chip: AgentSuggestion,
+    showPromptAffordance: boolean,
+) => {
+    if (chip.kind !== 'prompt' || !showPromptAffordance) return undefined;
+    return <MantineIcon icon={IconArrowUpRight} size={12} stroke={1.75} />;
+};
+
+export const AgentSuggestionChips = ({
+    chips,
+    onChipClick,
+    onImpression,
+    align = 'center',
+    showPromptAffordance = false,
+    maxVisible,
+    disabled = false,
+}: Props) => {
+    const impressedRef = useRef<string | null>(null);
+    const visibleChips = useMemo(
+        () => (maxVisible === undefined ? chips : chips.slice(0, maxVisible)),
+        [chips, maxVisible],
+    );
+
+    useEffect(() => {
+        if (visibleChips.length === 0) return;
+        const fingerprint = visibleChips.map((c, i) => chipKey(c, i)).join('|');
+        if (impressedRef.current === fingerprint) return;
+        impressedRef.current = fingerprint;
+        onImpression?.(visibleChips.length);
+    }, [visibleChips, onImpression]);
+
+    if (visibleChips.length === 0) return null;
+
+    return (
+        <Box
+            className={`${styles.row} ${align === 'left' ? styles.rowLeft : ''}`}
+        >
+            {visibleChips.map((chip, idx) => {
+                const classes = [styles.chip, styles.fadeIn];
+                if (chip.kind === 'navigate') classes.push(styles.navigateChip);
+                return (
+                    <Button
+                        key={chipKey(chip, idx)}
+                        disabled={disabled}
+                        variant="default"
+                        size="xs"
+                        className={classes.join(' ')}
+                        style={{ ['--chip-idx' as string]: idx }}
+                        leftSection={renderLeftIcon(chip)}
+                        rightSection={renderRightIcon(
+                            chip,
+                            showPromptAffordance,
+                        )}
+                        onClick={() => onChipClick(chip, idx)}
+                        // Walkthrough anchor: a question the learner can ask
+                        // without typing. Navigate chips (continue a thread)
+                        // carry no anchor. See scripts/scope-tours/generate.ts.
+                        {...(chip.kind === 'prompt'
+                            ? {
+                                  'data-tour-anchor': 'ai-suggestion',
+                                  'data-tour-hint': 'Pick a suggested question',
+                              }
+                            : {})}
+                    >
+                        {chip.label}
+                    </Button>
+                );
+            })}
+        </Box>
+    );
+};

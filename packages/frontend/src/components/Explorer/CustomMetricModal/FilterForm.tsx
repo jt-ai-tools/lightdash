@@ -3,9 +3,9 @@ import {
     getFieldRef,
     isDimension,
     type FieldTarget,
+    type FilterableDimension,
     type FilterOperator,
     type FilterRule,
-    type FilterableDimension,
 } from '@lightdash/common';
 import { Button, Stack } from '@mantine/core';
 import {
@@ -22,8 +22,10 @@ import FilterRuleForm from '../../common/Filters/FilterRuleForm';
 import useFiltersContext from '../../common/Filters/useFiltersContext';
 import { addFieldRefToFilterRule } from './utils';
 
-export interface MetricFilterRuleWithFieldId
-    extends FilterRule<FilterOperator, FieldTarget & { fieldRef: string }> {}
+export interface MetricFilterRuleWithFieldId extends FilterRule<
+    FilterOperator,
+    FieldTarget & { fieldRef: string }
+> {}
 
 export const FilterForm: FC<{
     defaultFilterRuleFieldId: string | undefined;
@@ -41,13 +43,15 @@ export const FilterForm: FC<{
         useFiltersContext<Record<string, FilterableDimension>>();
 
     const dimensions = Object.values(dimensionsMap);
+    const selectableDimensions = dimensions.filter(({ hidden }) => !hidden);
 
     const addFieldRule = useCallback(() => {
-        const fallbackField = dimensions[0];
+        const fallbackField = selectableDimensions[0];
         const defaultField = defaultFilterRuleFieldId
             ? dimensionsMap[defaultFilterRuleFieldId]
             : undefined;
-        const field = defaultField || fallbackField;
+        const field =
+            defaultField && !defaultField.hidden ? defaultField : fallbackField;
 
         if (!field) {
             return;
@@ -69,7 +73,7 @@ export const FilterForm: FC<{
     }, [
         customMetricFiltersWithIds,
         defaultFilterRuleFieldId,
-        dimensions,
+        selectableDimensions,
         dimensionsMap,
         setCustomMetricFiltersWithIds,
     ]);
@@ -101,7 +105,7 @@ export const FilterForm: FC<{
     );
 
     return (
-        <Stack spacing="sm">
+        <Stack gap="sm">
             {customMetricFiltersWithIds.map((filterRule, index) => (
                 <FilterRuleForm
                     key={filterRule.id}
@@ -120,7 +124,7 @@ export const FilterForm: FC<{
                 onClick={() => {
                     addFieldRule();
                 }}
-                disabled={dimensions.length <= 0}
+                disabled={selectableDimensions.length <= 0}
             >
                 Add filter
             </Button>

@@ -8,7 +8,6 @@ const VisualizationCartesianConfig: FC<VisualizationCartesianConfigProps> = ({
     resultsData,
     validPivotDimensions,
     columnOrder,
-    setPivotDimensions,
     initialChartConfig,
     onChartConfigChange,
     stacking,
@@ -16,18 +15,19 @@ const VisualizationCartesianConfig: FC<VisualizationCartesianConfigProps> = ({
     colorPalette,
     children,
     tableCalculationsMetadata,
+    unsavedMetricQuery,
 }) => {
     const cartesianConfig = useCartesianChartConfig({
         initialChartConfig,
         pivotKeys: validPivotDimensions,
         resultsData,
-        setPivotDimensions,
         columnOrder,
         itemsMap,
         stacking,
         cartesianType,
         colorPalette,
         tableCalculationsMetadata,
+        unsavedMetricQuery,
     });
 
     useEffect(() => {

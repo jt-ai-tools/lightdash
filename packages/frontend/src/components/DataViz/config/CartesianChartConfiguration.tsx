@@ -25,7 +25,7 @@ export const CartesianChartConfig = ({
     }
 
     return (
-        <Stack spacing="xs" mb="lg">
+        <Stack gap="xs" mb="lg">
             <Tabs defaultValue="data" keepMounted>
                 <Tabs.List>
                     <Tabs.Tab value="data">Data</Tabs.Tab>

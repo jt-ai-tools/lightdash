@@ -1,11 +1,7 @@
 import type { Filters } from '../../types/filter';
 import type { AdditionalMetric, MetricQuery } from '../../types/metricQuery';
-import type {
-    ToolRunQueryArgs,
-    ToolTableVizArgs,
-    ToolTimeSeriesArgs,
-    ToolVerticalBarArgs,
-} from './schemas/tools';
+import type { TransformedCustomMetric } from './schemas/customMetrics';
+import type { PersistedRunQueryPayload } from './schemas/persistedRunQueryArgs';
 
 export enum AiResultType {
     TIME_SERIES_RESULT = 'time_series_chart',
@@ -27,27 +23,57 @@ export type AiMetricQuery = Pick<
     | 'exploreName'
     | 'tableCalculations'
 > & {
+    // Aggregation custom metrics as additional-metric definitions, used for
+    // field-existence validation.
     additionalMetrics: Omit<AdditionalMetric, 'sql'>[];
+    // Full custom-metric set (incl. periodComparison) used to populate SQL.
+    customMetrics: TransformedCustomMetric[] | null;
 };
 
 export type AiMetricQueryWithFilters = AiMetricQuery & {
     filters: Filters;
 };
 
-export type AiAgentVizConfig =
-    | {
-          type: 'vertical_bar_chart';
-          config: ToolVerticalBarArgs;
-      }
-    | {
-          type: 'time_series_chart';
-          config: ToolTimeSeriesArgs;
-      }
-    | {
-          type: 'table';
-          config: ToolTableVizArgs;
-      }
-    | {
-          type: 'query_result';
-          config: ToolRunQueryArgs;
-      };
+export type AiAgentVizConfig = {
+    type: 'query_result';
+    config: PersistedRunQueryPayload;
+};
+
+export const AGENT_SUGGESTION_TOOLS = [
+    'generateDashboard',
+    'generateVisualization',
+    'runSql',
+    'findContent',
+] as const;
+
+// 'createContent' is added by the server to offer saving the thread as a Document; the suggestion model never emits it.
+export type AgentSuggestionTool =
+    | (typeof AGENT_SUGGESTION_TOOLS)[number]
+    | 'createContent';
+
+export const DOCUMENT_SUGGESTION_TOOL =
+    'createContent' satisfies AgentSuggestionTool;
+
+export type AgentSuggestionPromptChip = {
+    kind: 'prompt';
+    label: string;
+    tool: AgentSuggestionTool;
+    defaults: {
+        explore: string | null;
+        dimensions: string[];
+        metrics: string[];
+        timeframe: string | null;
+    };
+};
+
+export type AgentSuggestionNavigateChip = {
+    kind: 'navigate';
+    label: string;
+    // Resolved server-side. The LLM only declares intent (an index into
+    // recentUserConversations); the server turns that into a real URL.
+    url: string;
+};
+
+export type AgentSuggestion =
+    | AgentSuggestionPromptChip
+    | AgentSuggestionNavigateChip;

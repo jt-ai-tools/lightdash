@@ -4,6 +4,7 @@ import {
     CreateSnowflakeCredentials,
     CreateWarehouseCredentials,
     DatabricksAuthenticationType,
+    DuckdbConnectionType,
     getErrorMessage,
     isSupportedDbtAdapterType,
     isWeekDay,
@@ -23,6 +24,10 @@ import execa from 'execa';
 import path from 'path';
 import { getConfig } from '../../config';
 import {
+    getAgentConnectionChildEnvironment,
+    getAgentConnectionSelection,
+} from '../../credentials';
+import {
     loadDbtTarget,
     warehouseCredentialsFromDbtTarget,
 } from '../../dbt/profile';
@@ -41,7 +46,10 @@ import { lightdashApi } from './apiClient';
  */
 const warehouseClientCache = new Map<
     string,
-    ReturnType<typeof warehouseClientFromCredentials>
+    {
+        warehouseClient: ReturnType<typeof warehouseClientFromCredentials>;
+        credentials: CreateWarehouseCredentials;
+    }
 >();
 
 /**
@@ -67,7 +75,7 @@ type GetTableCatalogProps = {
     databaseName?: string;
 };
 
-export const getTableSchema = async ({
+const getTableSchema = async ({
     projectUuid,
     tableName,
     schemaName,
@@ -83,10 +91,17 @@ const DBT_CLOUD_CONNECTION_TYPE_REGEX = /Connection type\s+(\w+)/;
 
 const getDbtCloudConnectionType = async (): Promise<SupportedDbtAdapter> => {
     try {
-        const { all } = await execa('dbt', ['environment', 'show'], {
-            all: true,
-            stdio: ['pipe', 'pipe', 'pipe'],
-        });
+        const { all } = await (getAgentConnectionSelection() !== null
+            ? execa('dbt', ['environment', 'show'], {
+                  all: true,
+                  stdio: ['pipe', 'pipe', 'pipe'],
+                  extendEnv: false,
+                  env: await getAgentConnectionChildEnvironment({}),
+              })
+            : execa('dbt', ['environment', 'show'], {
+                  all: true,
+                  stdio: ['pipe', 'pipe', 'pipe'],
+              }));
         const logs = all || '';
         const connectionType = logs.match(DBT_CLOUD_CONNECTION_TYPE_REGEX);
         if (connectionType === null || connectionType.length === 0) {
@@ -133,6 +148,14 @@ function getMockCredentials(
                 dbname: '',
                 schema: '',
             };
+        case SupportedDbtAdapter.DUCKDB:
+            return {
+                type: WarehouseTypes.DUCKDB,
+                connectionType: DuckdbConnectionType.MOTHERDUCK,
+                database: ':memory:',
+                schema: 'main',
+                token: '',
+            };
         case SupportedDbtAdapter.REDSHIFT:
             return {
                 type: WarehouseTypes.REDSHIFT,
@@ -155,6 +178,16 @@ function getMockCredentials(
                 role: '',
             };
         case SupportedDbtAdapter.DATABRICKS:
+            return {
+                type: WarehouseTypes.DATABRICKS,
+                catalog: '',
+                database: '',
+                serverHostName: '',
+                httpPath: '',
+                personalAccessToken: '',
+            };
+        case SupportedDbtAdapter.SPARK:
+            // Spark uses same SQL dialect as Databricks
             return {
                 type: WarehouseTypes.DATABRICKS,
                 catalog: '',
@@ -268,7 +301,13 @@ export default async function getWarehouseClient(
                 ? options.startOfWeek
                 : undefined,
         });
-        const config = await getConfig();
+        const config = await (getAgentConnectionSelection() === null
+            ? getConfig()
+            : getConfig({ readOnly: true }).then(async (currentConfig) =>
+                  (
+                      await import('../../agentConnections/projectSelection')
+                  ).configWithAgentProject(currentConfig),
+              ));
         // Overwrite methods that need to connect to the warehouse
         warehouseClient.getCatalog = async (refs) =>
             refs.reduce<Promise<WarehouseCatalog>>(async (accPromise, ref) => {
@@ -348,7 +387,9 @@ export default async function getWarehouseClient(
             GlobalState.debug(
                 `> Reusing cached warehouse client (${credentials.type})`,
             );
-            warehouseClient = warehouseClientCache.get(cacheKey)!;
+            const cached = warehouseClientCache.get(cacheKey)!;
+            warehouseClient = cached.warehouseClient;
+            credentials = cached.credentials;
         } else {
             // Exchange Databricks OAuth M2M credentials for access token if needed
             if (
@@ -418,7 +459,10 @@ export default async function getWarehouseClient(
                     : undefined,
             });
 
-            warehouseClientCache.set(cacheKey, warehouseClient);
+            warehouseClientCache.set(cacheKey, {
+                warehouseClient,
+                credentials,
+            });
         }
     }
     return {

@@ -3,8 +3,10 @@ import {
     ChartKind,
     ChartType,
     DashboardChartTile,
+    DashboardDataAppTile,
     DashboardSqlChartTile,
     DashboardTileTypes,
+    getDefaultResolvedColorPalette,
     OrganizationMemberRole,
     PossibleAbilities,
     ProjectMemberRole,
@@ -13,6 +15,7 @@ import {
     SpaceMemberRole,
     SqlChart,
 } from '@lightdash/common';
+import type { SpaceAccessContextForCasl } from '../SpaceService/SpacePermissionService';
 import {
     PromotedChart,
     PromotedDashboard,
@@ -30,6 +33,9 @@ export const user: SessionUser = {
     organizationCreatedAt: new Date(),
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
+    timezone: null,
     isSetupComplete: true,
     userId: 0,
     role: OrganizationMemberRole.ADMIN,
@@ -59,12 +65,15 @@ export const promotedSpace: PromotedChart['space'] = {
     projectUuid: promotedProjectUuid,
     uuid: 'promoted-space-uuid',
     name: 'Jaffle shop',
-    isPrivate: false,
     inheritParentPermissions: true,
+    projectMemberAccessRole: null,
     pinnedListUuid: null,
     pinnedListOrder: null,
     chartCount: 0,
     dashboardCount: 0,
+    childSpaceCount: 0,
+    appCount: 0,
+    documentCount: 0,
     slug: 'jaffle-shop',
     parentSpaceUuid: null,
     path: 'jaffle_shop',
@@ -75,12 +84,15 @@ export const upstreamSpace: UpstreamChart['space'] = {
     projectUuid: upstreamProjectUuid,
     uuid: 'upstream-space-uuid',
     name: 'Jaffle shop',
-    isPrivate: false,
     inheritParentPermissions: true,
+    projectMemberAccessRole: null,
     pinnedListUuid: null,
     pinnedListOrder: null,
     chartCount: 0,
     dashboardCount: 0,
+    childSpaceCount: 0,
+    appCount: 0,
+    documentCount: 0,
     slug: 'jaffle-shop',
     path: 'jaffle_shop',
     parentSpaceUuid: null,
@@ -88,6 +100,7 @@ export const upstreamSpace: UpstreamChart['space'] = {
 
 export const upstreamFullSpace: Space = {
     ...upstreamSpace,
+    inheritsFromOrgOrProject: true,
     childSpaces: [],
     path: 'jaffle_shop',
     queries: [],
@@ -98,6 +111,9 @@ export const upstreamFullSpace: Space = {
             firstName: 'firstName',
             lastName: 'lastName',
             email: 'email',
+            isInternal: false,
+            avatarUrl: null,
+            avatarGradient: null,
             role: SpaceMemberRole.ADMIN,
             hasDirectAccess: true,
             projectRole: ProjectMemberRole.VIEWER,
@@ -109,6 +125,9 @@ export const upstreamFullSpace: Space = {
             firstName: 'firstName',
             lastName: 'lastName',
             email: 'adminemail',
+            isInternal: false,
+            avatarUrl: null,
+            avatarGradient: null,
             role: SpaceMemberRole.ADMIN,
             hasDirectAccess: false,
             projectRole: ProjectMemberRole.ADMIN,
@@ -123,6 +142,7 @@ export const upstreamFullSpace: Space = {
             spaceRole: SpaceMemberRole.ADMIN,
         },
     ],
+    colorPaletteUuid: null,
 };
 
 export const promotedChart: PromotedChart = {
@@ -155,19 +175,22 @@ export const promotedChart: PromotedChart = {
         dashboardUuid: null,
         dashboardName: null,
         colorPalette: [],
+        colorPaletteUuid: null,
+        resolvedColorPalette: getDefaultResolvedColorPalette(),
         slug: 'apple-chart',
+        verification: null,
     },
     projectUuid: promotedProjectUuid,
     space: promotedSpace,
     spaces: [],
-    access: [],
+    spaceAccessContext: undefined,
 };
 
 export const missingUpstreamChart: UpstreamChart = {
     chart: undefined,
     projectUuid: upstreamProjectUuid,
     space: undefined,
-    access: [],
+    spaceAccessContext: undefined,
 };
 export const existingUpstreamChart: UpstreamChart = {
     chart: {
@@ -188,7 +211,7 @@ export const existingUpstreamChart: UpstreamChart = {
     },
     projectUuid: upstreamProjectUuid,
     space: upstreamSpace,
-    access: [],
+    spaceAccessContext: undefined,
 };
 
 const dashboardChartTile: DashboardChartTile = {
@@ -215,6 +238,7 @@ export const promotedDashboard: PromotedDashboard = {
         versionUuid: 'promoted-dashboard-version-uuid',
         uuid: 'promoted-dashboard-uuid',
         name: 'dashboard',
+        verification: null,
         description: '',
         updatedAt: new Date(),
         pinnedListUuid: null,
@@ -228,11 +252,13 @@ export const promotedDashboard: PromotedDashboard = {
         firstViewedAt: new Date(),
         updatedByUser,
         slug: 'dashboard',
+        colorPaletteUuid: null,
+        owner: null,
     },
     projectUuid: promotedProjectUuid,
     space: promotedSpace,
     spaces: [],
-    access: [],
+    spaceAccessContext: undefined,
 };
 export const existingUpstreamDashboard: UpstreamDashboard = {
     dashboard: {
@@ -243,13 +269,13 @@ export const existingUpstreamDashboard: UpstreamDashboard = {
     },
     projectUuid: upstreamProjectUuid,
     space: upstreamSpace,
-    access: [],
+    spaceAccessContext: undefined,
 };
 export const missingUpstreamDashboard: UpstreamDashboard = {
     dashboard: undefined,
     projectUuid: upstreamProjectUuid,
     space: undefined,
-    access: [],
+    spaceAccessContext: undefined,
 };
 
 export const promotedChartWithinDashboard: PromotedChart = {
@@ -282,6 +308,7 @@ export const promotedSqlChart = {
         chartConfig: {},
     } as unknown as SqlChart['config'],
     chartKind: ChartKind.TABLE,
+    warehouseConnectionUuid: null as string | null,
     createdAt: new Date(),
     createdBy: updatedByUser,
     lastUpdatedAt: new Date(),
@@ -289,7 +316,6 @@ export const promotedSqlChart = {
     space: {
         uuid: promotedSpace.uuid,
         name: promotedSpace.name,
-        isPrivate: promotedSpace.isPrivate,
     },
     dashboard: null,
     project: {
@@ -312,7 +338,6 @@ export const existingUpstreamSqlChart = {
     space: {
         uuid: upstreamSpace.uuid,
         name: upstreamSpace.name,
-        isPrivate: upstreamSpace.isPrivate,
     },
 };
 
@@ -339,6 +364,32 @@ export const promotedDashboardWithSqlTile = {
     },
 };
 
+export const promotedAppUuid = 'promoted-app-uuid';
+export const upstreamAppUuid = 'upstream-app-uuid';
+
+export const dashboardDataAppTile: DashboardDataAppTile = {
+    uuid: 'data-app-tile-1234',
+    type: DashboardTileTypes.DATA_APP,
+    x: 0,
+    y: 10,
+    h: 10,
+    w: 10,
+    tabUuid: undefined,
+    properties: {
+        title: 'data app tile',
+        appUuid: promotedAppUuid,
+        appDeletedAt: null,
+    },
+};
+
+export const promotedDashboardWithDataAppTile: PromotedDashboard = {
+    ...promotedDashboard,
+    dashboard: {
+        ...promotedDashboard.dashboard,
+        tiles: [dashboardDataAppTile],
+    },
+};
+
 export const promotedDashboardWithChartWithinDashboard = {
     ...promotedDashboard,
     dashboard: {
@@ -354,6 +405,6 @@ export const promotedDashboardWithNewPrivateSpace = {
     space: {
         ...promotedDashboard.space,
         name: 'Private space',
-        isPrivate: true,
+        inheritParentPermissions: false,
     },
 };

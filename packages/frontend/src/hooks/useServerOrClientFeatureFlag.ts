@@ -1,35 +1,33 @@
-import {
-    type ApiError,
-    type CommercialFeatureFlags,
-    type FeatureFlag,
-    type FeatureFlags,
-} from '@lightdash/common';
-import { useQuery } from '@tanstack/react-query';
-import { useFeatureFlagEnabled as useFeatureFlagEnabledPosthog } from 'posthog-js/react';
+import { type ApiError, type FeatureFlag } from '@lightdash/common';
+import { useQuery, type QueryClient } from '@tanstack/react-query';
 import { lightdashApi } from '../api';
 
-/**
- * Use Client Feature Flag to get the feature flag from the client directly from posthog.
- *
- * @param featureFlag - The feature flag to get.
- * @returns boolean if the feature flag is enabled.
- */
-export const useClientFeatureFlag = (
-    featureFlag: FeatureFlags | CommercialFeatureFlags,
-) => useFeatureFlagEnabledPosthog(featureFlag) === true;
+const FEATURE_FLAG_QUERY_KEY = 'feature-flag';
 
 /**
- * Use Server Feature Flag to get the feature flag from the server.
- * This is useful to:
- * - Get the feature flag from the server (which works well on shared instances)
- * - When implemented, get a mix of Posthog and Environment variables feature flags (not always implemented)
- *
- * @param featureFlagId - The feature flag to get.
- * @returns The feature flag.
+ * Flags resolve per user/organization on the server, so anything that changes
+ * that context (creating or joining an org, creating the first project — which
+ * enables org overrides) has to refresh them. This refetches rather than
+ * invalidates because `refetchOnMount: false` means a stale cached flag would
+ * otherwise be served to the next page that mounts.
  */
-export const useServerFeatureFlag = (featureFlagId: string) => {
+export const refetchFeatureFlags = (queryClient: QueryClient) =>
+    queryClient.refetchQueries({
+        queryKey: [FEATURE_FLAG_QUERY_KEY],
+        type: 'all',
+    });
+
+/**
+ * Get a feature flag value from the backend, which resolves through the
+ * unified DB-backed flag system (env-var allowlists → per-flag config
+ * handlers → DB).
+ */
+export const useServerFeatureFlag = (
+    featureFlagId: string,
+    options?: { retry?: number | boolean; enabled?: boolean },
+) => {
     return useQuery<FeatureFlag, ApiError>(
-        ['feature-flag', featureFlagId],
+        [FEATURE_FLAG_QUERY_KEY, featureFlagId],
         () => {
             return lightdashApi<FeatureFlag>({
                 url: `/feature-flag/${featureFlagId}`,
@@ -39,7 +37,8 @@ export const useServerFeatureFlag = (featureFlagId: string) => {
             });
         },
         {
-            retry: false,
+            retry: options?.retry ?? false,
+            enabled: options?.enabled ?? true,
             refetchOnMount: false,
         },
     );

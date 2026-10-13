@@ -7,7 +7,13 @@ import {
     SupportedDbtVersions,
 } from '@lightdash/common';
 import execa from 'execa';
+import { promises as fs } from 'fs';
 import { xor } from 'lodash';
+import * as path from 'path';
+import {
+    getAgentConnectionChildEnvironment,
+    getAgentConnectionSelection,
+} from '../../credentials';
 import { loadManifest, LoadManifestArgs } from '../../dbt/manifest';
 import GlobalState from '../../globalState';
 import { getDbtVersion } from './getDbtVersion';
@@ -32,6 +38,7 @@ export type DbtCompileOptions = {
     defer: boolean | undefined;
     targetPath: string | undefined;
     favorState: boolean | undefined;
+    combineManifest: string | undefined;
 };
 
 const dbtCompileArgs = [
@@ -72,11 +79,16 @@ const optionsToArgs = (options: Partial<DbtCompileOptions>): string[] =>
         return acc;
     }, []);
 
-export const dbtCompile = async (options: DbtCompileOptions) => {
+const dbtCompile = async (options: DbtCompileOptions) => {
     try {
         const args = optionsToArgs(options);
         GlobalState.debug(`> Running: dbt compile ${args.join(' ')}`);
-        const { stdout, stderr } = await execa('dbt', ['compile', ...args]);
+        const { stdout, stderr } = await (getAgentConnectionSelection() !== null
+            ? execa('dbt', ['compile', ...args], {
+                  extendEnv: false,
+                  env: await getAgentConnectionChildEnvironment(),
+              })
+            : execa('dbt', ['compile', ...args]));
         console.error(stdout);
         console.error(stderr);
     } catch (e: unknown) {
@@ -84,6 +96,39 @@ export const dbtCompile = async (options: DbtCompileOptions) => {
         throw new ParseError(`Failed to run dbt compile:\n  ${msg}`);
     }
 };
+
+/**
+ * Reads run_results.json written by dbt after each compile/run to get the
+ * unique_ids of models that were actually processed in THIS run.
+ * This is more reliable than manifest.compiled, which can contain stale flags
+ * from previous runs (e.g. when state:modified+ selects 0 models, all previously
+ * compiled models still have compiled=true in the manifest).
+ */
+async function getCompiledModelIdsFromRunResults(
+    targetDir: string,
+): Promise<string[] | undefined> {
+    const runResultsPath = path.join(targetDir, 'run_results.json');
+    try {
+        const content = await fs.readFile(runResultsPath, {
+            encoding: 'utf-8',
+        });
+        const runResults = JSON.parse(content) as {
+            results: Array<{ unique_id: string; status: string }>;
+        };
+        const modelIds = runResults.results
+            .map((r) => r.unique_id)
+            .filter((id) => id.startsWith('model.'));
+        GlobalState.debug(
+            `> Read ${modelIds.length} model(s) from run_results.json`,
+        );
+        return modelIds;
+    } catch (e) {
+        GlobalState.debug(
+            `> Warning: Could not read run_results.json from ${runResultsPath}: ${getErrorMessage(e)}`,
+        );
+        return undefined;
+    }
+}
 
 const getJoinedModelsRecursively = (
     modelNode: DbtModelNode,
@@ -135,7 +180,12 @@ export async function dbtList(options: DbtCompileOptions): Promise<string[]> {
             args.push('--quiet');
         }
         GlobalState.debug(`> Running: dbt ls ${args.join(' ')}`);
-        const { stdout, stderr } = await execa('dbt', ['ls', ...args]);
+        const { stdout, stderr } = await (getAgentConnectionSelection() !== null
+            ? execa('dbt', ['ls', ...args], {
+                  extendEnv: false,
+                  env: await getAgentConnectionChildEnvironment(),
+              })
+            : execa('dbt', ['ls', ...args]));
         const models = stdout
             .split('\n')
             .map<string>((line) => {
@@ -163,10 +213,20 @@ export async function dbtList(options: DbtCompileOptions): Promise<string[]> {
     }
 }
 
+export type CompileModelsResult = {
+    compiledModelIds: string[] | undefined;
+    /**
+     * The model IDs from the user's original selection (e.g. --select "tag:lightdash").
+     * When --defer is used, models NOT in this list were pulled in via joins
+     * and should use the production schema from the state manifest.
+     */
+    originallySelectedModelIds: string[] | undefined;
+};
+
 export async function maybeCompileModelsAndJoins(
     loadManifestOpts: LoadManifestArgs,
     initialOptions: DbtCompileOptions,
-): Promise<string[] | undefined> {
+): Promise<CompileModelsResult> {
     const dbtVersion = await getDbtVersion();
     let options = initialOptions;
     if (dbtVersion.isDbtCloudCLI) {
@@ -192,7 +252,10 @@ export async function maybeCompileModelsAndJoins(
             );
         }
         GlobalState.debug('> Skipping dbt compile');
-        return undefined;
+        return {
+            compiledModelIds: undefined,
+            originallySelectedModelIds: undefined,
+        };
     }
 
     // do initial compilation so we can get the list of models that are compiled after this command (e.g. selecting/excluding by tags)
@@ -201,11 +264,17 @@ export async function maybeCompileModelsAndJoins(
         compiledModelIds = await dbtList(options);
     } else {
         await dbtCompile(options);
+        compiledModelIds = await getCompiledModelIdsFromRunResults(
+            loadManifestOpts.targetDir,
+        );
     }
 
     // If no models are explicitly selected or excluded, we don't need to explicitly find joined models
     if (!options.select && !options.exclude) {
-        return compiledModelIds;
+        return {
+            compiledModelIds,
+            originallySelectedModelIds: undefined,
+        };
     }
 
     // Load manifest and get all models
@@ -214,6 +283,11 @@ export async function maybeCompileModelsAndJoins(
     const currCompiledModels = getCompiledModels(
         allManifestModels,
         compiledModelIds,
+    );
+
+    // Save the originally selected model IDs (before join expansion)
+    const originallySelectedModelIds = currCompiledModels.map(
+        (model) => model.unique_id,
     );
 
     // Get models and their joined models
@@ -240,16 +314,22 @@ export async function maybeCompileModelsAndJoins(
             )}`,
         );
         if (options.useDbtList) {
-            return dbtList({
-                ...options,
-                select: requiredModelsNames,
-            });
+            return {
+                compiledModelIds: await dbtList({
+                    ...options,
+                    select: requiredModelsNames,
+                }),
+                originallySelectedModelIds,
+            };
         }
         await dbtCompile({
             ...options,
             select: requiredModelsNames,
         });
-        return undefined;
+        return {
+            compiledModelIds: undefined,
+            originallySelectedModelIds,
+        };
     }
-    return compiledModelIds;
+    return { compiledModelIds, originallySelectedModelIds };
 }

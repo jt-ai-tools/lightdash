@@ -1,47 +1,55 @@
 import {
-    assertUnreachable,
-    CartesianSeriesType,
-    FeatureFlags,
     getSeriesId,
-    isCompleteEchartsConfig,
     isCompleteLayout,
     isNumericItem,
-    StackType,
-    XAxisSort,
-    XAxisSortType,
     type CartesianChart,
-    type CompleteCartesianChartLayout,
+    type ConditionalFormattingConfig,
     type EchartsGrid,
     type EchartsLegend,
     type ItemsMap,
-    type MarkLineData,
+    type MergeFieldOrigins,
     type MetricQuery,
+    type RowLimit,
     type Series,
     type SeriesMetadata,
+    type StackType,
     type TableCalculationMetadata,
     type TooltipSortBy,
-    type XAxis,
+    type XAxisSort,
 } from '@lightdash/common';
+import {
+    applyCartesianStacking,
+    applyCartesianType,
+    applyReferenceLines,
+    buildCartesianSeries,
+    buildValidCartesianConfig,
+    EMPTY_CARTESIAN_CHART_CONFIG,
+    EMPTY_X_AXIS,
+    getAvailableCartesianFields,
+    getCartesianChartType,
+    getPendingFieldIds,
+    getReferenceLinesFromSeries,
+    getXAxisSortConfig,
+    hasCartesianCustomColorsStacking,
+    isCartesianStacked,
+    isColorByCategoryEligible,
+    isConditionalFormattingEligible,
+    isStackTypeStacked,
+    repairCartesianLayout,
+    toStackType,
+    repairConditionalFormattings,
+    type CartesianTypeOptions,
+    type ReferenceLineField,
+} from '@lightdash/visualization/editor';
 import { produce } from 'immer';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-    getMarkLineAxis,
-    type ReferenceLineField,
-} from '../../components/common/ReferenceLine';
 import type { InfiniteQueryResults } from '../useQueryResults';
-import { useServerFeatureFlag } from '../useServerOrClientFeatureFlag';
-import {
-    getExpectedSeriesMap,
-    mergeExistingAndExpectedSeries,
-    sortDimensions,
-} from './utils';
 
-export const EMPTY_X_AXIS = 'empty_x_axis';
-
-export type CartesianTypeOptions = {
-    type: CartesianSeriesType;
-    flipAxes: boolean;
-    hasAreaStyle: boolean;
+export {
+    applyReferenceLines,
+    EMPTY_CARTESIAN_CHART_CONFIG,
+    EMPTY_X_AXIS,
+    type CartesianTypeOptions,
 };
 
 type Args = {
@@ -51,149 +59,51 @@ type Args = {
         | (InfiniteQueryResults & {
               metricQuery?: MetricQuery;
               fields?: ItemsMap;
+              resolvedTimezone?: string;
+              fieldOrigins?: MergeFieldOrigins;
           })
         | undefined;
-    setPivotDimensions: React.Dispatch<
-        React.SetStateAction<string[] | undefined>
-    >;
     columnOrder: string[];
     itemsMap: ItemsMap | undefined;
     stacking: boolean | StackType | undefined;
     cartesianType: CartesianTypeOptions | undefined;
     colorPalette: string[];
     tableCalculationsMetadata?: TableCalculationMetadata[];
+    /** The not-yet-run metric query; its fields count as valid layout
+     *  references so a just-added field survives until results land. */
+    unsavedMetricQuery?: MetricQuery;
 };
 
-const applyReferenceLines = (
-    series: Series[],
-    dirtyLayout: Partial<Partial<CompleteCartesianChartLayout>> | undefined,
-    referenceLines: ReferenceLineField[],
-): Series[] => {
-    // Track which reference lines have been applied to visible series
-    let appliedReferenceLines: string[] = [];
-
-    return series.map((serie) => {
-        // If series is filtered out or hidden, ensure it has no markLine
-        // but DON'T mark the reference line as applied so another visible series can pick it up
-        if (serie.isFilteredOut || serie.hidden) {
-            return { ...serie, markLine: undefined };
-        }
-
-        const referenceLinesForSerie = referenceLines.filter(
-            (referenceLine) => {
-                if (referenceLine.fieldId === undefined) return false;
-                if (appliedReferenceLines.includes(referenceLine.fieldId))
-                    return false;
-                return (
-                    referenceLine.fieldId === serie.encode?.xRef.field ||
-                    referenceLine.fieldId === serie.encode?.yRef.field
-                );
-            },
-        );
-
-        if (referenceLinesForSerie.length === 0)
-            return { ...serie, markLine: undefined };
-
-        const markLineData: MarkLineData[] = referenceLinesForSerie.map(
-            (line) => {
-                if (line.fieldId === undefined) return line.data;
-                const value = line.data.xAxis || line.data.yAxis;
-                if (value === undefined) return line.data;
-                appliedReferenceLines.push(line.fieldId);
-
-                const axis = getMarkLineAxis(
-                    dirtyLayout?.xField,
-                    dirtyLayout?.flipAxes || false,
-                    line.fieldId,
-                );
-
-                return {
-                    ...line.data,
-                    xAxis: undefined,
-                    yAxis: undefined,
-                    [axis]: value,
-                };
-            },
-        );
-
-        return {
-            ...serie,
-            markLine: {
-                symbol: 'none',
-                lineStyle: {
-                    color: '#000',
-                    width: 3,
-                    type: 'solid',
-                },
-                data: markLineData,
-            },
-        };
-    });
-};
-
-function getXAxisSortConfig(
-    sort: XAxisSort,
-): Pick<XAxis, 'inverse' | 'sortType'> {
-    switch (sort) {
-        case XAxisSort.DEFAULT:
-            return {
-                inverse: false,
-                sortType: XAxisSortType.DEFAULT,
-            };
-        case XAxisSort.DEFAULT_REVERSED:
-            return {
-                inverse: true,
-                sortType: XAxisSortType.DEFAULT,
-            };
-        case XAxisSort.ASCENDING:
-            return {
-                inverse: false,
-                sortType: XAxisSortType.CATEGORY,
-            };
-        case XAxisSort.DESCENDING:
-            return {
-                inverse: true,
-                sortType: XAxisSortType.CATEGORY,
-            };
-        case XAxisSort.BAR_TOTALS_ASCENDING:
-            return {
-                inverse: false,
-                sortType: XAxisSortType.BAR_TOTALS,
-            };
-        case XAxisSort.BAR_TOTALS_DESCENDING:
-            return {
-                inverse: true,
-                sortType: XAxisSortType.BAR_TOTALS,
-            };
-        default:
-            return assertUnreachable(sort, `Invalid sort ${sort}`);
-    }
-}
-
-export const EMPTY_CARTESIAN_CHART_CONFIG: CartesianChart = {
-    layout: {},
-    eChartsConfig: {
-        showAxisTicks: false, // New charts default to hiding tick lines
-    },
-};
-
+/**
+ * The explorer's editable cartesian config. Every derivation (default
+ * layout, expected series, eligibility repairs, the valid config) runs
+ * through `@lightdash/visualization`; this hook only holds the editor
+ * state and its mutators.
+ */
 const useCartesianChartConfig = ({
     initialChartConfig,
     pivotKeys,
     resultsData,
-    setPivotDimensions,
     columnOrder,
     itemsMap,
     stacking,
     cartesianType,
     tableCalculationsMetadata,
+    unsavedMetricQuery,
 }: Args) => {
+    const [columnLimit, setColumnLimit] = useState<number | undefined>(
+        initialChartConfig?.columnLimit,
+    );
+
     const [dirtyLayout, setDirtyLayout] = useState<
         Partial<CartesianChart['layout']> | undefined
     >(initialChartConfig?.layout);
     const [dirtyMetadata, setDirtyMetadata] = useState<
         CartesianChart['metadata'] | undefined
     >(initialChartConfig?.metadata);
+    const [conditionalFormattings, setConditionalFormattings] = useState<
+        ConditionalFormattingConfig[]
+    >(initialChartConfig?.conditionalFormattings ?? []);
 
     const [dirtyEchartsConfig, setDirtyEchartsConfig] = useState<
         Partial<CartesianChart['eChartsConfig']> | undefined
@@ -206,19 +116,20 @@ const useCartesianChartConfig = ({
             : initialChartConfig?.eChartsConfig,
     );
 
-    const isInitiallyStacked = useMemo(() => {
-        // First check the layout's stack property (persisted setting)
-        const layoutStack = initialChartConfig?.layout?.stack;
-        if (layoutStack !== undefined) {
-            return layoutStack !== StackType.NONE && layoutStack !== false;
-        }
-        // Fall back to checking if any series has stack property
-        return (dirtyEchartsConfig?.series || []).some(
-            (series: Series) => series.stack !== undefined,
-        );
-    }, [dirtyEchartsConfig?.series, initialChartConfig?.layout?.stack]);
+    const isInitiallyStacked = useMemo(
+        () =>
+            isCartesianStacked(
+                initialChartConfig?.layout?.stack,
+                dirtyEchartsConfig?.series,
+            ),
+        [dirtyEchartsConfig?.series, initialChartConfig?.layout?.stack],
+    );
 
     const [isStacked, setIsStacked] = useState<boolean>(isInitiallyStacked);
+
+    const [rowLimit, setRowLimit] = useState<RowLimit | undefined>(
+        initialChartConfig?.rowLimit,
+    );
 
     const setLegend = useCallback((legend: EchartsLegend) => {
         const removePropertiesWithAuto = Object.entries(
@@ -303,6 +214,25 @@ const useCartesianChartConfig = ({
         [],
     );
 
+    const setYMinInterval = useCallback(
+        (index: number, value: number | undefined) => {
+            setDirtyEchartsConfig((prevState) => {
+                return {
+                    ...prevState,
+                    yAxis: [
+                        prevState?.yAxis?.[0] || {},
+                        prevState?.yAxis?.[1] || {},
+                    ].map((axis, axisIndex) =>
+                        axisIndex === index
+                            ? { ...axis, minInterval: value }
+                            : axis,
+                    ),
+                };
+            });
+        },
+        [],
+    );
+
     const setXMinValue = useCallback(
         (index: number, value: string | undefined) => {
             setDirtyEchartsConfig((prevState) => {
@@ -313,6 +243,25 @@ const useCartesianChartConfig = ({
                         prevState?.xAxis?.[1] || {},
                     ].map((axis, axisIndex) =>
                         axisIndex === index ? { ...axis, min: value } : axis,
+                    ),
+                };
+            });
+        },
+        [],
+    );
+
+    const setXMinInterval = useCallback(
+        (index: number, value: number | undefined) => {
+            setDirtyEchartsConfig((prevState) => {
+                return {
+                    ...prevState,
+                    xAxis: [
+                        prevState?.xAxis?.[0] || {},
+                        prevState?.xAxis?.[1] || {},
+                    ].map((axis, axisIndex) =>
+                        axisIndex === index
+                            ? { ...axis, minInterval: value }
+                            : axis,
                     ),
                 };
             });
@@ -432,6 +381,50 @@ const useCartesianChartConfig = ({
         }));
     }, []);
 
+    const setColorByCategory = useCallback((enabled: boolean) => {
+        setDirtyLayout((prev) => ({
+            ...prev,
+            colorByCategory: enabled,
+        }));
+    }, []);
+
+    const setCategoryColorOverride = useCallback(
+        (categoryValue: string, color: string) => {
+            setDirtyLayout((prev) => ({
+                ...prev,
+                categoryColorOverrides: {
+                    ...prev?.categoryColorOverrides,
+                    [categoryValue]: color,
+                },
+            }));
+        },
+        [],
+    );
+
+    const setAllCategoryColorOverrides = useCallback(
+        (overrides: Record<string, string>) => {
+            setDirtyLayout((prev) => ({
+                ...prev,
+                categoryColorOverrides: overrides,
+            }));
+        },
+        [],
+    );
+
+    const onSetConditionalFormattings = useCallback(
+        (configs: ConditionalFormattingConfig[]) => {
+            setConditionalFormattings(configs);
+
+            if (configs.length > 0) {
+                setDirtyLayout((prev) => ({
+                    ...prev,
+                    colorByCategory: undefined,
+                }));
+            }
+        },
+        [],
+    );
+
     const setAxisLabelFontSize = useCallback((fontSize: number | undefined) => {
         setDirtyEchartsConfig((prev) => ({
             ...prev,
@@ -474,11 +467,44 @@ const useCartesianChartConfig = ({
             };
         });
     }, []);
+    const setXAxisTreatAsCategory = useCallback((treatAsCategory: boolean) => {
+        setDirtyEchartsConfig((prevState) => {
+            const [firstAxis, ...axes] = prevState?.xAxis || [];
+            return {
+                ...prevState,
+                xAxis: [{ ...firstAxis, treatAsCategory }, ...axes],
+            };
+        });
+    }, []);
+    const setDataZoomAnchor = useCallback((dataZoomAnchor: 'start' | 'end') => {
+        setDirtyEchartsConfig((prevState) => {
+            const [firstAxis, ...axes] = prevState?.xAxis || [];
+            return {
+                ...prevState,
+                xAxis: [{ ...firstAxis, dataZoomAnchor }, ...axes],
+            };
+        });
+    }, []);
+    const setDataZoomItemCount = useCallback((dataZoomItemCount: number) => {
+        setDirtyEchartsConfig((prevState) => {
+            const [firstAxis, ...axes] = prevState?.xAxis || [];
+            return {
+                ...prevState,
+                xAxis: [{ ...firstAxis, dataZoomItemCount }, ...axes],
+            };
+        });
+    }, []);
     const addSingleSeries = useCallback((yField: string) => {
         setDirtyLayout((prev) => ({
             ...prev,
             yField: [...(prev?.yField || []), yField],
+            // Color by category only works for single-series; clear when adding another
+            ...((prev?.yField?.length ?? 0) >= 1 && {
+                colorByCategory: undefined,
+                categoryColorOverrides: undefined,
+            }),
         }));
+        setConditionalFormattings((prev) => (prev.length > 0 ? [] : prev));
     }, []);
 
     const removeSingleSeries = useCallback((index: number) => {
@@ -524,29 +550,18 @@ const useCartesianChartConfig = ({
 
     const setType = useCallback(
         (type: Series['type'], flipAxes: boolean, hasAreaStyle: boolean) => {
-            setDirtyLayout((prev) => ({
-                ...prev,
+            const options: CartesianTypeOptions = {
+                type,
                 flipAxes,
-            }));
+                hasAreaStyle,
+            };
+            setDirtyLayout(
+                (prev) => applyCartesianType(prev, undefined, options).layout,
+            );
             setDirtyEchartsConfig(
                 (prevState) =>
-                    prevState && {
-                        ...prevState,
-                        series: prevState?.series?.map((series) => ({
-                            ...series,
-                            type,
-                            areaStyle: hasAreaStyle ? {} : undefined,
-                        })),
-                        xAxis: prevState?.xAxis?.map((axis) => ({
-                            ...axis,
-                            // If the chart is not a bar chart, and the xAxis is sorted by bar totals, set the sort type to default ( bar totals are not applied to non-bar charts )
-                            sortType:
-                                type !== CartesianSeriesType.BAR &&
-                                axis.sortType === XAxisSortType.BAR_TOTALS
-                                    ? XAxisSortType.DEFAULT
-                                    : axis.sortType,
-                        })),
-                    },
+                    applyCartesianType(undefined, prevState, options)
+                        .eChartsConfig,
             );
         },
         [],
@@ -620,46 +635,26 @@ const useCartesianChartConfig = ({
 
     const setStacking = useCallback(
         (stack: boolean | StackType) => {
-            const yFields = dirtyLayout?.yField || [];
-            const isPivoted = pivotKeys && pivotKeys.length > 0;
+            // The y fields the stack applies to are read once, from the
+            // layout at call time, as they always were.
+            const yFields = dirtyLayout?.yField;
 
-            // Convert StackType to boolean for isStacked state
-            const stackBoolean =
-                stack === StackType.NORMAL ||
-                stack === StackType.PERCENT ||
-                stack === true;
-
-            setIsStacked(stackBoolean);
+            setIsStacked(isStackTypeStacked(stack));
 
             // Store the stack type in the layout
             setDirtyLayout((prev) => ({
                 ...prev,
-                stack:
-                    stack === true
-                        ? StackType.NORMAL
-                        : stack === false
-                          ? StackType.NONE
-                          : stack,
+                stack: toStackType(stack),
             }));
 
             setDirtyEchartsConfig(
-                produce((draft) => {
-                    if (!draft) return;
-                    draft.series = draft.series?.map((series) => {
-                        const { field } = series.encode.yRef;
-                        if (yFields.includes(field)) {
-                            return {
-                                ...series,
-                                stack: stackBoolean
-                                    ? isPivoted
-                                        ? field
-                                        : 'stack-all-series'
-                                    : undefined,
-                            };
-                        }
-                        return series;
-                    });
-                }),
+                (prevState) =>
+                    applyCartesianStacking(
+                        { yField: yFields },
+                        prevState,
+                        stack,
+                        pivotKeys,
+                    ).eChartsConfig,
             );
         },
         [dirtyLayout?.yField, pivotKeys],
@@ -690,309 +685,56 @@ const useCartesianChartConfig = ({
         }
     }, [stacking, setStacking]);
 
-    const sortedDimensions = useMemo(() => {
-        return sortDimensions(
-            resultsData?.metricQuery?.dimensions || [],
-            itemsMap,
-            columnOrder,
-        );
-    }, [resultsData?.metricQuery?.dimensions, itemsMap, columnOrder]);
-
-    const [availableFields, availableDimensions, availableMetrics] =
-        useMemo(() => {
-            const metrics = resultsData?.metricQuery?.metrics || [];
-            const tableCalculations =
-                resultsData?.metricQuery?.tableCalculations.map(
-                    ({ name }) => name,
-                ) || [];
-
-            return [
-                [...sortedDimensions, ...metrics, ...tableCalculations],
-                [...sortedDimensions],
-                metrics,
-            ];
-        }, [resultsData, sortedDimensions]);
-
-    /**
-     * Is valid when the field is a table calculation in the metadata with the current name
-     */
-    const isFieldValidTableCalculation = useCallback(
-        (fieldName: string) => {
-            return Boolean(
-                tableCalculationsMetadata?.some((tc) => tc.name === fieldName),
-            );
-        },
-        [tableCalculationsMetadata],
+    const { availableFields, availableDimensions, availableMetrics } = useMemo(
+        () =>
+            getAvailableCartesianFields({
+                metricQuery: resultsData?.metricQuery,
+                itemsMap,
+                columnOrder,
+            }),
+        [resultsData?.metricQuery, itemsMap, columnOrder],
     );
 
-    /**
-     * Returns the index of the table calculation metadata with the old name
-     */
-    const getOldTableCalculationMetadataIndex = useCallback(
-        (fieldName: string) => {
-            return (
-                tableCalculationsMetadata?.findIndex(
-                    (tc) => tc.oldName === fieldName,
-                ) ?? -1
-            );
-        },
-        [tableCalculationsMetadata],
-    );
-
-    /**
-     * When table calculations update, their name changes, so we need to update the selected fields
-     * If the xField is a table calculation with the old name in the metadata, return the current name otherwise return xField
-     */
-    const getXField = useCallback(
-        (xField?: string) => {
-            if (!tableCalculationsMetadata || !xField) return xField;
-
-            const xFieldTcIndex = getOldTableCalculationMetadataIndex(xField);
-
-            return xFieldTcIndex !== -1
-                ? tableCalculationsMetadata[xFieldTcIndex].name
-                : xField;
-        },
-        [getOldTableCalculationMetadataIndex, tableCalculationsMetadata],
-    );
-
-    /**
-     * When table calculations update, their name changes, so we need to update the selected fields
-     * If any yField is a table calculation with the old name in the metadata, return the current name otherwise return yField
-     */
-    const getYFields = useCallback(
-        (yFields?: string[]) => {
-            if (!tableCalculationsMetadata || !yFields) return yFields;
-
-            return yFields.map((yField) => {
-                const yFieldTcIndex =
-                    getOldTableCalculationMetadataIndex(yField);
-
-                return yFieldTcIndex !== -1
-                    ? tableCalculationsMetadata[yFieldTcIndex].name
-                    : yField;
-            });
-        },
-        [getOldTableCalculationMetadataIndex, tableCalculationsMetadata],
-    );
-
-    const { data: useSqlPivotResults } = useServerFeatureFlag(
-        FeatureFlags.UseSqlPivotResults,
+    // `availableFields` only knows the last run; a field just added from a
+    // config picker must not be stripped before its results land.
+    const pendingFieldIds = useMemo(
+        () => getPendingFieldIds(unsavedMetricQuery),
+        [unsavedMetricQuery],
     );
 
     // Set fallout layout values
     // https://www.notion.so/lightdash/Default-chart-configurations-5d3001af990d4b6fa990dba4564540f6
     useEffect(() => {
         if (availableFields.length > 0) {
-            setDirtyLayout((prev) => {
-                /**
-                 * Get the fields with the current table calculation names when they are a table calculation with the old name
-                 * otherwise keep the fields as they are
-                 */
-                const xField = getXField(prev?.xField);
-                const yFields = getYFields(prev?.yField);
-
-                const isCurrentXFieldValid: boolean =
-                    xField === EMPTY_X_AXIS ||
-                    (!!xField &&
-                        (availableFields.includes(xField) ||
-                            isFieldValidTableCalculation(xField)));
-
-                const currentValidYFields = yFields
-                    ? yFields.filter(
-                          (y) =>
-                              availableFields.includes(y) ||
-                              isFieldValidTableCalculation(y),
-                      )
-                    : [];
-
-                const isCurrentYFieldsValid: boolean =
-                    currentValidYFields.length > 0;
-
-                // current configuration is still valid
-                if (isCurrentXFieldValid && isCurrentYFieldsValid) {
-                    return {
-                        ...prev,
-                        xField,
-                        yField: currentValidYFields,
-                    };
-                }
-
-                // try to fix partially invalid configuration
-                if (
-                    (isCurrentXFieldValid && !isCurrentYFieldsValid) ||
-                    (!isCurrentXFieldValid && isCurrentYFieldsValid)
-                ) {
-                    const usedFields: string[] = [];
-
-                    if (isCurrentXFieldValid && xField) {
-                        usedFields.push(xField);
-                    }
-
-                    if (isCurrentYFieldsValid) {
-                        usedFields.push(...currentValidYFields);
-                    }
-
-                    const fallbackXField = availableFields.filter(
-                        (f) => !usedFields.includes(f),
-                    )[0];
-
-                    if (!isCurrentXFieldValid && fallbackXField) {
-                        return {
-                            ...prev,
-                            xField: fallbackXField,
-                            yField: currentValidYFields,
-                        };
-                    }
-
-                    const fallbackYFields = [
-                        ...availableMetrics,
-                        ...availableDimensions,
-                    ].filter((f) => !usedFields.includes(f))[0];
-
-                    if (!isCurrentYFieldsValid && fallbackYFields) {
-                        return {
-                            ...prev,
-                            xField,
-                            yField: [fallbackYFields],
-                        };
-                    }
-                }
-
-                let newXField: string | undefined = undefined;
-                let newYFields: string[] = [];
-                let newPivotFields: string[] = [];
-
-                // one metric , one dimension
-                if (
-                    availableMetrics.length === 1 &&
-                    availableDimensions.length === 1
-                ) {
-                    newXField = availableDimensions[0];
-                    newYFields = [availableMetrics[0]];
-                }
-
-                // one metric, two dimensions
-                else if (
-                    availableMetrics.length === 1 &&
-                    availableDimensions.length === 2
-                ) {
-                    newXField = availableDimensions[0];
-                    newYFields = [availableMetrics[0]];
-                    newPivotFields = [availableDimensions[1]];
-                }
-
-                // 1+ metrics, one dimension
-                else if (
-                    availableMetrics.length > 1 &&
-                    availableDimensions.length === 1
-                ) {
-                    //Max 4 metrics in Y-axis
-                    newXField = availableDimensions[0];
-                    newYFields = availableMetrics.slice(0, 4);
-                }
-
-                // 2+ dimensions and 1+ metrics
-                else if (
-                    availableMetrics.length >= 1 &&
-                    availableDimensions.length >= 2
-                ) {
-                    //Max 4 metrics in Y-axis
-                    newXField = availableDimensions[0];
-                    newYFields = availableMetrics.slice(0, 4);
-                    newPivotFields = [availableDimensions[1]];
-                }
-
-                // 2+ metrics with no dimensions
-                else if (
-                    availableMetrics.length >= 2 &&
-                    availableDimensions.length === 0
-                ) {
-                    newXField = availableMetrics[0];
-                    newYFields = [availableMetrics[1]];
-                }
-
-                // 2+ dimensions with no metrics
-                else if (
-                    availableMetrics.length === 0 &&
-                    availableDimensions.length >= 2
-                ) {
-                    newXField = availableDimensions[0];
-                    newYFields = [availableDimensions[1]];
-                }
-
-                // Only add pivot dimensions when:
-                // 1. We have a suggestion (newPivotFields is non-empty)
-                // 2. Not using sql pivot results
-                // 3. No existing pivot is set
-                // 4. We have itemsMap (fields are loaded)
-                if (
-                    newPivotFields.length > 0 &&
-                    itemsMap !== undefined &&
-                    !useSqlPivotResults?.enabled &&
-                    !pivotKeys
-                ) {
-                    setPivotDimensions(newPivotFields);
-                }
-
-                // Don't update if we don't have a valid configuration
-                // This prevents infinite loops when insufficient fields are selected
-                if (!newXField || newYFields.length === 0) {
-                    return prev;
-                }
-
-                return {
-                    ...prev,
-                    xField: newXField,
-                    yField: newYFields,
-                };
-            });
+            setDirtyLayout((prev) =>
+                repairCartesianLayout({
+                    layout: prev,
+                    availableFields,
+                    availableDimensions,
+                    availableMetrics,
+                    tableCalculationsMetadata,
+                    pendingFieldIds,
+                }),
+            );
         }
     }, [
         availableDimensions,
         availableFields,
         availableMetrics,
         pivotKeys,
-        getXField,
-        getYFields,
-        isFieldValidTableCalculation,
+        tableCalculationsMetadata,
+        pendingFieldIds,
         itemsMap,
-        setPivotDimensions,
-        useSqlPivotResults,
     ]);
 
-    const selectedReferenceLines: ReferenceLineField[] = useMemo(() => {
-        if (dirtyEchartsConfig?.series === undefined) return [];
-        return dirtyEchartsConfig.series.reduce<ReferenceLineField[]>(
-            (acc, serie) => {
-                const data = serie.markLine?.data;
-                if (data !== undefined) {
-                    const referenceLine = data.map((markData) => {
-                        const axis =
-                            markData.xAxis !== undefined
-                                ? dirtyLayout?.flipAxes
-                                    ? serie.encode.yRef
-                                    : serie.encode.xRef
-                                : dirtyLayout?.flipAxes
-                                  ? serie.encode.xRef
-                                  : serie.encode.yRef;
-                        return {
-                            fieldId: axis.field,
-                            data: {
-                                label: serie.markLine?.label,
-                                lineStyle: serie.markLine?.lineStyle,
-                                ...markData,
-                            },
-                        };
-                    });
-
-                    return [...acc, ...referenceLine];
-                }
-                return acc;
-            },
-            [],
-        );
-    }, [dirtyEchartsConfig?.series, dirtyLayout?.flipAxes]);
+    const selectedReferenceLines: ReferenceLineField[] = useMemo(
+        () =>
+            getReferenceLinesFromSeries(
+                dirtyEchartsConfig?.series,
+                dirtyLayout?.flipAxes,
+            ),
+        [dirtyEchartsConfig?.series, dirtyLayout?.flipAxes],
+    );
 
     const [referenceLines, setReferenceLines] = useState<ReferenceLineField[]>(
         selectedReferenceLines,
@@ -1020,61 +762,20 @@ const useCartesianChartConfig = ({
     // Generate expected series
     useEffect(() => {
         if (isCompleteLayout(dirtyLayout) && resultsData?.hasFetchedAllRows) {
-            setDirtyEchartsConfig((prev) => {
-                const defaultCartesianType =
-                    prev?.series?.[0]?.type || CartesianSeriesType.BAR;
-                const defaultAreaStyle =
-                    defaultCartesianType === CartesianSeriesType.LINE
-                        ? prev?.series?.[0]?.areaStyle
-                        : undefined;
-                const defaultSmooth = prev?.series?.[0]?.smooth;
-                const defaultLabel = prev?.series?.[0]?.label;
-
-                const defaultShowSymbol = prev?.series?.[0]?.showSymbol;
-                const expectedSeriesMap = getExpectedSeriesMap({
-                    defaultSmooth,
-                    defaultShowSymbol,
-                    defaultAreaStyle,
-                    defaultCartesianType,
-                    availableDimensions,
+            setDirtyEchartsConfig((prev) => ({
+                ...prev,
+                series: buildCartesianSeries({
+                    layout: dirtyLayout,
+                    existingSeries: prev?.series,
+                    cartesianType,
                     isStacked,
                     pivotKeys,
                     resultsData,
-                    xField: dirtyLayout.xField,
-                    yFields: dirtyLayout.yField,
-                    defaultLabel,
                     itemsMap,
-                });
-                // Check if any sort field matches a pivot dimension
-                const sortedByPivot =
-                    !!pivotKeys?.length &&
-                    !!resultsData?.metricQuery?.sorts?.some((sort) =>
-                        pivotKeys.includes(sort.fieldId),
-                    );
-
-                const newSeries = mergeExistingAndExpectedSeries({
-                    expectedSeriesMap,
-                    existingSeries: prev?.series || [],
-                    sortedByPivot,
-                });
-
-                const seriesWithReferenceLines = applyReferenceLines(
-                    newSeries,
-                    dirtyLayout,
+                    columnLimit,
                     referenceLines,
-                );
-
-                return {
-                    ...prev,
-                    series: seriesWithReferenceLines.map((serie) => ({
-                        ...serie,
-                        // NOTE: Addresses old chart configs where yAxisIndex was not set
-                        ...(!serie.yAxisIndex && {
-                            yAxisIndex: 0,
-                        }),
-                    })),
-                };
-            });
+                }),
+            }));
         }
     }, [
         dirtyLayout,
@@ -1085,40 +786,114 @@ const useCartesianChartConfig = ({
         referenceLines,
         itemsMap,
         seriesHiddenStatesKey, // Re-run when series hidden states change
+        columnLimit,
+        cartesianType,
     ]);
 
-    const validConfig: CartesianChart = useMemo(() => {
-        // Always use the dirtyLayout and dirtyEchartsConfig when possible, fallback to the empty config if not complete.
-        return {
-            layout: isCompleteLayout(dirtyLayout)
-                ? dirtyLayout
-                : EMPTY_CARTESIAN_CHART_CONFIG.layout,
-            eChartsConfig: isCompleteEchartsConfig(dirtyEchartsConfig)
-                ? {
-                      ...dirtyEchartsConfig,
-                      series: dirtyEchartsConfig.series.filter(
-                          (serie) => !serie.isFilteredOut,
-                      ),
-                      tooltip,
-                      tooltipSort,
-                  }
-                : EMPTY_CARTESIAN_CHART_CONFIG.eChartsConfig,
-            metadata: dirtyMetadata,
-        };
-    }, [dirtyLayout, dirtyEchartsConfig, dirtyMetadata, tooltip, tooltipSort]);
+    const dirtyChartType = useMemo(
+        () => getCartesianChartType(dirtyEchartsConfig?.series),
+        [dirtyEchartsConfig?.series],
+    );
 
-    const { dirtyChartType } = useMemo(() => {
-        const firstSeriesType =
-            dirtyEchartsConfig?.series?.[0]?.type || CartesianSeriesType.BAR;
-        const firstSeriesAreaStyle = dirtyEchartsConfig?.series?.[0]?.areaStyle;
-        return {
-            dirtyChartType:
-                firstSeriesType === CartesianSeriesType.LINE &&
-                firstSeriesAreaStyle
-                    ? CartesianSeriesType.AREA
-                    : firstSeriesType,
-        };
-    }, [dirtyEchartsConfig]);
+    const hasCustomColorsStacking = useMemo(
+        () =>
+            hasCartesianCustomColorsStacking(
+                dirtyEchartsConfig?.series,
+                dirtyLayout?.stack,
+            ),
+        [dirtyEchartsConfig?.series, dirtyLayout?.stack],
+    );
+
+    const isConditionalFormattingAllowed = useMemo(
+        () =>
+            isConditionalFormattingEligible(
+                dirtyEchartsConfig?.series,
+                pivotKeys,
+            ),
+        [dirtyEchartsConfig?.series, pivotKeys],
+    );
+
+    const isColorByCategoryAllowed = useMemo(
+        () =>
+            isColorByCategoryEligible({
+                series: dirtyEchartsConfig?.series,
+                pivotKeys,
+                layout: dirtyLayout,
+            }),
+        [dirtyEchartsConfig?.series, pivotKeys, dirtyLayout],
+    );
+
+    useEffect(() => {
+        if (isColorByCategoryAllowed) return;
+
+        if (
+            !dirtyLayout?.colorByCategory &&
+            !dirtyLayout?.categoryColorOverrides
+        ) {
+            return;
+        }
+
+        setDirtyLayout((prev) => ({
+            ...prev,
+            colorByCategory: undefined,
+            categoryColorOverrides: undefined,
+        }));
+    }, [
+        isColorByCategoryAllowed,
+        dirtyLayout?.colorByCategory,
+        dirtyLayout?.categoryColorOverrides,
+    ]);
+
+    useEffect(() => {
+        if (isConditionalFormattingAllowed) return;
+
+        setConditionalFormattings((prev) => (prev.length === 0 ? prev : []));
+    }, [isConditionalFormattingAllowed]);
+
+    // Repair configs whose target no longer exists on the chart (e.g. the
+    // metric was swapped or removed) by pointing them at the first metric.
+    useEffect(() => {
+        if (!isConditionalFormattingAllowed) return;
+
+        const yFields = dirtyLayout?.yField ?? [];
+        if (!yFields[0]) return;
+
+        setConditionalFormattings((prev) =>
+            repairConditionalFormattings({
+                conditionalFormattings: prev,
+                yFields,
+                hasCustomColorsStacking,
+            }),
+        );
+    }, [
+        isConditionalFormattingAllowed,
+        hasCustomColorsStacking,
+        dirtyLayout?.yField,
+    ]);
+
+    const validConfig: CartesianChart = useMemo(
+        () =>
+            buildValidCartesianConfig({
+                layout: dirtyLayout,
+                eChartsConfig: dirtyEchartsConfig,
+                conditionalFormattings,
+                metadata: dirtyMetadata,
+                tooltip,
+                tooltipSort,
+                rowLimit,
+                columnLimit,
+            }),
+        [
+            dirtyLayout,
+            dirtyEchartsConfig,
+            conditionalFormattings,
+            dirtyMetadata,
+            tooltip,
+            tooltipSort,
+            rowLimit,
+            columnLimit,
+        ],
+    );
 
     const updateMetadata = useCallback(
         (metadata: Record<string, SeriesMetadata>) => {
@@ -1148,7 +923,9 @@ const useCartesianChartConfig = ({
         setFlipAxis,
         setYMinValue,
         setYMaxValue,
+        setYMinInterval,
         setXMinValue,
+        setXMinInterval,
         setXMinOffsetValue,
         setXMaxValue,
         setXMaxOffsetValue,
@@ -1162,11 +939,19 @@ const useCartesianChartConfig = ({
         setShowRightYAxis,
         setShowAxisTicks,
         setConnectNulls,
+        setColorByCategory,
+        setCategoryColorOverride,
+        setAllCategoryColorOverrides,
+        conditionalFormattings,
+        onSetConditionalFormattings,
         setAxisLabelFontSize,
         setAxisTitleFontSize,
         setXAxisSort,
         setXAxisLabelRotation,
         setScrollableChart,
+        setXAxisTreatAsCategory,
+        setDataZoomAnchor,
+        setDataZoomItemCount,
         updateSeries,
         referenceLines,
         setReferenceLines,
@@ -1175,6 +960,10 @@ const useCartesianChartConfig = ({
         tooltipSort,
         setTooltipSort,
         updateMetadata,
+        rowLimit,
+        setRowLimit,
+        columnLimit,
+        setColumnLimit,
     };
 };
 

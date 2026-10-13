@@ -4,8 +4,7 @@ import {
     isField,
     isMetric,
 } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
-import { Text } from '@mantine/core';
+import { Menu, Text } from '@mantine/core';
 import { IconArrowBarToDown } from '@tabler/icons-react';
 import { useCallback, useMemo, type FC } from 'react';
 import useTracking from '../../providers/Tracking/useTracking';
@@ -26,6 +25,8 @@ const DrillDownMenuItem: FC<DrillDownMenuItemProps> = ({
     item,
     fieldValues,
     pivotReference,
+    source,
+    valueLabel,
     trackingData,
 }) => {
     const { explore, metricQuery, openDrillDownModal } =
@@ -40,7 +41,8 @@ const DrillDownMenuItem: FC<DrillDownMenuItemProps> = ({
             : getItemId(item);
     }, [item, pivotReference]);
 
-    const value = fieldId ? fieldValues?.[fieldId]?.formatted : undefined;
+    const value =
+        (fieldId ? fieldValues?.[fieldId]?.formatted : undefined) ?? valueLabel;
 
     const handleDrillInto = useCallback(() => {
         if (!item || !openDrillDownModal || !fieldValues) {
@@ -51,6 +53,8 @@ const DrillDownMenuItem: FC<DrillDownMenuItemProps> = ({
             item,
             fieldValues,
             pivotReference,
+            source,
+            valueLabel,
         });
         track({
             name: EventName.DRILL_BY_CLICKED,
@@ -65,7 +69,9 @@ const DrillDownMenuItem: FC<DrillDownMenuItemProps> = ({
         item,
         openDrillDownModal,
         pivotReference,
+        source,
         track,
+        valueLabel,
         trackingData.organizationId,
         trackingData.projectId,
         trackingData.userId,
@@ -75,19 +81,21 @@ const DrillDownMenuItem: FC<DrillDownMenuItemProps> = ({
         item &&
         isField(item) &&
         isMetric(item) &&
-        explore &&
+        (source || explore) &&
         fieldValues &&
-        metricQuery
+        (source?.metricQuery || metricQuery)
     ) {
         return (
             <Menu.Item
                 leftSection={<MantineIcon icon={IconArrowBarToDown} />}
                 onClick={handleDrillInto}
             >
-                Drill into{' '}
-                <Text span fw={500}>
-                    {value}
-                </Text>
+                <>
+                    Drill into{' '}
+                    <Text span fw="bold">
+                        {value}
+                    </Text>
+                </>
             </Menu.Item>
         );
     }

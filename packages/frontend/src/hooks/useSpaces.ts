@@ -1,7 +1,9 @@
 import {
     type ApiError,
     type CreateSpace,
+    type PersonalSpaceSummary,
     type Space,
+    type SpaceDeleteImpact,
     type SpaceSummary,
     type UpdateSpace,
 } from '@lightdash/common';
@@ -27,13 +29,6 @@ const getSpaceSummaries = async (projectUuid: string) => {
     });
 };
 
-export const hasDirectAccessToSpace = (
-    space: Pick<SpaceSummary, 'isPrivate' | 'access'>,
-    userUuid: string,
-) => {
-    return !space.isPrivate || space.access.includes(userUuid);
-};
-
 export const useSpaceSummaries = (
     projectUuid?: string,
     includePrivateSpaces: boolean = false,
@@ -45,13 +40,13 @@ export const useSpaceSummaries = (
         () => getSpaceSummaries(projectUuid!),
         {
             select: (data) =>
-                // only get spaces that the user has direct access to
                 includePrivateSpaces
                     ? data
                     : data.filter(
                           (space) =>
                               !!account?.user &&
-                              hasDirectAccessToSpace(space, account.user.id),
+                              (space.inheritsFromOrgOrProject ||
+                                  space.access.includes(account.user.id)),
                       ),
             enabled: !!projectUuid && account?.isRegisteredUser(),
             ...queryOptions,
@@ -76,6 +71,23 @@ export const useSpace = (
         queryFn: () => getSpace(projectUuid!, spaceUuid!),
         enabled: !!projectUuid && !!spaceUuid,
         ...useQueryOptions,
+    });
+
+const getSpaceDeleteImpact = async (projectUuid: string, spaceUuid: string) =>
+    lightdashApi<SpaceDeleteImpact>({
+        url: `/projects/${projectUuid}/spaces/${spaceUuid}/delete-impact`,
+        method: 'GET',
+        body: undefined,
+    });
+
+export const useSpaceDeleteImpact = (
+    projectUuid: string | undefined,
+    spaceUuid: string | undefined,
+) =>
+    useQuery<SpaceDeleteImpact, ApiError>({
+        queryKey: ['space', projectUuid, spaceUuid, 'delete-impact'],
+        queryFn: () => getSpaceDeleteImpact(projectUuid!, spaceUuid!),
+        enabled: !!projectUuid && !!spaceUuid,
     });
 
 const deleteQuery = async (projectUuid: string, spaceUuid: string) =>
@@ -157,6 +169,11 @@ export const useUpdateMutation = (
                 await queryClient.invalidateQueries(['pinned_items']);
                 await queryClient.invalidateQueries(['content']);
                 await queryClient.refetchQueries(['spaces', projectUuid]);
+                await queryClient.invalidateQueries([
+                    'space_access',
+                    projectUuid,
+                    spaceUuid,
+                ]);
                 queryClient.setQueryData(
                     ['space', projectUuid, spaceUuid],
                     data,
@@ -261,6 +278,11 @@ export const useAddSpaceShareMutation = (
                     projectUuid,
                     spaceUuid,
                 ]);
+                await queryClient.invalidateQueries([
+                    'space_access',
+                    projectUuid,
+                    spaceUuid,
+                ]);
 
                 showToastSuccess({
                     title: `Success! Space access updated!`,
@@ -302,6 +324,11 @@ export const useDeleteSpaceShareMutation = (
                 await queryClient.refetchQueries(['spaces', projectUuid]);
                 await queryClient.refetchQueries([
                     'space',
+                    projectUuid,
+                    spaceUuid,
+                ]);
+                await queryClient.invalidateQueries([
+                    'space_access',
                     projectUuid,
                     spaceUuid,
                 ]);
@@ -351,6 +378,11 @@ export const useAddGroupSpaceShareMutation = (
                     projectUuid,
                     spaceUuid,
                 ]);
+                await queryClient.invalidateQueries([
+                    'space_access',
+                    projectUuid,
+                    spaceUuid,
+                ]);
 
                 showToastSuccess({
                     title: `Success! Space group access updated!`,
@@ -395,6 +427,11 @@ export const useDeleteSpaceGroupAccessMutation = (
                     projectUuid,
                     spaceUuid,
                 ]);
+                await queryClient.invalidateQueries([
+                    'space_access',
+                    projectUuid,
+                    spaceUuid,
+                ]);
 
                 showToastSuccess({
                     title: `Success! Space group access updated!`,
@@ -409,3 +446,22 @@ export const useDeleteSpaceGroupAccessMutation = (
         },
     );
 };
+
+const getPersonalSpace = async (projectUuid: string) =>
+    lightdashApi<PersonalSpaceSummary | null>({
+        url: `/projects/${projectUuid}/spaces/personal`,
+        method: 'GET',
+        body: undefined,
+    });
+
+/** The viewer's own personal space in the project, or null when the project
+ * has personal spaces off or none exists for them yet. */
+export const usePersonalSpace = (
+    projectUuid: string | undefined,
+    { enabled = true }: { enabled?: boolean } = {},
+) =>
+    useQuery<PersonalSpaceSummary | null, ApiError>({
+        queryKey: ['personal_space', projectUuid],
+        queryFn: () => getPersonalSpace(projectUuid!),
+        enabled: !!projectUuid && enabled,
+    });

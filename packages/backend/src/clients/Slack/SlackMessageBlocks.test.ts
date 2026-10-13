@@ -1,0 +1,745 @@
+import {
+    MAX_DELIVERY_QUERIES,
+    PartialFailureType,
+    type DeliveryNotice,
+    type PartialFailure,
+} from '@lightdash/common';
+import { KnownBlock } from '@slack/bolt';
+import {
+    getChartAndDashboardBlocks,
+    getChartCsvResultsBlocks,
+    getDashboardCsvResultsBlocks,
+    replaceImageBlocksWithNotice,
+} from './SlackMessageBlocks';
+
+const SLACK_MAX_BLOCKS = 50;
+const SLACK_MAX_URL = 3000;
+
+const findBlocks = <T extends KnownBlock['type']>(
+    blocks: KnownBlock[],
+    type: T,
+): Extract<KnownBlock, { type: T }>[] =>
+    blocks.filter(
+        (b): b is Extract<KnownBlock, { type: T }> => b.type === type,
+    );
+
+describe('SlackMessageBlocks', () => {
+    describe('block count cap (PROD-7209)', () => {
+        it('caps a dashboard with 60 chart downloads under Slack 50-block limit', () => {
+            const csvUrls = Array.from({ length: 60 }, (_, i) => ({
+                filename: `chart-${i}.csv`,
+                path: `https://s3.example.com/exports/chart-${i}.csv`,
+                localPath: `/tmp/chart-${i}.csv`,
+                truncated: false,
+            }));
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'Big dashboard',
+                name: 'Big dashboard',
+                description: 'Many charts',
+                ctaUrl: 'https://app.lightdash.com/dashboard/abc',
+                csvUrls,
+                footerMarkdown: 'sent by scheduler',
+            });
+
+            expect(blocks.length).toBeLessThan(SLACK_MAX_BLOCKS);
+        });
+
+        it('includes a summary indicator when dashboard charts exceed the cap', () => {
+            const csvUrls = Array.from({ length: 60 }, (_, i) => ({
+                filename: `chart-${i}.csv`,
+                path: `https://s3.example.com/exports/chart-${i}.csv`,
+                localPath: `/tmp/chart-${i}.csv`,
+                truncated: false,
+            }));
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'Big dashboard',
+                name: 'Big dashboard',
+                description: 'Many charts',
+                ctaUrl: 'https://app.lightdash.com/dashboard/abc',
+                csvUrls,
+                footerMarkdown: 'sent by scheduler',
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            const sectionTexts = sections
+                .map((s) => s.text?.text ?? '')
+                .join('\n');
+            expect(sectionTexts).toMatch(/more|additional|view in lightdash/i);
+        });
+
+        it('embeds per-chart download links in the collapsed section as mrkdwn', () => {
+            const csvUrls = Array.from({ length: 60 }, (_, i) => ({
+                filename: `chart-${i}.csv`,
+                path: `https://s3.example.com/exports/chart-${i}.csv`,
+                localPath: `/tmp/chart-${i}.csv`,
+                truncated: false,
+            }));
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'Big dashboard',
+                name: 'Big dashboard',
+                description: 'Many charts',
+                ctaUrl: 'https://app.lightdash.com/dashboard/abc',
+                csvUrls,
+            });
+
+            const sectionTexts = findBlocks(blocks, 'section')
+                .map((s) => s.text?.text ?? '')
+                .join('\n');
+            expect(sectionTexts).toMatch(
+                /<https:\/\/s3\.example\.com\/exports\/chart-0\.csv\|chart-0\.csv>/,
+            );
+        });
+
+        it('marks invalid per-chart URLs in the collapsed section without a link', () => {
+            const csvUrls = [
+                ...Array.from({ length: 35 }, (_, i) => ({
+                    filename: `chart-${i}.csv`,
+                    path: `https://s3.example.com/exports/chart-${i}.csv`,
+                    localPath: `/tmp/chart-${i}.csv`,
+                    truncated: false,
+                })),
+                {
+                    filename: 'oversized.csv',
+                    path: `https://s3.example.com/${'a'.repeat(
+                        SLACK_MAX_URL + 100,
+                    )}`,
+                    localPath: '/tmp/oversized.csv',
+                    truncated: false,
+                },
+            ];
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'Big dashboard',
+                name: 'Big dashboard',
+                description: 'Many charts',
+                ctaUrl: 'https://app.lightdash.com/dashboard/abc',
+                csvUrls,
+            });
+
+            const sectionTexts = findBlocks(blocks, 'section')
+                .map((s) => s.text?.text ?? '')
+                .join('\n');
+            // The invalid URL must not appear linked.
+            expect(sectionTexts).not.toMatch(/oversized\.csv\|oversized\.csv>/);
+        });
+
+        it('does not collapse when the dashboard has only a few charts', () => {
+            const csvUrls = Array.from({ length: 3 }, (_, i) => ({
+                filename: `chart-${i}.csv`,
+                path: `https://s3.example.com/exports/chart-${i}.csv`,
+                localPath: `/tmp/chart-${i}.csv`,
+                truncated: false,
+            }));
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'Small dashboard',
+                name: 'Small dashboard',
+                description: 'A few charts',
+                ctaUrl: 'https://app.lightdash.com/dashboard/abc',
+                csvUrls,
+                footerMarkdown: 'sent by scheduler',
+            });
+
+            const actionsButtons = blocks.filter(
+                (b) =>
+                    b.type === 'section' &&
+                    'accessory' in b &&
+                    b.accessory?.type === 'button',
+            );
+            expect(actionsButtons.length).toBeGreaterThanOrEqual(3);
+        });
+    });
+
+    describe('button URL validation', () => {
+        it('drops the chart-CSV download button when csvUrl exceeds 3000 chars', () => {
+            const longCsvUrl = `https://s3.example.com/${'a'.repeat(
+                SLACK_MAX_URL + 100,
+            )}`;
+
+            const blocks = getChartCsvResultsBlocks({
+                name: 'Big chart',
+                title: 'Big chart',
+                description: 'Big chart desc',
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+                csvUrl: longCsvUrl,
+            });
+
+            const buttons = blocks.flatMap((b) =>
+                b.type === 'actions' ? b.elements : [],
+            );
+            const downloadButtons = buttons.filter(
+                (e) => 'action_id' in e && e.action_id === 'download-results',
+            );
+            expect(downloadButtons).toHaveLength(0);
+        });
+
+        it('drops the Open-in-Lightdash button when ctaUrl exceeds 3000 chars', () => {
+            const longCta = `https://app.example.com/${'a'.repeat(
+                SLACK_MAX_URL + 100,
+            )}`;
+
+            const blocks = getChartAndDashboardBlocks({
+                title: 'Chart',
+                name: 'Chart',
+                description: 'Chart desc',
+                ctaUrl: longCta,
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            const accessories = sections
+                .map((s) => s.accessory)
+                .filter((a): a is NonNullable<typeof a> => Boolean(a));
+            expect(accessories).toHaveLength(0);
+        });
+
+        it('drops malformed button URLs (not parseable)', () => {
+            const blocks = getChartCsvResultsBlocks({
+                name: 'Chart',
+                title: 'Chart',
+                description: 'Chart desc',
+                ctaUrl: 'not-a-real-url',
+                csvUrl: 'still-not-a-url',
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            sections.forEach((s) => {
+                if (s.accessory && s.accessory.type === 'button') {
+                    throw new Error(
+                        'malformed ctaUrl should not produce a button accessory',
+                    );
+                }
+            });
+
+            const buttons = blocks.flatMap((b) =>
+                b.type === 'actions' ? b.elements : [],
+            );
+            expect(buttons).toHaveLength(0);
+        });
+    });
+
+    describe('warning messages replace dropped content', () => {
+        it('shows a download-unavailable warning when csvUrl is too long', () => {
+            const longCsvUrl = `https://s3.example.com/${'a'.repeat(
+                SLACK_MAX_URL + 100,
+            )}`;
+
+            const blocks = getChartCsvResultsBlocks({
+                name: 'Big chart',
+                title: 'Big chart',
+                description: 'Big chart desc',
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+                csvUrl: longCsvUrl,
+            });
+
+            const sectionTexts = findBlocks(blocks, 'section')
+                .map((s) => s.text?.text ?? '')
+                .join('\n');
+            expect(sectionTexts).toMatch(/download/i);
+            expect(sectionTexts).toMatch(
+                /unavailable|too long|open in lightdash/i,
+            );
+        });
+
+        it('shows a preview-unavailable warning when imageUrl is invalid', () => {
+            const blocks = getChartAndDashboardBlocks({
+                title: 'Chart',
+                name: 'Chart',
+                description: 'Chart desc',
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+                image: { source: 'url', url: 'not-a-url' },
+            });
+
+            const sectionTexts = findBlocks(blocks, 'section')
+                .map((s) => s.text?.text ?? '')
+                .join('\n');
+            expect(sectionTexts).toMatch(/preview|chart image/i);
+            expect(sectionTexts).toMatch(/unavailable|open in lightdash/i);
+        });
+
+        it('marks per-chart dashboard rows whose download URL is invalid', () => {
+            const csvUrls = [
+                {
+                    filename: 'good.csv',
+                    path: 'https://s3.example.com/good.csv',
+                    localPath: '/tmp/good.csv',
+                    truncated: false,
+                },
+                {
+                    filename: 'bad.csv',
+                    path: `https://s3.example.com/${'a'.repeat(
+                        SLACK_MAX_URL + 100,
+                    )}`,
+                    localPath: '/tmp/bad.csv',
+                    truncated: false,
+                },
+            ];
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'Dashboard',
+                name: 'Dashboard',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/dashboard/abc',
+                csvUrls,
+            });
+
+            const sectionsWithBadFilename = findBlocks(
+                blocks,
+                'section',
+            ).filter((s) => s.text?.text?.includes('bad.csv'));
+            expect(sectionsWithBadFilename.length).toBeGreaterThanOrEqual(1);
+            const text = sectionsWithBadFilename
+                .map((s) => s.text?.text ?? '')
+                .join('\n');
+            expect(text).toMatch(/unavailable|warning/i);
+
+            // Bad row should not still have a download button.
+            sectionsWithBadFilename.forEach((s) => {
+                expect(
+                    s.accessory && s.accessory.type === 'button'
+                        ? s.accessory.action_id
+                        : 'no-button',
+                ).not.toMatch(/^download-results-/);
+            });
+        });
+    });
+
+    describe('image URL validation', () => {
+        it('drops the image block when image_url exceeds 3000 chars', () => {
+            const longImage = `https://s3.example.com/${'a'.repeat(
+                SLACK_MAX_URL + 100,
+            )}`;
+
+            const blocks = getChartAndDashboardBlocks({
+                title: 'Chart',
+                name: 'Chart',
+                description: 'Chart desc',
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+                image: { source: 'url', url: longImage },
+            });
+
+            expect(findBlocks(blocks, 'image')).toHaveLength(0);
+        });
+
+        it('keeps the image block when image_url is well-formed and short', () => {
+            const blocks = getChartAndDashboardBlocks({
+                title: 'Chart',
+                name: 'Chart',
+                description: 'Chart desc',
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+                image: { source: 'url', url: 'https://s3.example.com/img.png' },
+            });
+
+            expect(findBlocks(blocks, 'image')).toHaveLength(1);
+        });
+
+        it('references Slack-hosted files by id instead of image_url', () => {
+            const blocks = getChartAndDashboardBlocks({
+                title: 'Chart',
+                name: 'Chart',
+                description: 'Chart desc',
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+                image: { source: 'slackFile', fileId: 'F12345' },
+            });
+
+            const images = findBlocks(blocks, 'image');
+            expect(images).toHaveLength(1);
+            expect(images[0]).toEqual(
+                expect.objectContaining({ slack_file: { id: 'F12345' } }),
+            );
+            expect(images[0]).not.toHaveProperty('image_url');
+        });
+    });
+
+    describe('replaceImageBlocksWithNotice', () => {
+        it('swaps only the blocks at the given indices and keeps everything else', () => {
+            const blocks = getChartAndDashboardBlocks({
+                title: 'Chart',
+                name: 'Chart',
+                description: 'Chart desc',
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+                image: { source: 'url', url: 'https://s3.example.com/img.png' },
+                footerMarkdown: 'sent by scheduler',
+            });
+            const imageIndex = blocks.findIndex((b) => b.type === 'image');
+
+            const replaced = replaceImageBlocksWithNotice(blocks, [
+                imageIndex,
+            ]) as KnownBlock[];
+
+            expect(replaced).toHaveLength(blocks.length);
+            expect(findBlocks(replaced, 'image')).toHaveLength(0);
+            expect(findBlocks(replaced, 'header')).toHaveLength(1);
+            expect(findBlocks(replaced, 'context')).toHaveLength(1);
+            const sectionTexts = findBlocks(replaced, 'section')
+                .map((s) => s.text?.text ?? '')
+                .join('\n');
+            expect(sectionTexts).toMatch(/preview unavailable/i);
+        });
+    });
+
+    describe('header sanitisation', () => {
+        it('omits the header block when title is empty', () => {
+            const blocks = getChartAndDashboardBlocks({
+                title: '',
+                name: 'Chart',
+                description: 'Chart desc',
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+            });
+
+            expect(findBlocks(blocks, 'header')).toHaveLength(0);
+        });
+
+        it('omits the header block when title is only whitespace', () => {
+            const blocks = getChartCsvResultsBlocks({
+                name: 'Chart',
+                title: '   \n  ',
+                description: 'Chart desc',
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+                csvUrl: 'https://s3.example.com/x.csv',
+            });
+
+            expect(findBlocks(blocks, 'header')).toHaveLength(0);
+        });
+
+        it('keeps the header block when title is non-empty', () => {
+            const blocks = getChartAndDashboardBlocks({
+                title: 'Real title',
+                name: 'Chart',
+                description: 'Chart desc',
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+            });
+
+            const headers = findBlocks(blocks, 'header');
+            expect(headers).toHaveLength(1);
+            expect(headers[0].text.text).toBe('Real title');
+        });
+    });
+
+    describe('regression — typical inputs', () => {
+        it('chart-and-dashboard blocks contain header, fields, image, footer', () => {
+            const blocks = getChartAndDashboardBlocks({
+                title: 'My chart',
+                name: 'My chart',
+                description: 'A description',
+                message: 'Custom message',
+                image: { source: 'url', url: 'https://s3.example.com/img.png' },
+                ctaUrl: 'https://app.lightdash.com/chart/abc',
+                footerMarkdown: 'sent by scheduler',
+            });
+            expect(findBlocks(blocks, 'header')).toHaveLength(1);
+            expect(findBlocks(blocks, 'image')).toHaveLength(1);
+            expect(findBlocks(blocks, 'context')).toHaveLength(1);
+        });
+
+        it('dashboard-csv with partial failures still emits a failure block', () => {
+            const csvUrls = Array.from({ length: 2 }, (_, i) => ({
+                filename: `chart-${i}.csv`,
+                path: `https://s3.example.com/exports/chart-${i}.csv`,
+                localPath: `/tmp/chart-${i}.csv`,
+                truncated: false,
+            }));
+            const failures: PartialFailure[] = [
+                {
+                    type: PartialFailureType.DASHBOARD_CHART,
+                    chartName: 'Failing chart',
+                    error: 'Query timed out',
+                    chartUuid: 'chart-uuid',
+                    tileUuid: 'tile-uuid',
+                },
+            ];
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'Dashboard',
+                name: 'Dashboard',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/dashboard/abc',
+                csvUrls,
+                failures,
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            const failureSection = sections.find((s) =>
+                s.text?.text?.includes('Failing chart'),
+            );
+            expect(failureSection).toBeDefined();
+        });
+    });
+
+    describe('app delivery partial failures (PROD-8374)', () => {
+        const csvUrls = [
+            {
+                filename: 'chart-0.csv',
+                path: 'https://s3.example.com/exports/chart-0.csv',
+                localPath: '/tmp/chart-0.csv',
+                truncated: false,
+            },
+        ];
+
+        // Recipients see the query label; the timestamped filename is only the
+        // download name.
+        it('labels app delivery downloads with the query name when present', () => {
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'App delivery',
+                name: 'App delivery',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/apps/abc',
+                csvUrls: [
+                    {
+                        filename: 'csv-Revenue by region-2026-08-04.csv',
+                        chartName: 'Revenue by region',
+                        path: 'https://s3.example.com/exports/revenue.csv',
+                        localPath: '/tmp/revenue.csv',
+                        truncated: false,
+                    },
+                ],
+            });
+
+            const text = findBlocks(blocks, 'section')
+                .map((s) => s.text?.text ?? '')
+                .join('\n');
+            expect(text).toContain('Revenue by region');
+            expect(text).not.toContain('csv-Revenue by region-2026-08-04.csv');
+        });
+
+        it('falls back to the filename when a download has no query name', () => {
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'Dashboard delivery',
+                name: 'Dashboard delivery',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/dashboard/abc',
+                csvUrls,
+            });
+
+            const text = findBlocks(blocks, 'section')
+                .map((s) => s.text?.text ?? '')
+                .join('\n');
+            expect(text).toContain('chart-0.csv');
+        });
+
+        it('renders an APP_QUERY failure as "label: error" and pluralizes the headline as a query', () => {
+            const failures: PartialFailure[] = [
+                {
+                    type: PartialFailureType.APP_QUERY,
+                    stage: 'render',
+                    captureKey: 'v1:abc123',
+                    label: 'Revenue by region',
+                    error: 'Query timed out',
+                },
+            ];
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'App delivery',
+                name: 'App delivery',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/apps/abc',
+                csvUrls,
+                failures,
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            const text = sections.map((s) => s.text?.text ?? '').join('\n');
+            expect(text).toContain('Revenue by region: Query timed out');
+            expect(text).toContain('1 query failed to export');
+        });
+
+        it('renders an APP_QUERY_MISSING failure', () => {
+            const failures: PartialFailure[] = [
+                {
+                    type: PartialFailureType.APP_QUERY_MISSING,
+                    captureKey: 'v1:def456',
+                    label: 'Signups by week',
+                },
+            ];
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'App delivery',
+                name: 'App delivery',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/apps/abc',
+                csvUrls,
+                failures,
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            const text = sections.map((s) => s.text?.text ?? '').join('\n');
+            expect(text).toContain(
+                'Signups by week: did not run in this delivery',
+            );
+        });
+
+        it('renders an APP_CAPTURE_OVERFLOW failure with the dropped count and limit', () => {
+            const failures: PartialFailure[] = [
+                {
+                    type: PartialFailureType.APP_CAPTURE_OVERFLOW,
+                    droppedCount: 7,
+                },
+            ];
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'App delivery',
+                name: 'App delivery',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/apps/abc',
+                csvUrls,
+                failures,
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            const text = sections.map((s) => s.text?.text ?? '').join('\n');
+            expect(text).toContain(
+                `7 queries were dropped from capture (limit ${MAX_DELIVERY_QUERIES})`,
+            );
+        });
+
+        it('builds a per-kind headline when charts and queries fail together', () => {
+            const failures: PartialFailure[] = [
+                {
+                    type: PartialFailureType.DASHBOARD_CHART,
+                    chartName: 'Failing chart A',
+                    error: 'Query timed out',
+                    chartUuid: 'chart-uuid-a',
+                    tileUuid: 'tile-uuid-a',
+                },
+                {
+                    type: PartialFailureType.DASHBOARD_CHART,
+                    chartName: 'Failing chart B',
+                    error: 'Query timed out',
+                    chartUuid: 'chart-uuid-b',
+                    tileUuid: 'tile-uuid-b',
+                },
+                {
+                    type: PartialFailureType.APP_QUERY,
+                    stage: 'download',
+                    captureKey: 'v1:abc123',
+                    label: 'Revenue by region',
+                    error: 'Query timed out',
+                },
+            ];
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'Mixed delivery',
+                name: 'Mixed delivery',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/apps/abc',
+                csvUrls,
+                failures,
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            const text = sections.map((s) => s.text?.text ?? '').join('\n');
+            expect(text).toContain('2 charts and 1 query failed to export');
+        });
+
+        it('counts APP_QUERY_MISSING as a failing query in the headline', () => {
+            const failures: PartialFailure[] = [
+                {
+                    type: PartialFailureType.APP_QUERY,
+                    stage: 'render',
+                    captureKey: 'v1:abc123',
+                    label: 'Revenue by region',
+                    error: 'Query timed out',
+                },
+                {
+                    type: PartialFailureType.APP_QUERY_MISSING,
+                    captureKey: 'v1:def456',
+                    label: 'Signups by week',
+                },
+            ];
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'App delivery',
+                name: 'App delivery',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/apps/abc',
+                csvUrls,
+                failures,
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            const text = sections.map((s) => s.text?.text ?? '').join('\n');
+            expect(text).toContain('2 queries failed to export');
+            expect(text).not.toContain('issue');
+        });
+
+        it('renders notices as a separate info section, not the failure block', () => {
+            const notices: DeliveryNotice[] = [
+                {
+                    type: 'limit_reached',
+                    label: 'Orders over time',
+                    rowCount: 5000,
+                },
+            ];
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'App delivery',
+                name: 'App delivery',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/apps/abc',
+                csvUrls,
+                notices,
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            const noticeSection = sections.find((s) =>
+                s.text?.text?.includes('Orders over time'),
+            );
+            expect(noticeSection).toBeDefined();
+            expect(noticeSection?.text?.text).toContain(
+                'Orders over time reached its query limit; additional rows may exist (5000 rows delivered)',
+            );
+            expect(noticeSection?.text?.text).toContain(':information_source:');
+
+            // Notices must never appear inside the failure block, and vice versa.
+            const failureSection = sections.find((s) =>
+                s.text?.text?.includes(':warning:'),
+            );
+            expect(failureSection).toBeUndefined();
+        });
+
+        it('keeps notices out of the failure block when both failures and notices are present', () => {
+            const failures: PartialFailure[] = [
+                {
+                    type: PartialFailureType.APP_QUERY,
+                    stage: 'render',
+                    captureKey: 'v1:abc123',
+                    label: 'Revenue by region',
+                    error: 'Query timed out',
+                },
+            ];
+            const notices: DeliveryNotice[] = [
+                {
+                    type: 'limit_reached',
+                    label: 'Orders over time',
+                    rowCount: 5000,
+                },
+            ];
+
+            const blocks = getDashboardCsvResultsBlocks({
+                title: 'App delivery',
+                name: 'App delivery',
+                description: 'desc',
+                ctaUrl: 'https://app.lightdash.com/apps/abc',
+                csvUrls,
+                failures,
+                notices,
+            });
+
+            const sections = findBlocks(blocks, 'section');
+            const failureSection = sections.find((s) =>
+                s.text?.text?.includes('Revenue by region'),
+            );
+            const noticeSection = sections.find((s) =>
+                s.text?.text?.includes('Orders over time'),
+            );
+            expect(failureSection?.text?.text).not.toContain(
+                'Orders over time',
+            );
+            expect(noticeSection?.text?.text).not.toContain(
+                'Revenue by region',
+            );
+        });
+    });
+});

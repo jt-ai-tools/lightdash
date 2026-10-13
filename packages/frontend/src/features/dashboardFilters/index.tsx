@@ -1,12 +1,13 @@
 import {
+    getItemId,
     type DashboardFieldTarget,
     type DashboardFilterRule,
     type FilterOperator,
 } from '@lightdash/common';
 import { useCallback, useState, type FC } from 'react';
-import { useParams } from 'react-router';
 import FiltersProvider from '../../components/common/Filters/FiltersProvider';
 import { useProject } from '../../hooks/useProject';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
 import useTracking from '../../providers/Tracking/useTracking';
 import { EventName } from '../../types/Events';
@@ -20,7 +21,7 @@ interface Props {
 
 const DashboardFilters: FC<Props> = ({ isEditMode, activeTabUuid }) => {
     const { track } = useTracking();
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
     const [openPopoverId, setPopoverId] = useState<string>();
 
     const project = useProject(projectUuid);
@@ -35,7 +36,14 @@ const DashboardFilters: FC<Props> = ({ isEditMode, activeTabUuid }) => {
     const addDimensionDashboardFilter = useDashboardContext(
         (c) => c.addDimensionDashboardFilter,
     );
+    const addMetricDashboardFilter = useDashboardContext(
+        (c) => c.addMetricDashboardFilter,
+    );
+    const allFilterableMetrics = useDashboardContext(
+        (c) => c.allFilterableMetrics,
+    );
     const dashboardTiles = useDashboardContext((c) => c.dashboardTiles);
+    const parameterValues = useDashboardContext((c) => c.parameterValues);
     const filterableFieldsByTileUuid = useDashboardContext(
         (c) => c.filterableFieldsByTileUuid,
     );
@@ -55,9 +63,23 @@ const DashboardFilters: FC<Props> = ({ isEditMode, activeTabUuid }) => {
                     mode: isEditMode ? 'edit' : 'viewer',
                 },
             });
-            addDimensionDashboardFilter(value, !isEditMode);
+
+            const isMetricFilter = allFilterableMetrics?.some(
+                (m) => getItemId(m) === value.target.fieldId,
+            );
+            if (isMetricFilter) {
+                addMetricDashboardFilter(value, !isEditMode);
+            } else {
+                addDimensionDashboardFilter(value, !isEditMode);
+            }
         },
-        [addDimensionDashboardFilter, isEditMode, track],
+        [
+            addDimensionDashboardFilter,
+            addMetricDashboardFilter,
+            allFilterableMetrics,
+            isEditMode,
+            track,
+        ],
     );
 
     const handlePopoverOpen = useCallback((id: string) => {
@@ -78,6 +100,8 @@ const DashboardFilters: FC<Props> = ({ isEditMode, activeTabUuid }) => {
             dashboardFilters={allFilters}
             dashboardTiles={dashboardTiles}
             filterableFieldsByTileUuid={filterableFieldsByTileUuid}
+            activeTabUuid={activeTabUuid}
+            parameterValues={parameterValues}
         >
             <AddFilterButton
                 isEditMode={isEditMode}

@@ -2,7 +2,6 @@ import { type AnyType } from './any';
 import { type DateZoom } from './api/paginatedQuery';
 import {
     BinType,
-    friendlyName,
     isCustomBinDimension,
     isCustomDimension,
     isCustomSqlDimension,
@@ -18,6 +17,7 @@ import {
     type Format,
     type Metric,
     type MetricType,
+    type NumberSeparator,
     type TableCalculation,
 } from './field';
 import { type Filters, type MetricFilterRule } from './filter';
@@ -42,6 +42,8 @@ export interface AdditionalMetric {
     compact?: CompactOrAlias;
     /** Format string (legacy format specification) */
     format?: Format | string; // // Format type is deprecated, use format expression(string) instead
+    /** Number separator style for grouping/decimal characters */
+    separator?: NumberSeparator;
     /** Table name the metric belongs to */
     table: string;
     /** Internal name of the metric */
@@ -52,6 +54,8 @@ export interface AdditionalMetric {
     filters?: MetricFilterRule[];
     /** Name of the base dimension/column this metric aggregates */
     baseDimensionName?: string;
+    /** Name of the explore metric this metric was cloned from */
+    baseMetricName?: string;
     /** Unique identifier for the metric */
     uuid?: string | null;
     /** Percentile value for percentile metrics */
@@ -192,6 +196,9 @@ export type MetricQuery = {
     dimensionOverrides?: DimensionOverrides;
     /** Timezone for date/time values (e.g., 'America/Los_Angeles', 'UTC') */
     timezone?: string;
+    /** Dimension field IDs used as pivot columns (from chart's pivotConfig.columns).
+     * Used by row_total() to determine non-pivot dimensions for GROUP BY. */
+    pivotDimensions?: FieldId[];
     metadata?: {
         hasADateDimension: Pick<CompiledDimension, 'label' | 'name' | 'table'>;
     };
@@ -201,6 +208,15 @@ export type CompiledMetricQuery = Omit<MetricQuery, 'customDimensions'> & {
     compiledAdditionalMetrics: CompiledMetric[];
     compiledCustomDimensions: CompiledCustomDimension[];
 };
+/**
+ * Coordinates of a single pivot column, used to anchor a row sort to that
+ * specific column when results are pivoted.
+ */
+export type PivotSortAnchor = {
+    reference: string;
+    value: string | number | boolean | null;
+};
+
 // Sort by
 export type SortField = {
     /** Field ID to sort by */
@@ -209,10 +225,9 @@ export type SortField = {
     descending: boolean;
     /** Sort null values first */
     nullsFirst?: boolean;
+    /** Pins the row-sort anchor to a specific pivot column. Ignored for non-pivoted results. */
+    pivotValues?: PivotSortAnchor[];
 };
-
-export const getAdditionalMetricLabel = (item: AdditionalMetric) =>
-    `${friendlyName(item.table)} ${item.label}`;
 
 type FilterGroupResponse =
     | {
@@ -264,6 +279,12 @@ export const countCustomDimensionsInMetricQuery = (
                 isCustomBinDimension(dimension) &&
                 dimension.binType === BinType.CUSTOM_RANGE,
         ).length || 0,
+    numCustomGroupBinCustomDimensions:
+        metricQuery.customDimensions?.filter(
+            (dimension) =>
+                isCustomBinDimension(dimension) &&
+                dimension.binType === BinType.CUSTOM_GROUP,
+        ).length || 0,
     numCustomSqlDimensions:
         metricQuery.customDimensions?.filter((dimension) =>
             isCustomSqlDimension(dimension),
@@ -295,6 +316,7 @@ export type MetricQueryRequest = {
     dateZoom?: DateZoom;
     metadata?: MetricQuery['metadata'];
     timezone?: string;
+    pivotDimensions?: FieldId[];
     metricOverrides?: MetricOverrides;
     dimensionOverrides?: DimensionOverrides;
 };

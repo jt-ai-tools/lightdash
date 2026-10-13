@@ -1,17 +1,18 @@
 import {
+    assertUnreachable,
     FilterOperator,
     FilterType,
-    assertUnreachable,
     isFilterRule,
     isTableCalculation,
     type BaseFilterRule,
 } from '@lightdash/common';
+import { TagsInput } from '@mantine/core';
 import isString from 'lodash/isString';
 import { type FilterInputsProps } from '.';
-import { TagInput } from '../../TagInput/TagInput';
-import { FILTER_SELECT_LIMIT } from '../constants';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
 import useFiltersContext from '../useFiltersContext';
 import { getPlaceholderByFilterTypeAndOperator } from '../utils/getPlaceholderByFilterTypeAndOperator';
+import FilterMultiNumberInput from './FilterMultiNumberInput';
 import FilterMultiStringInput from './FilterMultiStringInput';
 import FilterNumberInput from './FilterNumberInput';
 import FilterNumberRangeInput from './FilterNumberRangeInput';
@@ -26,6 +27,7 @@ const DefaultFilterInputs = <T extends BaseFilterRule>({
     popoverProps,
 }: FilterInputsProps<T>) => {
     const { getField } = useFiltersContext();
+    const getUiString = useUiStrings();
     const suggestions = isFilterRule(rule)
         ? getField(rule)?.suggestions
         : undefined;
@@ -41,6 +43,7 @@ const DefaultFilterInputs = <T extends BaseFilterRule>({
         operator: rule.operator,
         disabled: isFilterRuleDisabled,
         singleValue: isSingleValue,
+        getUiString,
     });
 
     switch (rule.operator) {
@@ -57,11 +60,12 @@ const DefaultFilterInputs = <T extends BaseFilterRule>({
                 case FilterType.STRING:
                     return !field || isTableCalculation(field) ? (
                         <FilterMultiStringInput
-                            limit={FILTER_SELECT_LIMIT}
                             disabled={disabled}
                             placeholder={placeholder}
-                            autoFocus={true}
-                            withinPortal={popoverProps?.withinPortal}
+                            data-autofocus
+                            comboboxProps={{
+                                withinPortal: popoverProps?.withinPortal,
+                            }}
                             onDropdownOpen={popoverProps?.onOpen}
                             onDropdownClose={popoverProps?.onClose}
                             values={(rule.values || []).filter(isString)}
@@ -74,18 +78,29 @@ const DefaultFilterInputs = <T extends BaseFilterRule>({
                         />
                     ) : (
                         <FilterStringAutoComplete
-                            limit={FILTER_SELECT_LIMIT}
                             filterId={rule.id}
                             disabled={disabled}
                             field={field}
-                            autoFocus={true}
+                            data-autofocus
                             placeholder={placeholder}
                             suggestions={suggestions || []}
-                            withinPortal={popoverProps?.withinPortal}
+                            comboboxProps={{
+                                withinPortal: popoverProps?.withinPortal,
+                            }}
                             onDropdownOpen={popoverProps?.onOpen}
                             onDropdownClose={popoverProps?.onClose}
                             values={(rule.values || []).filter(isString)}
                             singleValue={isSingleValue}
+                            showNullOption={
+                                rule.operator === FilterOperator.EQUALS
+                            }
+                            includeNull={rule.includeNull}
+                            onIncludeNullChange={(includeNull) =>
+                                onChange({
+                                    ...rule,
+                                    includeNull,
+                                })
+                            }
                             onChange={(values) =>
                                 onChange({
                                     ...rule,
@@ -106,7 +121,7 @@ const DefaultFilterInputs = <T extends BaseFilterRule>({
                         return (
                             <FilterNumberInput
                                 disabled={disabled}
-                                autoFocus={true}
+                                data-autofocus
                                 placeholder={placeholder}
                                 value={rule.values?.[0]}
                                 onChange={(newValue) => {
@@ -120,16 +135,13 @@ const DefaultFilterInputs = <T extends BaseFilterRule>({
                         );
                     } else {
                         return (
-                            <TagInput
-                                w="100%"
-                                clearable
-                                autoFocus={true}
-                                size="xs"
+                            <FilterMultiNumberInput
+                                autoFocus
                                 disabled={disabled}
                                 placeholder={placeholder}
-                                allowDuplicates={false}
-                                validationRegex={/^-?\d+(\.\d+)?$/}
-                                value={rule.values?.map(String)}
+                                onModalOpen={popoverProps?.onOpen}
+                                onModalClose={popoverProps?.onClose}
+                                values={rule.values?.map(String) ?? []}
                                 onChange={(values) =>
                                     onChange({ ...rule, values })
                                 }
@@ -139,14 +151,15 @@ const DefaultFilterInputs = <T extends BaseFilterRule>({
                 case FilterType.BOOLEAN:
                 case FilterType.DATE:
                     return (
-                        <TagInput
+                        <TagsInput
                             w="100%"
                             clearable
-                            autoFocus={true}
+                            data-autofocus
                             size="xs"
                             disabled={disabled}
                             placeholder={placeholder}
                             allowDuplicates={false}
+                            splitChars={[',']}
                             value={rule.values?.map(String)}
                             onChange={(values) => onChange({ ...rule, values })}
                         />
@@ -170,7 +183,7 @@ const DefaultFilterInputs = <T extends BaseFilterRule>({
             return (
                 <FilterNumberInput
                     disabled={disabled}
-                    autoFocus={true}
+                    data-autofocus
                     placeholder={placeholder}
                     value={rule.values?.[0]}
                     onChange={(newValue) => {
@@ -186,7 +199,7 @@ const DefaultFilterInputs = <T extends BaseFilterRule>({
             return (
                 <FilterNumberRangeInput
                     disabled={disabled}
-                    autoFocus={true}
+                    data-autofocus
                     placeholder={placeholder}
                     value={rule.values}
                     onChange={(value) => {
@@ -197,6 +210,8 @@ const DefaultFilterInputs = <T extends BaseFilterRule>({
                     }}
                 />
             );
+        case FilterOperator.IN_PERIOD_TO_DATE:
+            return null;
         default:
             return assertUnreachable(
                 rule.operator,

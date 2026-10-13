@@ -3,10 +3,12 @@ import {
     type ApiError,
     type ApiJobScheduledResponse,
     type ApiPaginatedValidateResponse,
+    type ApiValidationSummaryResponse,
     type Explore,
     type ExploreError,
     type KnexPaginatedData,
     type ValidationErrorType,
+    type ValidationGroupedSummary,
     type ValidationResponse,
     type ValidationSourceType,
     type ValidationTarget,
@@ -41,12 +43,12 @@ const getValidation = async (
         body: undefined,
     });
 
-const getValidationById = async (
+const getValidationByUuid = async (
     projectUuid: string,
-    validationId: number,
+    validationUuid: string,
 ): Promise<ValidationResponse> =>
     lightdashApi<ValidationResponse>({
-        url: `/projects/${projectUuid}/validate/${validationId}`,
+        url: `/projects/${projectUuid}/validate/${validationUuid}`,
         method: 'GET',
         body: undefined,
         version: 'v2',
@@ -54,12 +56,25 @@ const getValidationById = async (
 
 export const usePinnedValidation = (
     projectUuid: string,
-    validationId: number | null,
+    validationUuid: string | null,
 ) =>
     useQuery({
-        queryKey: ['pinnedValidation', projectUuid, validationId],
-        queryFn: () => getValidationById(projectUuid, validationId!),
-        enabled: validationId !== null,
+        queryKey: ['pinnedValidation', projectUuid, validationUuid],
+        queryFn: () => getValidationByUuid(projectUuid, validationUuid!),
+        enabled: validationUuid !== null,
+    });
+
+/**
+ * Read-only validation results for a specific project, scoped by projectUuid in
+ * the query key (unlike useValidation, which serves the settings validator for
+ * the active project). Used to surface a preview project's validation errors.
+ */
+export const useProjectValidation = (projectUuid: string | null) =>
+    useQuery<ValidationResponse[], ApiError>({
+        queryKey: ['validation', 'project', projectUuid],
+        queryFn: () => getValidation(projectUuid!, false),
+        enabled: projectUuid !== null,
+        retry: (_, error) => error.error.statusCode !== 403,
     });
 
 export const useValidation = (
@@ -109,6 +124,47 @@ export const useValidation = (
     });
 };
 
+const getValidationSummary = async (
+    projectUuid: string,
+): Promise<ValidationGroupedSummary> =>
+    lightdashApi<ApiValidationSummaryResponse['results']>({
+        url: `/projects/${projectUuid}/validate/summary`,
+        method: 'GET',
+        body: undefined,
+        version: 'v2',
+    });
+
+export const useValidationSummary = (
+    projectUuid: string,
+    user: UseQueryResult<UserWithAbility, ApiError>,
+) => {
+    const organizationUuid = user.data?.organizationUuid;
+    const canManageValidation = user.data?.ability.can(
+        'manage',
+        subject('Validation', {
+            organizationUuid,
+            projectUuid,
+        }),
+    );
+
+    return useQuery<ValidationGroupedSummary, ApiError>({
+        queryKey: ['validationSummary', projectUuid],
+        queryFn: () => getValidationSummary(projectUuid),
+        enabled: canManageValidation,
+        retry: (_, error) => error.error.statusCode !== 403,
+    });
+};
+
+// Full unpaginated validation list, fetched on demand (e.g. to resolve every
+// content item affected by one root cause before a bulk delete)
+export const useAllValidations = (projectUuid: string, enabled: boolean) =>
+    useQuery<ValidationResponse[], ApiError>({
+        queryKey: ['validation', 'all', projectUuid],
+        queryFn: () => getValidation(projectUuid, false),
+        enabled,
+        staleTime: 0,
+    });
+
 const getPaginatedValidation = async (
     projectUuid: string,
     page: number,
@@ -119,6 +175,8 @@ const getPaginatedValidation = async (
         sortDirection?: 'asc' | 'desc';
         sourceTypes?: ValidationSourceType[];
         errorTypes?: ValidationErrorType[];
+        tableName?: string;
+        fieldName?: string;
         includeChartConfigWarnings?: boolean;
         fromSettings?: boolean;
     },
@@ -136,6 +194,8 @@ const getPaginatedValidation = async (
         params.set('sourceTypes', options.sourceTypes.join(','));
     if (options?.errorTypes?.length)
         params.set('errorTypes', options.errorTypes.join(','));
+    if (options?.tableName) params.set('tableName', options.tableName);
+    if (options?.fieldName) params.set('fieldName', options.fieldName);
     if (options?.includeChartConfigWarnings != null)
         params.set(
             'includeChartConfigWarnings',
@@ -162,6 +222,8 @@ export const usePaginatedValidation = (
         sortDirection?: 'asc' | 'desc';
         sourceTypes?: ValidationSourceType[];
         errorTypes?: ValidationErrorType[];
+        tableName?: string;
+        fieldName?: string;
         includeChartConfigWarnings?: boolean;
     },
 ) => {
@@ -186,6 +248,8 @@ export const usePaginatedValidation = (
             options?.sortDirection,
             options?.sourceTypes,
             options?.errorTypes,
+            options?.tableName,
+            options?.fieldName,
             options?.includeChartConfigWarnings,
         ],
         queryFn: async ({ pageParam = 1 }) =>
@@ -195,6 +259,8 @@ export const usePaginatedValidation = (
                 sortDirection: options?.sortDirection,
                 sourceTypes: options?.sourceTypes,
                 errorTypes: options?.errorTypes,
+                tableName: options?.tableName,
+                fieldName: options?.fieldName,
                 includeChartConfigWarnings: options?.includeChartConfigWarnings,
                 fromSettings: true,
             }),
@@ -246,6 +312,9 @@ export const useValidationMutation = (
                     });
                     await queryClient.invalidateQueries({
                         queryKey: ['paginatedValidation'],
+                    });
+                    await queryClient.invalidateQueries({
+                        queryKey: ['validationSummary'],
                     });
                     showToastSuccess({ title: 'Validation completed' });
                 })
@@ -303,12 +372,12 @@ export const useValidationNotificationChecker = (): [boolean, () => void] => {
     ];
 };
 
-const deleteValidation = async (
+const deleteValidationByUuid = async (
     projectUuid: string,
-    validationId: number,
+    validationUuid: string,
 ): Promise<null> =>
     lightdashApi<null>({
-        url: `/projects/${projectUuid}/validate/${validationId}`,
+        url: `/projects/${projectUuid}/validate/${validationUuid}`,
         method: 'DELETE',
         body: undefined,
     });
@@ -316,13 +385,14 @@ const deleteValidation = async (
 export const useDeleteValidation = (projectUuid: string) => {
     const queryClient = useQueryClient();
     const { showToastApiError, showToastSuccess } = useToaster();
-    return useMutation<null, ApiError, number>(
-        (validationId) => deleteValidation(projectUuid, validationId),
+    return useMutation<null, ApiError, string>(
+        (validationUuid) => deleteValidationByUuid(projectUuid, validationUuid),
         {
             mutationKey: ['delete_validation', projectUuid],
             onSuccess: async () => {
-                await queryClient.refetchQueries(['validation']);
-                await queryClient.refetchQueries(['paginatedValidation']);
+                await queryClient.invalidateQueries(['validation']);
+                await queryClient.invalidateQueries(['paginatedValidation']);
+                await queryClient.invalidateQueries(['validationSummary']);
                 showToastSuccess({
                     title: 'Validation dismissed',
                 });

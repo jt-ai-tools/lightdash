@@ -5,6 +5,7 @@ import {
     ExploreError,
     LightdashProjectConfig,
     ParameterError,
+    type ProjectContextEntry,
     type RunQueryTags,
 } from '@lightdash/common';
 import { WarehouseClient } from '@lightdash/warehouses';
@@ -43,10 +44,25 @@ export class DbtNoneCredentialsProjectAdapter implements ProjectAdapter {
         );
     }
 
+    public async prepareExploreStream(): Promise<
+        AsyncIterable<Explore | ExploreError>
+    > {
+        throw new ParameterError(
+            'Cannot compile explores as this project was created via CLI and has no dbt connection configured. Either configure a dbt connection in project settings or use the CLI to deploy explores.',
+        );
+    }
+
     // eslint-disable-next-line class-methods-use-this
     public async getDbtPackages(): Promise<DbtPackages | undefined> {
         Logger.debug(`Get dbt packages`);
         return undefined;
+    }
+
+    // eslint-disable-next-line class-methods-use-this
+    public async getDbtManifest(): Promise<never> {
+        throw new ParameterError(
+            'Cannot read a dbt manifest as this project was created via CLI and has no dbt connection configured.',
+        );
     }
 
     public async runQuery(sql: string, queryTags: RunQueryTags) {
@@ -60,5 +76,10 @@ export class DbtNoneCredentialsProjectAdapter implements ProjectAdapter {
         return {
             spotlight: DEFAULT_SPOTLIGHT_CONFIG,
         };
+    }
+
+    // eslint-disable-next-line class-methods-use-this
+    public async getProjectContext(): Promise<ProjectContextEntry[]> {
+        return [];
     }
 }

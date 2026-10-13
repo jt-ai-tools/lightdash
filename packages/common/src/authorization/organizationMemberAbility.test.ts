@@ -5,7 +5,9 @@ import {
 } from '../types/organizationMemberProfile';
 import { ProjectType } from '../types/projects';
 import { SpaceMemberRole } from '../types/space';
-import applyOrganizationMemberAbilities from './organizationMemberAbility';
+import applyOrganizationMemberAbilities, {
+    getOrganizationMemberRolePermissions,
+} from './organizationMemberAbility';
 import {
     ORGANIZATION_ADMIN,
     ORGANIZATION_DEVELOPER,
@@ -48,6 +50,84 @@ const defineAbilityForOrganizationMember = (
 };
 
 describe('Organization member permissions', () => {
+    it.each(Object.values(OrganizationMemberRole))(
+        'derives the %s delegation footprint from its static ability',
+        (role) => {
+            const permissions = getOrganizationMemberRolePermissions(role);
+            const expected = [
+                ...new Set(
+                    defineAbilityForOrganizationMember({
+                        ...ORGANIZATION_MEMBER,
+                        role,
+                    }).rules.flatMap((rule) => {
+                        const actions = Array.isArray(rule.action)
+                            ? rule.action
+                            : [rule.action];
+                        const subjects = Array.isArray(rule.subject)
+                            ? rule.subject
+                            : [rule.subject];
+                        return actions.flatMap((action) =>
+                            subjects.map(
+                                (ruleSubject) => `${action}:${ruleSubject}`,
+                            ),
+                        );
+                    }),
+                ),
+            ].filter(
+                (permission) => permission !== 'manage:PersonalAccessToken',
+            );
+
+            expect(permissions).toEqual(expected);
+        },
+    );
+
+    it('includes the baseline permissions granted to Member', () => {
+        expect(
+            getOrganizationMemberRolePermissions(OrganizationMemberRole.MEMBER),
+        ).toEqual(
+            expect.arrayContaining([
+                'view:OrganizationMemberProfile',
+                'view:JobStatus',
+                'view:PinnedItems',
+            ]),
+        );
+    });
+
+    it.each(['view', 'manage'] as const)(
+        'allows only admins to %s their organization roadmap',
+        (action) => {
+            const adminAbility =
+                defineAbilityForOrganizationMember(ORGANIZATION_ADMIN);
+            const memberAbility =
+                defineAbilityForOrganizationMember(ORGANIZATION_MEMBER);
+
+            expect(
+                adminAbility.can(
+                    action,
+                    subject('Roadmap', {
+                        organizationUuid: ORGANIZATION_ADMIN.organizationUuid,
+                    }),
+                ),
+            ).toBe(true);
+            expect(
+                adminAbility.can(
+                    action,
+                    subject('Roadmap', {
+                        organizationUuid: 'another-organization',
+                    }),
+                ),
+            ).toBe(false);
+            expect(
+                memberAbility.can(
+                    action,
+                    subject('Roadmap', {
+                        organizationUuid: ORGANIZATION_MEMBER.organizationUuid,
+                    }),
+                ),
+            ).toBe(false);
+        },
+    );
+
     describe('Member permissions', () => {
         let ability = defineAbilityForOrganizationMember(ORGANIZATION_VIEWER);
         describe('when user is an organization admin', () => {
@@ -107,7 +187,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -117,7 +197,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -127,7 +207,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -138,7 +218,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -149,7 +229,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -165,7 +245,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -181,7 +261,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -197,7 +277,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -216,7 +296,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -226,7 +306,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -236,7 +316,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -247,7 +327,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -258,7 +338,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -274,7 +354,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -290,7 +370,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -306,7 +386,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -325,7 +405,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -335,7 +415,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -345,7 +425,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -356,7 +436,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -367,7 +447,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -383,7 +463,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -399,7 +479,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -415,7 +495,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_ADMIN.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_ADMIN.userUuid,
@@ -589,8 +669,30 @@ describe('Organization member permissions', () => {
                     defineAbilityForOrganizationMember(ORGANIZATION_EDITOR);
             });
 
+            it('can create but cannot manage content as code', () => {
+                const contentAsCode = subject('ContentAsCode', {
+                    organizationUuid: ORGANIZATION_EDITOR.organizationUuid,
+                });
+
+                expect(ability.can('create', contentAsCode)).toEqual(true);
+                expect(ability.can('manage', contentAsCode)).toEqual(false);
+            });
+
             it('cannot manage organizations', () => {
                 expect(ability.can('manage', 'Organization')).toEqual(false);
+            });
+
+            it('cannot manage verified content', () => {
+                expect(
+                    ability.can(
+                        'manage',
+                        subject('VerifiedContent', {
+                            organizationUuid:
+                                ORGANIZATION_EDITOR.organizationUuid,
+                            projectUuid: 'any-project',
+                        }),
+                    ),
+                ).toEqual(false);
             });
 
             it('can view and manage public & accessable dashboards', () => {
@@ -600,7 +702,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -610,7 +712,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(false);
@@ -620,7 +722,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -631,7 +733,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -642,7 +744,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -658,7 +760,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -674,7 +776,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -690,7 +792,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -709,7 +811,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -719,7 +821,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(false);
@@ -729,7 +831,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -740,7 +842,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -751,7 +853,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -767,7 +869,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -783,7 +885,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -799,7 +901,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -830,7 +932,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -840,7 +942,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -850,7 +952,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -861,7 +963,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -872,7 +974,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -888,7 +990,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -904,7 +1006,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -920,7 +1022,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -936,7 +1038,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_EDITOR.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_EDITOR.userUuid,
@@ -954,7 +1056,7 @@ describe('Organization member permissions', () => {
                         'manage',
                         subject('Dashboard', {
                             organizationUuid: '456',
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                             access: [],
                         }),
                     ),
@@ -967,7 +1069,7 @@ describe('Organization member permissions', () => {
                         'manage',
                         subject('Dashboard', {
                             organizationUuid: '789',
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                             access: [],
                         }),
                     ),
@@ -986,6 +1088,10 @@ describe('Organization member permissions', () => {
 
             it('cannot run SQL Queries', () => {
                 expect(ability.can('manage', 'SqlRunner')).toEqual(false);
+            });
+
+            it('cannot view compiled SQL', () => {
+                expect(ability.can('view', 'CompiledSql')).toEqual(false);
             });
 
             it('can use the SemanticViewer', () => {
@@ -1085,12 +1191,55 @@ describe('Organization member permissions', () => {
                 );
             });
 
+            it('can create content as code through manage', () => {
+                expect(
+                    ability.can(
+                        'create',
+                        subject('ContentAsCode', {
+                            organizationUuid:
+                                ORGANIZATION_DEVELOPER.organizationUuid,
+                        }),
+                    ),
+                ).toEqual(true);
+            });
+
             it('can run SQL Queries', () => {
                 expect(ability.can('manage', 'SqlRunner')).toEqual(true);
             });
 
+            it('can view compiled SQL', () => {
+                expect(ability.can('view', 'CompiledSql')).toEqual(true);
+            });
+
             it('can use the SemanticViewer', () => {
                 expect(ability.can('manage', 'SemanticViewer')).toEqual(true);
+            });
+
+            describe('VerifiedContent', () => {
+                it('can manage verified content', () => {
+                    expect(
+                        ability.can(
+                            'manage',
+                            subject('VerifiedContent', {
+                                organizationUuid:
+                                    ORGANIZATION_DEVELOPER.organizationUuid,
+                                projectUuid: 'any-project',
+                            }),
+                        ),
+                    ).toEqual(true);
+                });
+
+                it('cannot manage verified content from another organization', () => {
+                    expect(
+                        ability.can(
+                            'manage',
+                            subject('VerifiedContent', {
+                                organizationUuid: '5678',
+                                projectUuid: 'any-project',
+                            }),
+                        ),
+                    ).toEqual(false);
+                });
             });
 
             describe('JobStatus', () => {
@@ -1240,6 +1389,83 @@ describe('Organization member permissions', () => {
                     ).toEqual(false);
                 });
             });
+
+            describe('Promote', () => {
+                const promoteSubject = (
+                    entity: 'SavedChart' | 'Dashboard',
+                    role: SpaceMemberRole,
+                ) =>
+                    subject(entity, {
+                        organizationUuid:
+                            ORGANIZATION_DEVELOPER.organizationUuid,
+                        access: [
+                            {
+                                userUuid: ORGANIZATION_DEVELOPER.userUuid,
+                                role,
+                            },
+                        ],
+                    });
+
+                it('can promote charts in spaces with admin access', () => {
+                    expect(
+                        ability.can(
+                            'promote',
+                            promoteSubject('SavedChart', SpaceMemberRole.ADMIN),
+                        ),
+                    ).toEqual(true);
+                });
+
+                it('can promote charts in spaces with editor access', () => {
+                    expect(
+                        ability.can(
+                            'promote',
+                            promoteSubject(
+                                'SavedChart',
+                                SpaceMemberRole.EDITOR,
+                            ),
+                        ),
+                    ).toEqual(true);
+                });
+
+                it('cannot promote charts in spaces with viewer access', () => {
+                    expect(
+                        ability.can(
+                            'promote',
+                            promoteSubject(
+                                'SavedChart',
+                                SpaceMemberRole.VIEWER,
+                            ),
+                        ),
+                    ).toEqual(false);
+                });
+
+                it('can promote dashboards in spaces with admin access', () => {
+                    expect(
+                        ability.can(
+                            'promote',
+                            promoteSubject('Dashboard', SpaceMemberRole.ADMIN),
+                        ),
+                    ).toEqual(true);
+                });
+
+                it('can promote dashboards in spaces with editor access', () => {
+                    expect(
+                        ability.can(
+                            'promote',
+                            promoteSubject('Dashboard', SpaceMemberRole.EDITOR),
+                        ),
+                    ).toEqual(true);
+                });
+
+                it('cannot promote dashboards in spaces with viewer access', () => {
+                    expect(
+                        ability.can(
+                            'promote',
+                            promoteSubject('Dashboard', SpaceMemberRole.VIEWER),
+                        ),
+                    ).toEqual(false);
+                });
+            });
         });
 
         describe('when user is a member', () => {
@@ -1315,7 +1541,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -1325,7 +1551,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(false);
@@ -1335,7 +1561,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -1346,7 +1572,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -1357,7 +1583,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1373,7 +1599,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1389,7 +1615,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1405,7 +1631,7 @@ describe('Organization member permissions', () => {
                         subject('Dashboard', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1424,7 +1650,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -1434,7 +1660,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(false);
@@ -1444,7 +1670,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -1455,7 +1681,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -1466,7 +1692,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1482,7 +1708,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1498,7 +1724,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1514,7 +1740,7 @@ describe('Organization member permissions', () => {
                         subject('SavedChart', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1533,7 +1759,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -1543,7 +1769,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(false);
@@ -1553,7 +1779,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -1564,7 +1790,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [],
                         }),
                     ),
@@ -1575,7 +1801,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1591,7 +1817,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1607,7 +1833,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1623,7 +1849,7 @@ describe('Organization member permissions', () => {
                         subject('Space', {
                             organizationUuid:
                                 ORGANIZATION_VIEWER.organizationUuid,
-                            isPrivate: true,
+                            inheritsFromOrgOrProject: false,
                             access: [
                                 {
                                     userUuid: ORGANIZATION_VIEWER.userUuid,
@@ -1837,7 +2063,10 @@ describe('Organization member permissions', () => {
             });
 
             it('can view dashboards from their own organization', () => {
-                const org = { organizationUuid: '456', isPrivate: false };
+                const org = {
+                    organizationUuid: '456',
+                    inheritsFromOrgOrProject: true,
+                };
                 expect(ability.can('view', subject('Dashboard', org))).toEqual(
                     true,
                 );
@@ -1858,7 +2087,7 @@ describe('Organization member permissions', () => {
                         'view',
                         subject('SavedChart', {
                             organizationUuid: '456',
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -1870,7 +2099,7 @@ describe('Organization member permissions', () => {
                         'view',
                         subject('SavedChart', {
                             organizationUuid: '789',
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(false);
@@ -2252,7 +2481,10 @@ describe('Organization member permissions', () => {
             });
 
             it('can view dashboards from their own organization', () => {
-                const org = { organizationUuid: '456', isPrivate: false };
+                const org = {
+                    organizationUuid: '456',
+                    inheritsFromOrgOrProject: true,
+                };
                 expect(ability.can('view', subject('Dashboard', org))).toEqual(
                     true,
                 );
@@ -2264,7 +2496,7 @@ describe('Organization member permissions', () => {
                         'view',
                         subject('Dashboard', {
                             organizationUuid: '789',
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(false);
@@ -2276,7 +2508,7 @@ describe('Organization member permissions', () => {
                         'view',
                         subject('SavedChart', {
                             organizationUuid: '456',
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(true);
@@ -2288,7 +2520,7 @@ describe('Organization member permissions', () => {
                         'view',
                         subject('SavedChart', {
                             organizationUuid: '789',
-                            isPrivate: false,
+                            inheritsFromOrgOrProject: true,
                         }),
                     ),
                 ).toEqual(false);

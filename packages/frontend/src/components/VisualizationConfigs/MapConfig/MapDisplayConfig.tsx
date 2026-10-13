@@ -7,77 +7,89 @@ import {
     isNumericItem,
     isTableCalculation,
     MapChartType,
+    MapHexbinAggregation,
+    MapHexbinSizingMode,
+    MapHexbinValueBasis,
     MapTileBackground,
 } from '@lightdash/common';
 import {
-    ActionIcon,
-    Box,
+    Collapse,
     Group,
     RangeSlider,
     ScrollArea,
     Select,
+    SegmentedControl,
     Slider,
     Stack,
     Switch,
     Text,
-} from '@mantine-8/core';
-import { useHover } from '@mantine-8/hooks';
-import { IconPlus, IconX } from '@tabler/icons-react';
+} from '@mantine/core';
 import debounce from 'lodash/debounce';
 import { memo, useEffect, useMemo, useRef, useState, type FC } from 'react';
 import { DEFAULT_MAP_COLORS } from '../../../hooks/useMapChartConfig';
 import FieldSelect from '../../common/FieldSelect';
-import GradientBar from '../../common/GradientBar';
 import { isMapVisualizationConfig } from '../../LightdashVisualization/types';
 import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import {
+    DEFAULT_FIXED_RESOLUTION,
+    HEXBIN_SIZE_PRESETS,
+} from '../../SimpleMap/hexbin/zoomToResolution';
 import ColorSelector from '../ColorSelector';
 import { Config } from '../common/Config';
+import { GradientStopsEditor } from '../common/GradientStopsEditor';
 
-type ColorItemProps = {
-    color: string;
-    label: string;
-    canRemove: boolean;
-    onColorChange: (color: string) => void;
-    onRemove: () => void;
+const findPresetIdxByResolution = (resolution: number): number => {
+    const idx = HEXBIN_SIZE_PRESETS.findIndex(
+        (p) => p.resolution === resolution,
+    );
+    if (idx >= 0) return idx;
+    const fallback = HEXBIN_SIZE_PRESETS.findIndex(
+        (p) => p.resolution === DEFAULT_FIXED_RESOLUTION,
+    );
+    return fallback >= 0 ? fallback : 0;
 };
 
-const ColorItem: FC<ColorItemProps> = ({
-    color,
-    label,
-    canRemove,
-    onColorChange,
-    onRemove,
+type HexbinSizeSliderProps = {
+    storedResolution: number;
+    onCommit: (resolution: number) => void;
+};
+
+// Hex binning is expensive enough that updating on every drag tick feels
+// laggy. We keep the slider's value in local state during drag (cheap, only
+// re-renders the slider/label) and commit to the chart config on release via
+// onChangeEnd, which kicks off the actual rebin + re-render.
+//
+// External changes to `storedResolution` (e.g. switching sizing mode, loading
+// a saved chart) are picked up by the parent passing a fresh `key` based on
+// the stored value, which remounts this component with the new initial state.
+// That avoids the useEffect-syncs-state anti-pattern.
+const HexbinSizeSlider: FC<HexbinSizeSliderProps> = ({
+    storedResolution,
+    onCommit,
 }) => {
-    const { hovered, ref } = useHover();
+    const [draftIdx, setDraftIdx] = useState<number>(() =>
+        findPresetIdxByResolution(storedResolution),
+    );
 
     return (
-        <Stack gap="xs" align="center">
-            <Text size="xs" fw={500} h={16}>
-                {label || '\u00A0'}
+        <>
+            <Text size="xs" mt="sm">
+                Cell scale: {HEXBIN_SIZE_PRESETS[draftIdx]?.label}
             </Text>
-            <Box ref={ref} pos="relative">
-                <ColorSelector
-                    color={color}
-                    swatches={ECHARTS_DEFAULT_COLORS}
-                    onColorChange={onColorChange}
-                />
-                {canRemove && hovered && (
-                    <ActionIcon
-                        size={14}
-                        variant="filled"
-                        color="gray"
-                        radius="xl"
-                        pos="absolute"
-                        top={-4}
-                        right={-4}
-                        onClick={onRemove}
-                        style={{ zIndex: 10 }}
-                    >
-                        <IconX size={8} />
-                    </ActionIcon>
-                )}
-            </Box>
-        </Stack>
+            <Slider
+                min={0}
+                max={HEXBIN_SIZE_PRESETS.length - 1}
+                step={1}
+                value={draftIdx}
+                onChange={setDraftIdx}
+                onChangeEnd={(idx) =>
+                    onCommit(HEXBIN_SIZE_PRESETS[idx].resolution)
+                }
+                label={(idx) => HEXBIN_SIZE_PRESETS[idx]?.label}
+                marks={HEXBIN_SIZE_PRESETS.map((_, i) => ({ value: i }))}
+                mb="md"
+            />
+        </>
     );
 };
 
@@ -153,6 +165,18 @@ export const Display: FC = memo(() => {
         };
     }, [mapChartConfig, itemsMap, resultsData?.rows]);
 
+    const tileBackgroundOptions = useMemo(
+        () => [
+            { value: MapTileBackground.NONE, label: 'None' },
+            { value: MapTileBackground.OPENSTREETMAP, label: 'OpenStreetMap' },
+            { value: MapTileBackground.LIGHT, label: 'Light' },
+            { value: MapTileBackground.DARK, label: 'Dark' },
+            { value: MapTileBackground.VOYAGER, label: 'Voyager (clean)' },
+            { value: MapTileBackground.SATELLITE, label: 'Satellite' },
+        ],
+        [],
+    );
+
     if (!mapChartConfig) {
         return null;
     }
@@ -169,7 +193,9 @@ export const Display: FC = memo(() => {
         setSizeFieldId,
         setValueFieldId,
         setHeatmapConfig,
+        setHexbinConfig,
         setTileBackground,
+        setDarkModeTileBackground,
         setBackgroundColor,
         setNoDataColor,
         setDataLayerOpacity,
@@ -177,7 +203,6 @@ export const Display: FC = memo(() => {
     } = mapChartConfig;
 
     const colors = validConfig.colorRange ?? DEFAULT_MAP_COLORS;
-    const canAddColor = colors.length < 5;
     const isScatterMap =
         !validConfig.locationType ||
         validConfig.locationType === MapChartType.SCATTER;
@@ -200,8 +225,9 @@ export const Display: FC = memo(() => {
         : undefined;
     const isValueFieldNumeric = isNumericItem(valueField);
     const isHeatmap = validConfig.locationType === MapChartType.HEATMAP;
-    // Show color range for numeric values OR heatmaps (which use density-based coloring)
-    const showColorRange = isValueFieldNumeric || isHeatmap;
+    const isHexbin = validConfig.locationType === MapChartType.HEXBIN;
+    // Show color range for numeric values OR density-based coloring (heatmap/hexbin)
+    const showColorRange = isValueFieldNumeric || isHeatmap || isHexbin;
     const hasSizeField = !!validConfig.sizeFieldId;
     const colorOverrides = validConfig.colorOverrides ?? {};
 
@@ -212,8 +238,8 @@ export const Display: FC = memo(() => {
         <Stack>
             <Config>
                 <Config.Section>
-                    <Config.Heading>Colors</Config.Heading>
-                    {!isHeatmap && (
+                    <Config.Heading>Cells</Config.Heading>
+                    {!isHeatmap && !isHexbin && (
                         <Config.Group>
                             <FieldSelect
                                 label="Color based on"
@@ -232,6 +258,118 @@ export const Display: FC = memo(() => {
                             />
                         </Config.Group>
                     )}
+                    {isHexbin &&
+                        (() => {
+                            const valueBasis =
+                                validConfig.hexbinConfig?.valueBasis ??
+                                MapHexbinValueBasis.COUNT;
+                            const isFieldBasis =
+                                valueBasis === MapHexbinValueBasis.FIELD;
+                            const aggregation =
+                                validConfig.hexbinConfig?.aggregation ??
+                                MapHexbinAggregation.SUM;
+                            return (
+                                <Stack gap="xs">
+                                    <Config.Group>
+                                        <Config.Label>
+                                            Value based on
+                                        </Config.Label>
+                                        <SegmentedControl
+                                            size="xs"
+                                            value={valueBasis}
+                                            data={[
+                                                {
+                                                    value: MapHexbinValueBasis.COUNT,
+                                                    label: 'Count',
+                                                },
+                                                {
+                                                    value: MapHexbinValueBasis.FIELD,
+                                                    label: 'Field values',
+                                                },
+                                            ]}
+                                            onChange={(v) => {
+                                                const next =
+                                                    v as MapHexbinValueBasis;
+                                                setHexbinConfig({
+                                                    valueBasis: next,
+                                                });
+                                                // Clear the picked field when
+                                                // switching back to count so a
+                                                // stale field doesn't surface
+                                                // in tooltips/legend.
+                                                if (
+                                                    next ===
+                                                    MapHexbinValueBasis.COUNT
+                                                ) {
+                                                    setValueFieldId(undefined);
+                                                }
+                                            }}
+                                        />
+                                    </Config.Group>
+                                    <Collapse expanded={isFieldBasis}>
+                                        <Stack gap="xs">
+                                            <Group gap="xs" wrap="nowrap">
+                                                <Config.Label>
+                                                    Field
+                                                </Config.Label>
+                                                <FieldSelect
+                                                    placeholder="Select field"
+                                                    item={valueField}
+                                                    items={availableFields}
+                                                    onChange={(newField) =>
+                                                        setValueFieldId(
+                                                            newField
+                                                                ? getItemId(
+                                                                      newField,
+                                                                  )
+                                                                : undefined,
+                                                        )
+                                                    }
+                                                    size="xs"
+                                                    hasGrouping
+                                                    clearable
+                                                    miw={0}
+                                                    flex={1}
+                                                />
+                                            </Group>
+                                            <Config.Group>
+                                                <Config.Label>
+                                                    Aggregation
+                                                </Config.Label>
+                                                <SegmentedControl
+                                                    size="xs"
+                                                    value={aggregation}
+                                                    data={[
+                                                        {
+                                                            value: MapHexbinAggregation.SUM,
+                                                            label: 'Sum',
+                                                        },
+                                                        {
+                                                            value: MapHexbinAggregation.AVG,
+                                                            label: 'Avg',
+                                                        },
+                                                        {
+                                                            value: MapHexbinAggregation.MIN,
+                                                            label: 'Min',
+                                                        },
+                                                        {
+                                                            value: MapHexbinAggregation.MAX,
+                                                            label: 'Max',
+                                                        },
+                                                    ]}
+                                                    onChange={(v) =>
+                                                        setHexbinConfig({
+                                                            aggregation:
+                                                                v as MapHexbinAggregation,
+                                                        })
+                                                    }
+                                                />
+                                            </Config.Group>
+                                        </Stack>
+                                    </Collapse>
+                                </Stack>
+                            );
+                        })()}
                     {(isAreaMap || isScatterMap) && (
                         <Group my="xs">
                             <ColorSelector
@@ -246,53 +384,38 @@ export const Display: FC = memo(() => {
                         <Config.Group mb="xs">
                             <Stack w="100%" gap="xs">
                                 <Config.Label>Color range</Config.Label>
-                                <Group gap="xs" align="flex-start">
-                                    {colors.map((color, index) => {
-                                        const isFirst = index === 0;
-                                        const isLast =
-                                            index === colors.length - 1;
-                                        const label = isFirst
-                                            ? 'Low'
-                                            : isLast
-                                              ? 'High'
-                                              : '';
-                                        // Can only remove middle colors (not first or last)
-                                        const canRemove =
-                                            !isFirst &&
-                                            !isLast &&
-                                            colors.length > 2;
-
-                                        return (
-                                            <ColorItem
-                                                key={index}
-                                                color={color}
-                                                label={label}
-                                                canRemove={canRemove}
-                                                onColorChange={(newColor) =>
-                                                    updateColor(index, newColor)
-                                                }
-                                                onRemove={() =>
-                                                    removeColor(index)
-                                                }
-                                            />
-                                        );
-                                    })}
-                                    {canAddColor && (
-                                        <Stack gap={4} align="center">
-                                            <Text size="xs" fw={500} h={16}>
-                                                {'\u00A0'}
-                                            </Text>
-                                            <ActionIcon
-                                                size="sm"
-                                                variant="light"
-                                                onClick={addColor}
-                                            >
-                                                <IconPlus size={14} />
-                                            </ActionIcon>
-                                        </Stack>
-                                    )}
-                                </Group>
-                                <GradientBar colors={colors} />
+                                <GradientStopsEditor
+                                    colors={colors}
+                                    onAddColor={addColor}
+                                    onRemoveColor={removeColor}
+                                    onColorChange={updateColor}
+                                />
+                                {isHexbin && (
+                                    <>
+                                        <Config.Label mt="xs">
+                                            Opacity
+                                        </Config.Label>
+                                        <Slider
+                                            min={0.1}
+                                            max={1}
+                                            step={0.1}
+                                            value={
+                                                validConfig.hexbinConfig
+                                                    ?.opacity ?? 0.7
+                                            }
+                                            onChange={(value) =>
+                                                setHexbinConfig({
+                                                    opacity: value,
+                                                })
+                                            }
+                                            marks={[
+                                                { value: 0.1, label: '0.1' },
+                                                { value: 0.5, label: '0.5' },
+                                                { value: 1, label: '1' },
+                                            ]}
+                                        />
+                                    </>
+                                )}
                             </Stack>
                         </Config.Group>
                     )}
@@ -395,6 +518,113 @@ export const Display: FC = memo(() => {
                             />
                         </Config.Group>
                     )}
+
+                    {isHexbin &&
+                        (() => {
+                            const sizingMode =
+                                validConfig.hexbinConfig?.sizingMode ??
+                                MapHexbinSizingMode.DYNAMIC;
+                            const isFixed =
+                                sizingMode === MapHexbinSizingMode.FIXED;
+                            const showEmpty =
+                                validConfig.hexbinConfig?.showEmptyBins ??
+                                false;
+                            return (
+                                <Stack gap="xs" mt="xs">
+                                    <Config.Group>
+                                        <Config.Label>
+                                            Show empty cells
+                                        </Config.Label>
+                                        <Switch
+                                            size="xs"
+                                            checked={showEmpty}
+                                            onChange={(e) =>
+                                                setHexbinConfig({
+                                                    showEmptyBins:
+                                                        e.currentTarget.checked,
+                                                })
+                                            }
+                                        />
+                                    </Config.Group>
+                                    <Collapse expanded={showEmpty}>
+                                        <Config.Group my="xs">
+                                            <Config.Label>
+                                                Empty cell fill
+                                            </Config.Label>
+                                            <ColorSelector
+                                                color={
+                                                    validConfig.hexbinConfig
+                                                        ?.emptyBinColor ??
+                                                    '#adb5bd00'
+                                                }
+                                                swatches={[
+                                                    '#adb5bd00',
+                                                    ...ECHARTS_DEFAULT_COLORS,
+                                                ]}
+                                                withAlpha
+                                                onColorChange={(c) => {
+                                                    const isTransparent =
+                                                        c.length === 9 &&
+                                                        c.endsWith('00');
+                                                    setHexbinConfig({
+                                                        emptyBinColor:
+                                                            isTransparent
+                                                                ? null
+                                                                : c,
+                                                    });
+                                                }}
+                                            />
+                                        </Config.Group>
+                                    </Collapse>
+
+                                    <Config.Group>
+                                        <Config.Label>Cell size</Config.Label>
+                                        <SegmentedControl
+                                            size="xs"
+                                            value={sizingMode}
+                                            data={[
+                                                {
+                                                    value: MapHexbinSizingMode.FIXED,
+                                                    label: 'Fixed',
+                                                },
+                                                {
+                                                    value: MapHexbinSizingMode.DYNAMIC,
+                                                    label: 'Dynamic',
+                                                },
+                                            ]}
+                                            onChange={(v) =>
+                                                setHexbinConfig({
+                                                    sizingMode:
+                                                        v as MapHexbinSizingMode,
+                                                })
+                                            }
+                                        />
+                                    </Config.Group>
+                                    <Collapse expanded={isFixed}>
+                                        <HexbinSizeSlider
+                                            // Remount on external resolution
+                                            // change so local draft state
+                                            // resets without a useEffect.
+                                            key={
+                                                validConfig.hexbinConfig
+                                                    ?.fixedResolution ??
+                                                DEFAULT_FIXED_RESOLUTION
+                                            }
+                                            storedResolution={
+                                                validConfig.hexbinConfig
+                                                    ?.fixedResolution ??
+                                                DEFAULT_FIXED_RESOLUTION
+                                            }
+                                            onCommit={(resolution) =>
+                                                setHexbinConfig({
+                                                    fixedResolution: resolution,
+                                                })
+                                            }
+                                        />
+                                    </Collapse>
+                                </Stack>
+                            );
+                        })()}
                 </Config.Section>
             </Config>
 
@@ -529,6 +759,7 @@ export const Display: FC = memo(() => {
                     <Config.Group>
                         <Config.Label>Save current map extent</Config.Label>
                         <Switch
+                            size="xs"
                             checked={validConfig.saveMapExtent}
                             onChange={(e) =>
                                 setSaveMapExtent(e.currentTarget.checked)
@@ -544,6 +775,7 @@ export const Display: FC = memo(() => {
                     <Config.Group>
                         <Config.Label>Show legend</Config.Label>
                         <Switch
+                            size="xs"
                             checked={validConfig.showLegend ?? false}
                             onChange={(e) =>
                                 setShowLegend(e.currentTarget.checked)
@@ -556,28 +788,38 @@ export const Display: FC = memo(() => {
             <Config>
                 <Config.Section>
                     <Config.Heading>Background map</Config.Heading>
-                    <Select
-                        data={[
-                            { value: MapTileBackground.NONE, label: 'None' },
-                            {
-                                value: MapTileBackground.OPENSTREETMAP,
-                                label: 'OpenStreetMap',
-                            },
-                            {
-                                value: MapTileBackground.SATELLITE,
-                                label: 'Satellite',
-                            },
-                        ]}
-                        value={
-                            validConfig.tileBackground ??
-                            MapTileBackground.OPENSTREETMAP
-                        }
-                        onChange={(value) =>
-                            setTileBackground(
-                                (value as MapTileBackground) || undefined,
-                            )
-                        }
-                    />
+                    <Config.Group>
+                        <Config.Label>Light mode</Config.Label>
+                        <Select
+                            size="xs"
+                            data={tileBackgroundOptions}
+                            value={
+                                validConfig.tileBackground ??
+                                MapTileBackground.OPENSTREETMAP
+                            }
+                            onChange={(value) =>
+                                setTileBackground(
+                                    (value as MapTileBackground) || undefined,
+                                )
+                            }
+                        />
+                    </Config.Group>
+                    <Config.Group>
+                        <Config.Label>Dark mode</Config.Label>
+                        <Select
+                            size="xs"
+                            data={tileBackgroundOptions}
+                            value={
+                                validConfig.darkModeTileBackground ??
+                                MapTileBackground.DARK
+                            }
+                            onChange={(value) =>
+                                setDarkModeTileBackground(
+                                    (value as MapTileBackground) || undefined,
+                                )
+                            }
+                        />
+                    </Config.Group>
                 </Config.Section>
             </Config>
         </Stack>

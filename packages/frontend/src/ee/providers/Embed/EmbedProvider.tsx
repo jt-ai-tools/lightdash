@@ -1,6 +1,20 @@
-import { type LanguageMap, type SavedChart } from '@lightdash/common';
-import get from 'lodash/get';
-import { useEffect, useMemo, useState, type FC } from 'react';
+import {
+    type CreateEmbedJwt,
+    type LanguageMap,
+    type SavedChart,
+    type SdkUiOverrides,
+    type UiStringKey,
+    type UUID,
+} from '@lightdash/common';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type FC,
+} from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router';
 import { useAccount } from '../../../hooks/user/useAccount';
 import { useAbilityContext } from '../../../providers/Ability/useAbilityContext';
@@ -9,21 +23,69 @@ import {
     setToInMemoryStorage,
 } from '../../../utils/inMemoryStorage';
 import { type SdkFilter } from '../../features/embed/EmbedDashboard/types';
-import { LightdashEventType } from '../../features/embed/events/types';
-import { useEmbedEventEmitter } from '../../features/embed/hooks/useEmbedEventEmitter';
+import { getEmbedBackDestination } from '../../features/embed/embedNavigation';
+import {
+    LightdashEventType,
+    type ChartSavedAction,
+    type LightdashEventHandler,
+} from '../../features/embed/events/types';
+import { useCreateEmbedEventEmitter } from '../../features/embed/hooks/useEmbedEventEmitter';
 import EmbedProviderContext from './context';
-import { EMBED_KEY, type EmbedMode, type InMemoryEmbed } from './types';
+import { parseEmbedThemeParams } from './parseEmbedThemeParams';
+import { parseEmbedTimezoneParam } from './parseEmbedTimezoneParam';
+import {
+    EMBED_KEY,
+    type EmbedBackDestination,
+    type EmbedExploreChart,
+    type EmbedExploreOptions,
+    type EmbedAiAgentThreadChange,
+    type EmbedMode,
+    type InMemoryEmbed,
+} from './types';
 
 type Props = {
     embedToken?: string;
     filters?: SdkFilter[];
     projectUuid?: string;
+    paletteUuid?: string;
     contentOverrides?: LanguageMap;
+    uiOverrides?: SdkUiOverrides;
     embedHeaders?: Record<string, string>;
-    onExplore?: (options: { chart: SavedChart }) => void;
-    onBackToDashboard?: () => void;
-    savedChart?: SavedChart;
+    onExplore?: (options: EmbedExploreOptions) => void;
+    onBackToDashboard?: (
+        content: CreateEmbedJwt['content'] | undefined,
+    ) => void;
+    // Defaults to the destination implied by the token's content type
+    backDestination?: EmbedBackDestination;
+    onEvent?: LightdashEventHandler;
+    savedChart?: EmbedExploreChart;
+    customSqlProvenanceChartUuid?: UUID;
     savedQueryUuid?: string;
+    appUuid?: string;
+    onAiAgentThreadChange?: (change: EmbedAiAgentThreadChange) => void;
+};
+
+const decodeEmbedJwtPayload = (
+    token: string | undefined,
+): Pick<CreateEmbedJwt, 'content' | 'writeActions'> | undefined => {
+    const payload = token?.split('.')[1];
+    if (!payload) {
+        return undefined;
+    }
+
+    try {
+        const normalizedPayload = payload.replace(/-/g, '+').replace(/_/g, '/');
+        const paddedPayload = normalizedPayload.padEnd(
+            Math.ceil(normalizedPayload.length / 4) * 4,
+            '=',
+        );
+        return JSON.parse(window.atob(paddedPayload)) as Pick<
+            CreateEmbedJwt,
+            'content' | 'writeActions'
+        >;
+    } catch {
+        return undefined;
+    }
 };
 
 const EmbedProvider: FC<React.PropsWithChildren<Props>> = ({
@@ -31,23 +93,83 @@ const EmbedProvider: FC<React.PropsWithChildren<Props>> = ({
     embedToken: encodedToken,
     filters,
     projectUuid: projectUuidFromProps,
+    paletteUuid,
     contentOverrides,
+    uiOverrides,
     onExplore,
     onBackToDashboard,
+    backDestination,
+    onEvent,
     savedChart,
+    customSqlProvenanceChartUuid,
     savedQueryUuid,
+    appUuid,
+    onAiAgentThreadChange,
 }) => {
     const embedToken = encodedToken || window.location.hash.replace('#', '');
-    const [isInitialized, setIsInitialized] = useState(false);
+    const params = useParams();
+    const projectUuid = projectUuidFromProps || params.projectUuid;
+    // Only the AI-agent dashboard route carries this param.
+    const dashboardUuid = params.agentDashboardUuid;
+
+    // Synced during render, not in an effect: direct embeds strip the token hash
+    // on first render, and the empty prop that follows must not wipe the store.
+    const storedEmbed = getFromInMemoryStorage<InMemoryEmbed>(EMBED_KEY);
+    if (
+        embedToken &&
+        (storedEmbed?.token !== embedToken ||
+            storedEmbed?.projectUuid !== projectUuid ||
+            storedEmbed?.dashboardUuid !== dashboardUuid)
+    ) {
+        setToInMemoryStorage(EMBED_KEY, {
+            projectUuid,
+            token: embedToken,
+            dashboardUuid,
+        });
+    } else if (
+        storedEmbed?.token &&
+        storedEmbed.dashboardUuid !== dashboardUuid
+    ) {
+        // In-app navigation between the conversation and a dashboard keeps the
+        // stored token; only the viewed dashboard changes.
+        setToInMemoryStorage(EMBED_KEY, { ...storedEmbed, dashboardUuid });
+    }
+
+    // Parse theme params from URL once on mount (before hash is stripped)
+    const [embedThemeParams] = useState(parseEmbedThemeParams);
+    // Parse the session timezone (?timezone=) once on mount, alongside the theme.
+    // Only the direct/iframe embed owns its URL; in SDK mode window.location is
+    // the host app's URL, so we must not scrape ?timezone= from it.
+    const [embedTimezone] = useState(() =>
+        encodedToken ? null : parseEmbedTimezoneParam(),
+    );
     const embed = getFromInMemoryStorage<InMemoryEmbed>(EMBED_KEY);
     const { data: account, isLoading } = useAccount();
     const ability = useAbilityContext();
-    const params = useParams();
     const navigate = useNavigate();
-    const projectUuid = projectUuidFromProps || params.projectUuid;
     const location = useLocation();
-    const { dispatchEmbedEvent } = useEmbedEventEmitter();
+    const queryClient = useQueryClient();
     const mode: EmbedMode = encodedToken ? 'sdk' : 'direct';
+    const { dispatchEmbedEvent, isEmbedEventReady } =
+        useCreateEmbedEventEmitter(mode, onEvent);
+    const tokenFromStorageOrProps = embedToken || embed?.token;
+    const embedWriteContext =
+        account && 'embedWriteContext' in account
+            ? account.embedWriteContext
+            : undefined;
+    const embedJwtPayload = useMemo(
+        () => decodeEmbedJwtPayload(tokenFromStorageOrProps),
+        [tokenFromStorageOrProps],
+    );
+    const handleChartSaved = useCallback(
+        (chart: SavedChart, action: ChartSavedAction) => {
+            dispatchEmbedEvent(LightdashEventType.ChartSaved, {
+                chartUuid: chart.uuid,
+                action,
+            });
+        },
+        [dispatchEmbedEvent],
+    );
 
     // Remove the token from the URL.
     useEffect(() => {
@@ -78,44 +200,78 @@ const EmbedProvider: FC<React.PropsWithChildren<Props>> = ({
         }
     }, [ability, account, isLoading]);
 
-    // There is method to this madness:
-    // When we get an embedded URL, the JWT token is added as a hash to the URL location.
-    // We immediately redirect somewhere else to a URL without the hash. Consequently, if we make
-    // this initialization in a useEffect, we will not have the hash token in the URL by the time
-    // the effect runs.
-    if (!isInitialized) {
-        setToInMemoryStorage(EMBED_KEY, {
-            projectUuid,
-            token: embedToken,
-        });
-        setIsInitialized(true);
-    }
+    // A rotated token can carry different claims, and the account query is not
+    // keyed on the token, so refetch it rather than serve stale abilities.
+    const lastSeenTokenRef = useRef(embedToken);
+    useEffect(() => {
+        if (!embedToken || lastSeenTokenRef.current === embedToken) {
+            return;
+        }
+        lastSeenTokenRef.current = embedToken;
+        void queryClient.invalidateQueries({ queryKey: ['account'] });
+    }, [embedToken, queryClient]);
 
     const value = useMemo(() => {
         return {
-            embedToken: embed?.token || embedToken,
+            embedToken: tokenFromStorageOrProps,
             filters,
-            t: (input: string) => get(contentOverrides, input),
+            // Single resolution point for UI-string overrides; a future
+            // direct-embed transport adds its source here.
+            t: (input: UiStringKey) => uiOverrides?.[input],
             projectUuid: embed?.projectUuid || projectUuid,
+            content: embedJwtPayload?.content,
+            writeActions: embedJwtPayload?.writeActions,
+            embedWriteContext,
+            paletteUuid,
             languageMap: contentOverrides,
             onExplore,
+            onChartSaved: handleChartSaved,
+            dispatchEmbedEvent,
+            isEmbedEventReady,
             savedChart,
+            customSqlProvenanceChartUuid,
             savedQueryUuid,
-            onBackToDashboard,
+            appUuid,
+            dashboardUuid,
+            onBackToDashboard: onBackToDashboard
+                ? () => onBackToDashboard(embedJwtPayload?.content)
+                : undefined,
+            backDestination:
+                backDestination ??
+                getEmbedBackDestination(embedJwtPayload?.content),
             mode,
+            theme: embedThemeParams.theme,
+            backgroundColor: embedThemeParams.backgroundColor,
+            timezone: embedTimezone,
+            onAiAgentThreadChange,
         };
     }, [
         embed?.projectUuid,
-        embed?.token,
-        embedToken,
+        tokenFromStorageOrProps,
+        embedJwtPayload?.content,
+        embedJwtPayload?.writeActions,
+        embedWriteContext,
         filters,
         projectUuid,
+        paletteUuid,
         contentOverrides,
+        uiOverrides,
         onExplore,
+        handleChartSaved,
+        dispatchEmbedEvent,
+        isEmbedEventReady,
         savedChart,
+        customSqlProvenanceChartUuid,
         savedQueryUuid,
+        appUuid,
+        dashboardUuid,
         onBackToDashboard,
+        backDestination,
         mode,
+        embedThemeParams.theme,
+        embedThemeParams.backgroundColor,
+        embedTimezone,
+        onAiAgentThreadChange,
     ]);
 
     return (

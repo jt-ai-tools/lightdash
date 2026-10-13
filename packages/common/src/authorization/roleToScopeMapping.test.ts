@@ -8,16 +8,141 @@ import { PROJECT_EDITOR } from './projectMemberAbility.mock';
 import {
     getAllScopesForRole,
     getNonEnterpriseScopesForRole,
+    getTrainingProjectScopes,
+    getTrainingProjectViewerScopes,
     isSystemRole,
+    LEARN_SANDBOX_SCOPES,
+    TRAINING_PROJECT_EXCLUDED_SCOPES,
 } from './roleToScopeMapping';
 import {
     debugRoleScopeMapping,
     validateRoleInheritance,
 } from './roleToScopeMapping.testUtils';
 import { buildAbilityFromScopes } from './scopeAbilityBuilder';
+import { getOrganizationOnlyScopes, getScopes } from './scopes';
 import { type MemberAbility } from './types';
 
 describe('roleToScopeMapping', () => {
+    describe('getTrainingProjectScopes', () => {
+        const trainee = getTrainingProjectScopes();
+        const admin = getAllScopesForRole(ProjectMemberRole.ADMIN);
+
+        it('is a subset of the project admin scope set', () => {
+            trainee.forEach((scope) => expect(admin).toContain(scope));
+        });
+
+        it('contains no organization-only scope', () => {
+            const orgOnly = new Set<string>(getOrganizationOnlyScopes());
+            trainee.forEach((scope) => expect(orgOnly.has(scope)).toBe(false));
+        });
+
+        it('omits every excluded scope', () => {
+            TRAINING_PROJECT_EXCLUDED_SCOPES.forEach((scope) =>
+                expect(trainee).not.toContain(scope),
+            );
+        });
+
+        it('grants every other admin scope, so admin-set changes are caught', () => {
+            const orgOnly = new Set<string>(getOrganizationOnlyScopes());
+            const expected = admin.filter(
+                (scope) =>
+                    !orgOnly.has(scope) &&
+                    !TRAINING_PROJECT_EXCLUDED_SCOPES.includes(scope),
+            );
+            expect(new Set(trainee)).toEqual(new Set(expected));
+        });
+
+        it('only excludes scopes that exist in the vocabulary', () => {
+            const known = new Set<string>(
+                getScopes({ isEnterprise: true }).map((scope) => scope.name),
+            );
+            TRAINING_PROJECT_EXCLUDED_SCOPES.forEach((scope) =>
+                expect(known.has(scope)).toBe(true),
+            );
+        });
+
+        it("never grants other people's threads, skills or analytics", () => {
+            [
+                'view:AiAgentThread',
+                'manage:AiAgentThread',
+                'view:AiAgentSkill',
+                'manage:AiAgentSkill',
+                'view:Analytics',
+            ].forEach((scope) => expect(trainee).not.toContain(scope));
+            expect(trainee).toContain('view:AiAgentThread@self');
+            expect(trainee).toContain('manage:AiAgentThread@self');
+        });
+
+        it("grants knowledge documents in the learner's copy but not on the shared project", () => {
+            // A training project's agents only reach that project's own
+            // documents (AiAgentDocumentModel), never the organization's
+            ['view:AiAgentDocument', 'manage:AiAgentDocument'].forEach(
+                (scope) => {
+                    expect(trainee).toContain(scope);
+                    expect(getTrainingProjectViewerScopes()).not.toContain(
+                        scope,
+                    );
+                },
+            );
+        });
+
+        it("the shared training project gets a viewer's project scopes only", () => {
+            const shared = getTrainingProjectViewerScopes();
+            shared.forEach((scope) => expect(trainee).toContain(scope));
+            expect(shared).toContain('view:Project');
+            expect(shared).toContain('view:SavedChart');
+            expect(shared).toContain('view:DataApp');
+            expect(shared).toContain('view:AiAgent');
+            [
+                'manage:SavedChart',
+                'manage:SqlRunner',
+                'manage:AiAgent',
+                'create:DashboardComments',
+                'manage:Space',
+            ].forEach((scope) => expect(shared).not.toContain(scope));
+        });
+
+        it('keeps the controls training depends on', () => {
+            [
+                'manage:PinnedItems',
+                'manage:SavedChart',
+                'manage:Dashboard',
+                'manage:Space',
+                'manage:SqlRunner',
+                'manage:Validation',
+                'manage:DataApp',
+            ].forEach((scope) => expect(trainee).toContain(scope));
+        });
+
+        describe('LEARN_SANDBOX_SCOPES', () => {
+            it('is exactly the two deploy scopes the sandbox needs', () => {
+                expect([...LEARN_SANDBOX_SCOPES]).toEqual([
+                    'manage:DeployProject@self',
+                    'create:Job@self',
+                ]);
+            });
+            it('only names scopes the trainee set excludes on purpose', () => {
+                LEARN_SANDBOX_SCOPES.forEach((scope) =>
+                    expect(TRAINING_PROJECT_EXCLUDED_SCOPES).toContain(scope),
+                );
+            });
+            it('never contains a project-breaking or unconditional scope', () => {
+                [
+                    'manage:Project',
+                    'update:Project',
+                    'delete:Project',
+                    'manage:CompileProject',
+                    // Granted with no project condition; the @self form is
+                    // bound to the learner's own copy.
+                    'create:Job',
+                    'manage:Job',
+                ].forEach((scope) =>
+                    expect(LEARN_SANDBOX_SCOPES).not.toContain(scope),
+                );
+            });
+        });
+    });
+
     describe('isSystemRole', () => {
         it('should return true for valid system role "developer"', () => {
             expect(isSystemRole('developer')).toBe(true);
@@ -51,12 +176,21 @@ describe('roleToScopeMapping', () => {
                 expect(typeof roleUuid).toBe('string');
                 expect(roleUuid).toBe('developer');
             } else {
-                fail('isSystemRole should return true for "developer"');
+                throw new Error(
+                    'isSystemRole should return true for "developer"',
+                );
             }
         });
     });
 
     describe('getScopesForRole', () => {
+        it.each(Object.values(ProjectMemberRole))(
+            'includes Learn in the %s preset',
+            (role) => {
+                expect(getAllScopesForRole(role)).toContain('view:Learn');
+            },
+        );
+
         it('should return scopes for viewer role', () => {
             const scopes = getAllScopesForRole(ProjectMemberRole.VIEWER);
             expect(scopes).toContain('view:Dashboard');
@@ -113,8 +247,6 @@ describe('roleToScopeMapping', () => {
             }).not.toThrow();
         });
     });
-
-    describe('AbilityBuilderCompatibility', () => {});
 
     describe('Ability builder compatibility', () => {
         it('should build equivalent abilities using scopes vs role-based builder', () => {
@@ -184,7 +316,7 @@ describe('roleToScopeMapping', () => {
                     resource: {
                         organizationUuid: 'org-uuid-test',
                         projectUuid: PROJECT_EDITOR.projectUuid,
-                        isPrivate: false,
+                        inheritsFromOrgOrProject: true,
                     },
                 },
                 {
@@ -193,7 +325,7 @@ describe('roleToScopeMapping', () => {
                     resource: {
                         organizationUuid: 'org-uuid-test',
                         projectUuid: PROJECT_EDITOR.projectUuid,
-                        isPrivate: false,
+                        inheritsFromOrgOrProject: true,
                     },
                 },
                 {
@@ -202,7 +334,7 @@ describe('roleToScopeMapping', () => {
                     resource: {
                         organizationUuid: 'org-uuid-test',
                         projectUuid: PROJECT_EDITOR.projectUuid,
-                        isPrivate: false,
+                        inheritsFromOrgOrProject: true,
                     },
                 },
 
@@ -223,7 +355,7 @@ describe('roleToScopeMapping', () => {
                     resource: {
                         organizationUuid: 'org-uuid-test',
                         projectUuid: PROJECT_EDITOR.projectUuid,
-                        isPrivate: false,
+                        inheritsFromOrgOrProject: true,
                     },
                 },
                 {
@@ -374,7 +506,7 @@ describe('roleToScopeMapping', () => {
                 resource: {
                     organizationUuid: 'org-uuid-test',
                     projectUuid: 'test-project-uuid',
-                    isPrivate: false,
+                    inheritsFromOrgOrProject: true,
                 },
             },
             {
@@ -391,7 +523,7 @@ describe('roleToScopeMapping', () => {
                 resource: {
                     organizationUuid: 'org-uuid-test',
                     projectUuid: 'test-project-uuid',
-                    isPrivate: false,
+                    inheritsFromOrgOrProject: true,
                 },
             },
             {
@@ -493,7 +625,7 @@ describe('roleToScopeMapping', () => {
                 resource: {
                     organizationUuid: 'org-uuid-test',
                     projectUuid: 'project-uuid-test',
-                    isPrivate: false,
+                    inheritsFromOrgOrProject: true,
                 },
             },
             {
@@ -510,7 +642,7 @@ describe('roleToScopeMapping', () => {
                 resource: {
                     organizationUuid: 'org-uuid-test',
                     projectUuid: 'project-uuid-test',
-                    isPrivate: false,
+                    inheritsFromOrgOrProject: true,
                 },
             },
             {
@@ -577,7 +709,7 @@ describe('roleToScopeMapping', () => {
                 ];
 
                 // Build ability using the combined role-based system
-                const roleBasedBuilder = getUserAbilityBuilder({
+                const { builder: roleBasedBuilder } = getUserAbilityBuilder({
                     user,
                     projectProfiles,
                     permissionsConfig: {

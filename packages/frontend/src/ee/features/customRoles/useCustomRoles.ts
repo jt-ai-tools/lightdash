@@ -2,6 +2,7 @@ import {
     type ApiError,
     type CreateRole,
     type Role,
+    type RoleAssignee,
     type RoleWithScopes,
 } from '@lightdash/common';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -121,54 +122,39 @@ export const useCustomRoles = () => {
         enabled: !!organization?.organizationUuid,
     });
 
-    const duplicateRole = useMutation<
-        RoleWithScopes,
-        ApiError,
-        { roleId: string; name: string; description: string }
-    >({
-        mutationFn: async ({ roleId, name, description }) => {
-            if (!organization?.organizationUuid) {
-                throw new Error('Organization UUID not available');
-            }
-
-            const body: { name: string; description?: string } = { name };
-            if (description) {
-                body.description = description;
-            }
-
-            return lightdashApi<RoleWithScopes>({
-                method: 'POST',
-                url: `/orgs/${organization.organizationUuid}/roles/${roleId}/duplicate`,
-                version: 'v2',
-                body: JSON.stringify(body),
-            });
-        },
-        onSuccess: async () => {
-            await queryClient.invalidateQueries({
-                queryKey: [CACHE_KEY, organization?.organizationUuid],
-            });
-            await queryClient.invalidateQueries({
-                queryKey: [ALL_ROLES_CACHE_KEY, organization?.organizationUuid],
-            });
-            showToastSuccess({
-                title: `Role duplicated successfully`,
-            });
-        },
-        onError: ({ error }) => {
-            showToastApiError({
-                title: `Failed to duplicate role`,
-                apiError: error,
-            });
-        },
-    });
-
     return useMemo(() => {
         return {
             listRoles,
             createRole,
             deleteRole,
             getAllRoles,
-            duplicateRole,
         };
-    }, [listRoles, createRole, deleteRole, getAllRoles, duplicateRole]);
+    }, [listRoles, createRole, deleteRole, getAllRoles]);
+};
+
+export const useRoleAssignees = (roleUuid: string | undefined) => {
+    const { data: organization } = useOrganization();
+
+    return useQuery<RoleAssignee[], ApiError>({
+        queryKey: [
+            CACHE_KEY,
+            organization?.organizationUuid,
+            roleUuid,
+            'assignees',
+        ],
+        queryFn: async () => {
+            if (!organization?.organizationUuid) {
+                throw new Error('Organization UUID not available');
+            }
+            if (!roleUuid) {
+                throw new Error('Role UUID not provided');
+            }
+            return lightdashApi<RoleAssignee[]>({
+                method: 'GET',
+                url: `/orgs/${organization.organizationUuid}/roles/${roleUuid}/assignees`,
+                version: 'v2',
+            });
+        },
+        enabled: !!organization?.organizationUuid && !!roleUuid,
+    });
 };

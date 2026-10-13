@@ -1,32 +1,28 @@
 import { WarehouseTypes } from '@lightdash/common';
-import {
-    Anchor,
-    NumberInput,
-    PasswordInput,
-    Select,
-    Stack,
-    TextInput,
-} from '@mantine/core';
-import React, { type FC } from 'react';
+import { TextInput, Stack, Anchor, Select, PasswordInput } from '@mantine/core';
+import React, { type FC, type ReactNode } from 'react';
 import { useToggle } from 'react-use';
+import { NumberInput } from '../../common/NumberInput';
 import FormCollapseButton from '../FormCollapseButton';
 import { useFormContext } from '../formContext';
 import BooleanSwitch from '../Inputs/BooleanSwitch';
 import FormSection from '../Inputs/FormSection';
 import StartOfWeekSelect from '../Inputs/StartOfWeekSelect';
 import { useProjectFormContext } from '../useProjectFormContext';
+import DataTimezoneField from './DataTimezoneField';
 import { TrinoDefaultValues } from './defaultValues';
 
 export const TrinoSchemaInput: FC<{
     disabled: boolean;
-}> = ({ disabled }) => {
+    description?: ReactNode;
+}> = ({ disabled, description }) => {
     const form = useFormContext();
 
     return (
         <TextInput
             name="warehouse.schema"
             label="Schema"
-            description="This is the schema name."
+            description={description ?? 'This is the schema name.'}
             required
             {...form.getInputProps('warehouse.schema')}
             disabled={disabled}
@@ -44,7 +40,7 @@ const TrinoForm: FC<{
     const form = useFormContext();
     return (
         <>
-            <Stack style={{ marginTop: '8px' }}>
+            <Stack mt="xs">
                 <TextInput
                     name="warehouse.host"
                     label="Host"
@@ -90,7 +86,7 @@ const TrinoForm: FC<{
                 />
 
                 <FormSection isOpen={isOpen} name="advanced">
-                    <Stack style={{ marginTop: '8px' }}>
+                    <Stack mt="xs">
                         <BooleanSwitch
                             name="warehouse.requireUserCredentials"
                             label="Require users to provide their own credentials"
@@ -115,6 +111,7 @@ const TrinoForm: FC<{
                         />
 
                         <Select
+                            allowDeselect={false}
                             name="warehouse.http_scheme"
                             {...form.getInputProps('warehouse.http_scheme')}
                             defaultValue={TrinoDefaultValues.http_scheme}
@@ -125,6 +122,7 @@ const TrinoForm: FC<{
                                     database using SSL. You can see more details
                                     in
                                     <Anchor
+                                        inherit
                                         target="_blank"
                                         href="https://docs.getdbt.com/reference/warehouse-setups/trino-setup#configuration"
                                         rel="noreferrer"
@@ -150,6 +148,7 @@ const TrinoForm: FC<{
                             disabled={disabled}
                         />
 
+                        <DataTimezoneField disabled={disabled} />
                         <StartOfWeekSelect disabled={disabled} />
                     </Stack>
                 </FormSection>

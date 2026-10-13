@@ -10,7 +10,7 @@ echo "🔨 Building Lightdash CLI binaries..."
 # Parse command line arguments
 SIGN_AND_NOTARIZE=false
 CREATE_ARCHIVES=false
-TARGETS="node20-macos-x64,node20-macos-arm64,node20-linux-x64,node20-win-x64"
+TARGETS="node24-macos-x64,node24-macos-arm64,node24-linux-x64,node24-win-x64"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -23,7 +23,11 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --mac-only)
-      TARGETS="node20-macos-x64,node20-macos-arm64"
+      TARGETS="node24-macos-x64,node24-macos-arm64"
+      shift
+      ;;
+    --linux-only)
+      TARGETS="node24-linux-x64"
       shift
       ;;
     --help)
@@ -33,6 +37,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --sign        Sign and notarize macOS binaries (requires env vars)"
       echo "  --archive     Create tar.gz/zip archives and checksums for distribution"
       echo "  --mac-only    Build only macOS binaries"
+      echo "  --linux-only  Build only the Linux x64 binary"
       echo "  --help        Show this help message"
       echo ""
       echo "Required environment variables for signing:"
@@ -55,6 +60,36 @@ done
 VERSION=$(node -p "require('./package.json').version")
 echo "Version: $VERSION"
 
+duckdb_binding_for_target() {
+  case $1 in
+    node24-macos-x64)
+      echo "node-bindings-darwin-x64"
+      ;;
+    node24-macos-arm64)
+      echo "node-bindings-darwin-arm64"
+      ;;
+    node24-linux-x64)
+      echo "node-bindings-linux-x64"
+      ;;
+    node24-win-x64)
+      echo "node-bindings-win32-x64"
+      ;;
+  esac
+}
+
+declare -a TARGET_ARRAY
+IFS=',' read -ra TARGET_ARRAY <<< "$TARGETS"
+
+declare -a DUCKDB_BINDING_ARRAY=()
+for target in "${TARGET_ARRAY[@]}"; do
+  binding_name=$(duckdb_binding_for_target "$target")
+  if [ -n "$binding_name" ] && [[ ! " ${DUCKDB_BINDING_ARRAY[*]} " =~ (^|[[:space:]])"${binding_name}"($|[[:space:]]) ]]; then
+    DUCKDB_BINDING_ARRAY+=("$binding_name")
+  fi
+done
+
+DUCKDB_BINDINGS=$(IFS=,; echo "${DUCKDB_BINDING_ARRAY[*]}")
+
 # Clean previous builds
 echo "🧹 Cleaning previous builds..."
 rm -rf bin
@@ -62,29 +97,42 @@ rm -rf bundle
 
 # Build the bundle
 echo "📦 Creating bundle..."
-pnpm bundle
+DUCKDB_BINDINGS="$DUCKDB_BINDINGS" pnpm bundle
+
+validate_duckdb_binding() {
+  local binding_name=$1
+
+  if [ ! -d "bundle/node_modules/@duckdb/$binding_name" ]; then
+    echo "❌ Error: Missing DuckDB binding package '$binding_name' in bundle/"
+    echo "Run 'pnpm install --force' before building standalone binaries so pnpm installs all optional DuckDB bindings."
+    exit 1
+  fi
+}
 
 # Build binaries
 echo "🏗️ Building binaries for targets: $TARGETS"
 
 # Build each target separately to ensure consistent naming
-IFS=',' read -ra TARGET_ARRAY <<< "$TARGETS"
 for target in "${TARGET_ARRAY[@]}"; do
   echo "  Building $target..."
 
   # Determine output name based on target
   case $target in
-    node20-macos-x64)
+    node24-macos-x64)
       OUTPUT_NAME="bin/lightdash-macos-x64"
+      validate_duckdb_binding "node-bindings-darwin-x64"
       ;;
-    node20-macos-arm64)
+    node24-macos-arm64)
       OUTPUT_NAME="bin/lightdash-macos-arm64"
+      validate_duckdb_binding "node-bindings-darwin-arm64"
       ;;
-    node20-linux-x64)
+    node24-linux-x64)
       OUTPUT_NAME="bin/lightdash-linux-x64"
+      validate_duckdb_binding "node-bindings-linux-x64"
       ;;
-    node20-win-x64)
+    node24-win-x64)
       OUTPUT_NAME="bin/lightdash-win-x64"
+      validate_duckdb_binding "node-bindings-win32-x64"
       ;;
     *)
       echo "Unknown target: $target"

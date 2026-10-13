@@ -2,6 +2,7 @@ import {
     getErrorMessage,
     isUnrecoverableSlackError,
     LightdashError,
+    PayloadTooLargeError,
     ScimError,
     SlackError,
     UnexpectedServerError,
@@ -33,6 +34,21 @@ export const errorHandler = (error: Error): LightdashError => {
             name: error.name,
             message: errorMessage,
             data: error.fields,
+        });
+    }
+    // Handle PayloadTooLargeError from body-parser/express
+    if (
+        error.name === 'PayloadTooLargeError' ||
+        (error.message && error.message.includes('request entity too large'))
+    ) {
+        return new PayloadTooLargeError();
+    }
+    if (error instanceof URIError || error.name === 'URIError') {
+        return new LightdashError({
+            statusCode: 400,
+            name: 'URIError',
+            message: 'Invalid URI encoding',
+            data: {},
         });
     }
     if (error instanceof LightdashError) {

@@ -1,21 +1,18 @@
 import { Button, type ButtonProps } from '@mantine/core';
-import { type ButtonHTMLAttributes, type FC } from 'react';
+import { forwardRef, type ButtonHTMLAttributes } from 'react';
 
 type Props = ButtonProps & ButtonHTMLAttributes<HTMLButtonElement>;
 
-export const AddButton: FC<Props> = ({ ...props }) => (
+export const AddButton = forwardRef<HTMLButtonElement, Props>((props, ref) => (
     <Button
-        size="sm"
+        ref={ref}
+        size="compact-sm"
         variant="subtle"
-        compact
-        leftIcon="+"
+        leftSection="+"
         {...props}
-        styles={{
-            leftIcon: {
-                marginRight: 2,
-            },
-        }}
     >
         Add
     </Button>
-);
+));
+
+AddButton.displayName = 'AddButton';

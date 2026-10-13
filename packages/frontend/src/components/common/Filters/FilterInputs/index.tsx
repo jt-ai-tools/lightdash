@@ -1,10 +1,10 @@
 import {
-    FilterType,
     assertUnreachable,
+    FilterType,
     type BaseFilterRule,
     type FilterableItem,
 } from '@lightdash/common';
-import { type PopoverProps } from '@mantine/core';
+import { type FilterPopoverProps } from '../context';
 import BooleanFilterInputs from './BooleanFilterInputs';
 import DateFilterInputs from './DateFilterInputs';
 import DefaultFilterInputs from './DefaultFilterInputs';
@@ -15,7 +15,7 @@ export type FilterInputsProps<T extends BaseFilterRule> = {
     rule: T;
     onChange: (value: T) => void;
     disabled?: boolean;
-    popoverProps?: Omit<PopoverProps, 'children'>;
+    popoverProps?: FilterPopoverProps;
 };
 
 const FilterInputComponent = <T extends BaseFilterRule>(

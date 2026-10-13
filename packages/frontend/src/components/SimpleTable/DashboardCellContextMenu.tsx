@@ -10,24 +10,24 @@ import {
     type ItemsMap,
     type ResultValue,
 } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
+import { Menu } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import { IconCopy, IconStack } from '@tabler/icons-react';
 import mapValues from 'lodash/mapValues';
 import { useCallback, useMemo, type FC } from 'react';
-import { useParams } from 'react-router';
 import { FilterDashboardTo } from '../../features/dashboardFilters/FilterDashboardTo';
 import useToaster from '../../hooks/toaster/useToaster';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
 import { Can } from '../../providers/Ability';
 import useApp from '../../providers/App/useApp';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
 import useTracking from '../../providers/Tracking/useTracking';
 import { EventName } from '../../types/Events';
+import MantineIcon from '../common/MantineIcon';
+import { type CellContextMenuProps } from '../common/Table/types';
 import UrlMenuItems from '../Explorer/ResultsCard/UrlMenuItems';
 import DrillDownMenuItem from '../MetricQueryData/DrillDownMenuItem';
 import { useMetricQueryDataContext } from '../MetricQueryData/useMetricQueryDataContext';
-import MantineIcon from '../common/MantineIcon';
-import { type CellContextMenuProps } from '../common/Table/types';
 
 const DashboardCellContextMenu: FC<
     Pick<CellContextMenuProps, 'cell'> & {
@@ -41,6 +41,9 @@ const DashboardCellContextMenu: FC<
 
     const addDimensionDashboardFilter = useDashboardContext(
         (c) => c.addDimensionDashboardFilter,
+    );
+    const dateZoomGranularity = useDashboardContext(
+        (c) => c.dateZoomGranularity,
     );
 
     const meta = cell.column.columnDef.meta;
@@ -99,7 +102,7 @@ const DashboardCellContextMenu: FC<
     const filters = [...filterField, ...possiblePivotFilters];
     const { track } = useTracking();
     const { user } = useApp();
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
 
     const handleCopyToClipboard = useCallback(() => {
         clipboard.copy(value.formatted);
@@ -118,11 +121,21 @@ const DashboardCellContextMenu: FC<
             },
         });
 
+        // PROD-880: pass active date zoom so underlying-data uses the correct grain
+        const dateZoom =
+            dateZoomGranularity && metricQuery?.metadata?.hasADateDimension
+                ? {
+                      granularity: dateZoomGranularity,
+                      xAxisFieldId: `${metricQuery.metadata.hasADateDimension.table}_${metricQuery.metadata.hasADateDimension.name}`,
+                  }
+                : undefined;
+
         openUnderlyingDataModal({
             item: meta.item,
             value,
             fieldValues,
             pivotReference: meta?.pivotReference,
+            ...(dateZoom && { dateZoom }),
         });
     }, [
         track,
@@ -132,11 +145,16 @@ const DashboardCellContextMenu: FC<
         meta,
         value,
         fieldValues,
+        dateZoomGranularity,
+        metricQuery?.metadata?.hasADateDimension,
     ]);
 
     return (
         <>
-            {item && value.raw && isField(item) ? (
+            {item &&
+            value.raw !== undefined &&
+            value.raw !== null &&
+            isField(item) ? (
                 <UrlMenuItems urls={item.urls} cell={cell} />
             ) : null}
 

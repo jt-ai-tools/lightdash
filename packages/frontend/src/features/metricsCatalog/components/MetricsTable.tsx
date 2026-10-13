@@ -1,35 +1,22 @@
 import {
-    FeatureFlags,
-    SpotlightTableColumns,
     assertUnreachable,
+    SpotlightTableColumns,
     type CatalogCategoryFilterMode,
+    type CatalogField,
     type CatalogItem,
 } from '@lightdash/common';
 import {
-    Anchor,
     Box,
-    Button,
     Center,
     Divider,
     Group,
     Paper,
     Text,
+    Anchor,
     useMantineTheme,
-    type PaperProps,
 } from '@mantine/core';
-import {
-    IconArrowDown,
-    IconArrowUp,
-    IconArrowsSort,
-} from '@tabler/icons-react';
+import {} from '@tabler/icons-react';
 import { useIsMutating } from '@tanstack/react-query';
-import { ReactFlowProvider } from '@xyflow/react';
-import {
-    MantineReactTable,
-    useMantineReactTable,
-    type MRT_SortingState,
-    type MRT_Virtualizer,
-} from 'mantine-react-table';
 import {
     useCallback,
     useDeferredValue,
@@ -38,12 +25,15 @@ import {
     useRef,
     useState,
     type FC,
-    type UIEvent,
 } from 'react';
-import { useLocation, useNavigate } from 'react-router';
-import MantineIcon from '../../../components/common/MantineIcon';
+import {
+    ContentTable,
+    useContentTable,
+    type ContentTableSortingState,
+    type ContentTableVirtualizer,
+} from '../../../components/common/ContentTable';
 import SuboptimalState from '../../../components/common/SuboptimalState/SuboptimalState';
-import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
+import { useInfiniteScroll } from '../../../hooks/useInfiniteScroll';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { EventName } from '../../../types/Events';
 import { useAppDispatch, useAppSelector } from '../../sqlRunner/store/hooks';
@@ -51,7 +41,6 @@ import {
     MIN_METRICS_CATALOG_SEARCH_LENGTH,
     useMetricsCatalog,
 } from '../hooks/useMetricsCatalog';
-import { useAllMetricsTreeEdges } from '../hooks/useMetricsTree';
 import { useSpotlightTableConfig } from '../hooks/useSpotlightTable';
 import {
     setCategoryFilterMode,
@@ -63,8 +52,7 @@ import {
     setTableSorting,
     toggleMetricExploreModal,
 } from '../store/metricsCatalogSlice';
-import { MetricCatalogView } from '../types';
-import Canvas from './Canvas';
+import { MetricCatalogView, type MetricsCatalogFilter } from '../types';
 import { MetricExploreModal } from './MetricExploreModal';
 import { MetricsCatalogColumns } from './MetricsCatalogColumns';
 import { MetricsTableTopToolbar } from './MetricsTableTopToolbar';
@@ -72,18 +60,18 @@ import SavedTreesContainer from './SavedTrees/SavedTreesContainer';
 
 type MetricsTableProps = {
     metricCatalogView: MetricCatalogView;
+    isEmbed: boolean;
+    hiddenFilters: MetricsCatalogFilter[];
 };
 
-export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
+export const MetricsTable: FC<MetricsTableProps> = ({
+    metricCatalogView,
+    isEmbed,
+    hiddenFilters,
+}) => {
     const { track } = useTracking();
     const dispatch = useAppDispatch();
     const theme = useMantineTheme();
-    const location = useLocation();
-    const navigate = useNavigate();
-    const { data: savedMetricsTreeFlag } = useServerFeatureFlag(
-        FeatureFlags.SavedMetricsTree,
-    );
-    const isSavedMetricsTreeEnabled = savedMetricsTreeFlag?.enabled ?? false;
 
     const userUuid = useAppSelector(
         (state) => state.metricsCatalog.user?.userUuid,
@@ -106,11 +94,14 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
     const ownerFilters = useAppSelector(
         (state) => state.metricsCatalog.ownerFilters,
     );
-    const { canManageTags, canManageMetricsTree } = useAppSelector(
+    const { canManageTags } = useAppSelector(
         (state) => state.metricsCatalog.abilities,
     );
     const isMetricExploreModalOpen = useAppSelector(
         (state) => state.metricsCatalog.modals.metricExploreModal.isOpen,
+    );
+    const exploreModalMetric = useAppSelector(
+        (state) => state.metricsCatalog.modals.metricExploreModal.metric,
     );
     const search = useAppSelector((state) => state.metricsCatalog.search);
     const stateTableSorting = useAppSelector(
@@ -118,17 +109,30 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
     );
     const deferredSearch = useDeferredValue(search);
     const prevView = useRef(metricCatalogView);
-    const tableContainerRef = useRef<HTMLDivElement>(null);
     const rowVirtualizerInstanceRef =
-        useRef<MRT_Virtualizer<HTMLDivElement, HTMLTableRowElement>>(null);
+        useRef<ContentTableVirtualizer<HTMLDivElement, HTMLTableRowElement>>(
+            null,
+        );
 
     // We need internal state to handle non serializable state for the updater function
     const [internalSorting, setInternalSorting] =
-        useState<MRT_SortingState>(stateTableSorting);
+        useState<ContentTableSortingState>(stateTableSorting);
 
     const onCloseMetricExploreModal = () => {
         dispatch(toggleMetricExploreModal(undefined));
     };
+
+    const handleSelectMetricInCanvas = useCallback(
+        (metric: CatalogField) => {
+            dispatch(
+                toggleMetricExploreModal({
+                    name: metric.name,
+                    tableName: metric.tableName,
+                }),
+            );
+        },
+        [dispatch],
+    );
 
     const {
         data,
@@ -193,29 +197,11 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
         },
     });
 
-    //called on scroll and possibly on mount to fetch more data as the user scrolls and reaches bottom of table
-    const fetchMoreOnBottomReached = useCallback(
-        (containerRefElement?: HTMLDivElement | null) => {
-            if (containerRefElement) {
-                const { scrollHeight, scrollTop, clientHeight } =
-                    containerRefElement;
-                //once the user has scrolled within 200px of the bottom of the table, fetch more data if we can
-                if (
-                    scrollHeight - scrollTop - clientHeight < 200 &&
-                    !isFetching &&
-                    hasNextPage
-                ) {
-                    void fetchNextPage();
-                }
-            }
-        },
-        [fetchNextPage, isFetching, hasNextPage],
-    );
-
-    // Check if we need to fetch more data on mount
-    useEffect(() => {
-        fetchMoreOnBottomReached(tableContainerRef.current);
-    }, [fetchMoreOnBottomReached]);
+    const { containerRef: tableContainerRef, onScroll } = useInfiniteScroll({
+        fetchNextPage,
+        isFetching,
+        hasMore: hasNextPage ?? false,
+    });
 
     const handleSetCategoryFilters = (selectedCategories: string[]) => {
         dispatch(setCategoryFilters(selectedCategories));
@@ -246,29 +232,26 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
     };
 
     // Reusable paper props to avoid duplicate when rendering tree view
-    const mantinePaperProps: PaperProps = useMemo(
+    const mantinePaperProps = useMemo(
         () => ({
             shadow: undefined,
-            sx: {
+            style: {
                 border: `1px solid ${theme.colors.ldGray[2]}`,
                 borderRadius: theme.spacing.sm, // ! radius doesn't have rem(12) -> 0.75rem
                 boxShadow: theme.shadows.subtle,
                 display: 'flex',
-                flexDirection: 'column',
+                flexDirection: 'column' as const,
+                height: isEmbed ? '100%' : undefined,
+                minHeight: isEmbed ? 0 : undefined,
             },
         }),
-        [theme],
+        [isEmbed, theme],
     );
 
     const flatData = useMemo(
         () => data?.pages.flatMap((page) => page.data) ?? [],
         [data],
     );
-
-    // Get set of loaded metric UUIDs for efficient lookup
-    const loadedMetricUuids = useMemo(() => {
-        return new Set(flatData.map((metric) => metric.catalogSearchUuid));
-    }, [flatData]);
 
     const totalResults = useMemo(() => {
         if (!data) return 0;
@@ -280,37 +263,6 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
     const showLoadingOverlay = useMemo(
         () => isFetching && isPreviousData && !isMutating,
         [isFetching, isPreviousData, isMutating],
-    );
-
-    const hasMetricsLoaded = loadedMetricUuids.size > 0;
-
-    const isCanvasMode = metricCatalogView === MetricCatalogView.CANVAS;
-
-    // Fetch ALL edges for the project only when in canvas mode
-    const { data: allEdgesData } = useAllMetricsTreeEdges(projectUuid, {
-        enabled: !!projectUuid && isCanvasMode,
-    });
-
-    // Filter edges client-side to only include edges where both source AND target are in loaded metrics
-    const filteredEdges = useMemo(() => {
-        if (!allEdgesData?.edges) return [];
-        return allEdgesData.edges.filter(
-            (edge) =>
-                loadedMetricUuids.has(edge.source.catalogSearchUuid) &&
-                loadedMetricUuids.has(edge.target.catalogSearchUuid),
-        );
-    }, [allEdgesData?.edges, loadedMetricUuids]);
-
-    // Viewers cannot access metrics tree if there are no edges
-    // In list mode, we don't know yet if edges exist, so we allow access (will show message in canvas if no edges)
-    const isValidMetricsEdgeCount = useMemo(
-        () => canManageMetricsTree || !isCanvasMode || filteredEdges.length > 0,
-        [canManageMetricsTree, isCanvasMode, filteredEdges],
-    );
-
-    const isValidMetricsTree = useMemo(
-        () => hasMetricsLoaded && isValidMetricsEdgeCount,
-        [hasMetricsLoaded, isValidMetricsEdgeCount],
     );
 
     const dataHasCategories = useMemo(() => {
@@ -361,42 +313,31 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
         [columnConfig.columnVisibility, canManageTags, dataHasCategories],
     );
 
-    const table = useMantineReactTable({
+    const table = useContentTable({
         columns: MetricsCatalogColumns,
         data: flatData,
         enableColumnResizing: true,
-        enableRowNumbers: false,
         positionActionsColumn: 'last',
         enableRowVirtualization: true,
         enablePagination: false,
-        enableFilters: true,
-        enableFullScreenToggle: false,
-        enableDensityToggle: false,
-        enableColumnActions: false,
-        enableColumnFilters: false,
-        enableHiding: false,
-        enableGlobalFilterModes: false,
         onGlobalFilterChange: (s: string) => {
             dispatch(setSearch(s));
         },
         manualFiltering: true,
-        enableFilterMatchHighlighting: true,
         enableSorting: true,
         manualSorting: true,
         onSortingChange: setInternalSorting,
         enableTopToolbar: true,
-        positionGlobalFilter: 'left',
         mantinePaperProps,
         mantineTableContainerProps: {
             ref: tableContainerRef,
             sx: {
-                maxHeight: 'calc(100dvh - 350px)',
-                minHeight: 600,
+                maxHeight: isEmbed ? 'none' : 'calc(100dvh - 350px)',
+                minHeight: isEmbed ? 0 : 600,
                 display: 'flex',
                 flexDirection: 'column',
             },
-            onScroll: (event: UIEvent<HTMLDivElement>) =>
-                fetchMoreOnBottomReached(event.target as HTMLDivElement),
+            onScroll,
         },
         mantineTableProps: {
             highlightOnHover: true,
@@ -410,22 +351,6 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
         mantineTableHeadProps: {
             sx: {
                 flexShrink: 1,
-            },
-        },
-        mantineTableHeadRowProps: {
-            sx: {
-                boxShadow: 'none',
-
-                // Each head row has a divider when resizing columns is enabled
-                'th > div > div:last-child': {
-                    height: 40,
-                    top: -10,
-                    right: -5,
-                },
-
-                'th > div > div:last-child > .mantine-Divider-root': {
-                    border: 'none',
-                },
             },
         },
         mantineTableHeadCellProps: (props) => {
@@ -484,26 +409,6 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
                 },
             },
         },
-        mantineTableBodyRowProps: {
-            sx: {
-                'td:first-of-type > div > .explore-button-container': {
-                    visibility: 'hidden',
-                    opacity: 0,
-                },
-                '&:hover': {
-                    td: {
-                        backgroundColor: theme.colors.ldGray[0],
-                        transition: `background-color ${theme.other.transitionDuration}ms ${theme.other.transitionTimingFunction}`,
-                    },
-
-                    'td:first-of-type > div > .explore-button-container': {
-                        visibility: 'visible',
-                        opacity: 1,
-                        transition: `visibility 0ms, opacity ${theme.other.transitionDuration}ms ${theme.other.transitionTimingFunction}`,
-                    },
-                },
-            },
-        },
         mantineTableBodyCellProps: (props) => {
             const isLastVisibleColumn =
                 props.table
@@ -554,13 +459,11 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
                     setSelectedTables={handleSetTableFilters}
                     selectedOwners={ownerFilters}
                     setSelectedOwners={handleSetOwnerFilters}
-                    position="apart"
+                    justify="space-between"
                     p={`${theme.spacing.lg} ${theme.spacing.xl}`}
                     showCategoriesFilter={canManageTags || dataHasCategories}
-                    isValidMetricsTree={isValidMetricsTree}
-                    hasMetricsSelected={hasMetricsLoaded}
-                    isValidMetricsEdgeCount={isValidMetricsEdgeCount}
                     metricCatalogView={metricCatalogView}
+                    hiddenFilters={hiddenFilters}
                     table={table}
                 />
                 <Divider color="ldGray.2" />
@@ -569,23 +472,23 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
         renderBottomToolbar: () => (
             <Box
                 p={`${theme.spacing.sm} ${theme.spacing.xl} ${theme.spacing.md} ${theme.spacing.xl}`}
-                fz="xs"
-                fw={500}
                 color="ldGray.8"
-                sx={{
+                style={{
                     borderTop: `1px solid ${theme.colors.ldGray[3]}`,
                 }}
             >
                 {isFetching ? (
-                    <Text>Loading more...</Text>
+                    <Text fz="sm" fw={500}>
+                        Loading more...
+                    </Text>
                 ) : (
-                    <Group spacing="two">
-                        <Text>
+                    <Group gap="two">
+                        <Text fz="sm" fw={500}>
                             {hasNextPage
                                 ? 'Scroll for more metrics'
                                 : 'All metrics loaded'}
                         </Text>
-                        <Text fw={400} color="ldGray.6">
+                        <Text fz="sm" fw={400} c="dimmed">
                             {hasNextPage
                                 ? `(${flatData.length} loaded)`
                                 : `(${flatData.length})`}
@@ -599,35 +502,27 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
                 <SuboptimalState
                     title="No metrics defined in this project"
                     action={
-                        <Text>
-                            To learn how to define metrics, check out our{' '}
-                            <Anchor
-                                target="_blank"
-                                href="https://docs.lightdash.com/references/metrics/"
-                            >
-                                documentation
-                            </Anchor>
-                        </Text>
+                        isEmbed ? undefined : (
+                            <Text>
+                                To learn how to define metrics, check out our{' '}
+                                <Anchor
+                                    inherit
+                                    target="_blank"
+                                    href="https://docs.lightdash.com/references/metrics/"
+                                >
+                                    documentation
+                                </Anchor>
+                            </Text>
+                        )
                     }
                 />
             ) : (
                 <Center>
-                    <Text fs="italic" color="gray">
+                    <Text fs="italic" c="gray">
                         No results found
                     </Text>
                 </Center>
             );
-        },
-        icons: {
-            IconArrowsSort: () => (
-                <MantineIcon icon={IconArrowsSort} size="md" color="ldGray.5" />
-            ),
-            IconSortAscending: () => (
-                <MantineIcon icon={IconArrowUp} size="md" color="blue.6" />
-            ),
-            IconSortDescending: () => (
-                <MantineIcon icon={IconArrowDown} size="md" color="blue.6" />
-            ),
         },
         state: {
             sorting: stateTableSorting,
@@ -648,14 +543,8 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
             showGlobalFilter: true, // Show search input by default
         },
         rowVirtualizerInstanceRef,
-        rowVirtualizerProps: { overscan: 40 },
-        displayColumnDefOptions: {
-            'mrt-row-actions': {
-                header: '',
-            },
-        },
+        rowVirtualizerProps: { estimateSize: () => 72, overscan: 40 },
         enableEditing: true,
-        editDisplayMode: 'cell',
     });
 
     // Initialize Redux state from API config whenever we load it via the API
@@ -684,19 +573,32 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
         case MetricCatalogView.LIST:
             return (
                 <>
-                    <MantineReactTable table={table} />
+                    <Box
+                        // Walkthrough result marker for view:Tags: the
+                        // catalog, narrowed to a category.
+                        data-tour-scope="view:Tags"
+                        data-tour-step="1"
+                        data-tour-route="/projects/:projectUuid/metrics"
+                        data-tour-label="The catalog lists every metric you can use"
+                        data-tour-docs="explore/metrics-catalog.mdx#getting-started:li1"
+                        data-tour-return="none"
+                        data-tour-resultdocs="explore/metrics-catalog/curate-the-catalog.mdx#browsing-the-catalog:li3:1"
+                    >
+                        <ContentTable table={table} />
+                    </Box>
                     {isMetricExploreModalOpen && (
                         <MetricExploreModal
                             opened={isMetricExploreModalOpen}
                             onClose={onCloseMetricExploreModal}
                             metrics={flatData}
+                            navigation="url"
                         />
                     )}
                 </>
             );
         case MetricCatalogView.CANVAS:
-            if (isSavedMetricsTreeEnabled) {
-                return (
+            return (
+                <>
                     <Paper {...mantinePaperProps}>
                         <Box>
                             <MetricsTableTopToolbar
@@ -713,15 +615,13 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
                                 setSelectedTables={handleSetTableFilters}
                                 selectedOwners={ownerFilters}
                                 setSelectedOwners={handleSetOwnerFilters}
-                                position="apart"
+                                justify="space-between"
                                 p={`${theme.spacing.lg} ${theme.spacing.xl}`}
                                 showCategoriesFilter={
                                     canManageTags || dataHasCategories
                                 }
-                                isValidMetricsTree
-                                hasMetricsSelected={hasMetricsLoaded}
-                                isValidMetricsEdgeCount
                                 metricCatalogView={metricCatalogView}
+                                hiddenFilters={hiddenFilters}
                                 table={table}
                             />
                             <Divider color="ldGray.2" />
@@ -730,72 +630,17 @@ export const MetricsTable: FC<MetricsTableProps> = ({ metricCatalogView }) => {
                             <SavedTreesContainer />
                         </Box>
                     </Paper>
-                );
-            }
-            return (
-                <Paper {...mantinePaperProps}>
-                    <Box>
-                        <MetricsTableTopToolbar
-                            search={search}
-                            setSearch={(s) => dispatch(setSearch(s))}
-                            totalResults={totalResults}
-                            selectedCategories={categoryFilters}
-                            setSelectedCategories={handleSetCategoryFilters}
-                            categoryFilterMode={categoryFilterMode}
-                            setCategoryFilterMode={handleSetCategoryFilterMode}
-                            selectedTables={tableFilters}
-                            setSelectedTables={handleSetTableFilters}
-                            selectedOwners={ownerFilters}
-                            setSelectedOwners={handleSetOwnerFilters}
-                            position="apart"
-                            p={`${theme.spacing.lg} ${theme.spacing.xl}`}
-                            showCategoriesFilter={
-                                canManageTags || dataHasCategories
-                            }
-                            isValidMetricsTree={isValidMetricsTree}
-                            hasMetricsSelected={hasMetricsLoaded}
-                            isValidMetricsEdgeCount={isValidMetricsEdgeCount}
-                            metricCatalogView={metricCatalogView}
-                            table={table}
+                    {isMetricExploreModalOpen && exploreModalMetric && (
+                        <MetricExploreModal
+                            opened={isMetricExploreModalOpen}
+                            onClose={onCloseMetricExploreModal}
+                            metrics={flatData}
+                            navigation="state"
+                            selectedMetric={exploreModalMetric}
+                            onSelectMetric={handleSelectMetricInCanvas}
                         />
-                        <Divider color="ldGray.2" />
-                    </Box>
-                    <Box w="100%" h="calc(100dvh - 350px)" mih={600}>
-                        <ReactFlowProvider>
-                            {isValidMetricsTree ? (
-                                <Canvas
-                                    metrics={flatData}
-                                    edges={filteredEdges}
-                                    viewOnly={!canManageMetricsTree}
-                                />
-                            ) : (
-                                <SuboptimalState
-                                    title="Canvas mode not available"
-                                    description={
-                                        hasMetricsLoaded
-                                            ? 'There are no connections between the selected metrics'
-                                            : 'No metrics available to display'
-                                    }
-                                    action={
-                                        <Button
-                                            onClick={() => {
-                                                void navigate({
-                                                    pathname:
-                                                        location.pathname.replace(
-                                                            /\/canvas/,
-                                                            '',
-                                                        ),
-                                                });
-                                            }}
-                                        >
-                                            Back to list view
-                                        </Button>
-                                    }
-                                />
-                            )}
-                        </ReactFlowProvider>
-                    </Box>
-                </Paper>
+                    )}
+                </>
             );
         default:
             return assertUnreachable(

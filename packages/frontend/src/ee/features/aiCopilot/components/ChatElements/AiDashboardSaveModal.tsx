@@ -2,15 +2,15 @@ import { subject } from '@casl/ability';
 import {
     type AiArtifact,
     type Dashboard,
-    type ToolDashboardArgs,
+    type ToolDashboardV2Args,
 } from '@lightdash/common';
 import {
     Button,
     LoadingOverlay,
     Stack,
-    TextInput,
     Textarea,
-} from '@mantine-8/core';
+    TextInput,
+} from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { IconLayoutDashboard, IconPlus } from '@tabler/icons-react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -26,6 +26,7 @@ import useToaster from '../../../../../hooks/toaster/useToaster';
 import { useSpaceManagement } from '../../../../../hooks/useSpaceManagement';
 import { useSpaceSummaries } from '../../../../../hooks/useSpaces';
 import useApp from '../../../../../providers/App/useApp';
+import { useEmbedAiAgentDashboardOpener } from '../../hooks/useEmbedAiAgentDashboardOpener';
 import {
     getAiAgentDashboardChartVizQueryKey,
     useUpdateArtifactVersion,
@@ -52,7 +53,7 @@ interface Props extends Omit<MantineModalProps, 'children' | 'title'> {
     artifactData: AiArtifact;
     projectUuid: string;
     agentUuid: string;
-    dashboardConfig: ToolDashboardArgs;
+    dashboardConfig: ToolDashboardV2Args;
     onSuccess?: (dashboard: Dashboard) => void;
 }
 
@@ -67,6 +68,7 @@ export const AiDashboardSaveModal: FC<Props> = ({
 }) => {
     const { user } = useApp();
     const navigate = useNavigate();
+    const openEmbedDashboard = useEmbedAiAgentDashboardOpener(projectUuid);
     const { showToastSuccess, showToastApiError } = useToaster();
     const queryClient = useQueryClient();
 
@@ -85,6 +87,14 @@ export const AiDashboardSaveModal: FC<Props> = ({
         artifactData.versionUuid,
     );
 
+    const validate = useMemo(
+        () => ({
+            dashboardName: (value: string) =>
+                value.length === 0 ? 'Dashboard name is required' : null,
+        }),
+        [],
+    );
+
     const form = useForm<FormValues>({
         initialValues: {
             dashboardName: dashboardConfig.title,
@@ -92,10 +102,7 @@ export const AiDashboardSaveModal: FC<Props> = ({
             spaceUuid: null,
             newSpaceName: null,
         },
-        validate: {
-            dashboardName: (value: string) =>
-                value.length === 0 ? 'Dashboard name is required' : null,
-        },
+        validate,
     });
 
     const spaceManagement = useSpaceManagement({
@@ -193,7 +200,7 @@ export const AiDashboardSaveModal: FC<Props> = ({
                 if (values.newSpaceName) {
                     const newSpace = await spaceManagement.handleCreateNewSpace(
                         {
-                            isPrivate: false,
+                            inheritParentPermissions: true,
                         },
                     );
                     targetSpaceUuid = newSpace?.uuid || values.spaceUuid;
@@ -242,6 +249,9 @@ export const AiDashboardSaveModal: FC<Props> = ({
                     description: values.dashboardDescription,
                     spaceUuid: targetSpaceUuid!,
                     charts,
+                    ...(dashboardConfig.layout
+                        ? { tilePositions: dashboardConfig.layout.positions }
+                        : {}),
                 });
 
                 // Update AI artifact with saved dashboard UUID
@@ -254,9 +264,11 @@ export const AiDashboardSaveModal: FC<Props> = ({
                     action: {
                         children: 'Open dashboard',
                         onClick: () =>
-                            navigate(
-                                `/projects/${projectUuid}/dashboards/${dashboard.uuid}`,
-                            ),
+                            openEmbedDashboard
+                                ? openEmbedDashboard(dashboard.uuid, null)
+                                : navigate(
+                                      `/projects/${projectUuid}/dashboards/${dashboard.uuid}`,
+                                  ),
                     },
                 });
 
@@ -277,6 +289,7 @@ export const AiDashboardSaveModal: FC<Props> = ({
             user.data?.userUuid,
             spaceManagement,
             navigate,
+            openEmbedDashboard,
             projectUuid,
             onSuccess,
             showToastSuccess,

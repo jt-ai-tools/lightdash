@@ -1,10 +1,21 @@
-import { SpotlightTableColumns, type CatalogField } from '@lightdash/common';
-import { Box, Button, Flex, Group, Text } from '@mantine/core';
-import { useHover } from '@mantine/hooks';
+import {
+    interpolateUiString,
+    SpotlightTableColumns,
+    type CatalogField,
+} from '@lightdash/common';
+import {
+    Box,
+    Button,
+    Flex,
+    Group,
+    Text,
+    useComputedColorScheme,
+} from '@mantine/core';
 import { IconPlus, IconUser } from '@tabler/icons-react';
-import { type MRT_ColumnDef } from 'mantine-react-table';
 import { useMemo } from 'react';
+import { type ContentTableColumnDef } from '../../../components/common/ContentTable';
 import MantineIcon from '../../../components/common/MantineIcon';
+import { useUiStrings } from '../../../ee/providers/Embed/useUiStrings';
 import {
     createMetricPreviewUnsavedChartVersion,
     getExplorerUrlFromCreateSavedChartVersion,
@@ -27,8 +38,9 @@ import { MetricsCatalogCategoryForm } from './MetricsCatalogCategoryForm';
 import { MetricsCatalogColumnDescription } from './MetricsCatalogColumnDescription';
 import { MetricsCatalogColumnName } from './MetricsCatalogColumnName';
 import { MetricsCatalogColumnOwner } from './MetricsCatalogColumnOwner';
+import styles from './MetricsCatalogColumns.module.css';
 
-export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
+export const MetricsCatalogColumns: ContentTableColumnDef<CatalogField>[] = [
     {
         accessorKey: SpotlightTableColumns.METRIC,
         header: 'Metric',
@@ -72,8 +84,14 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
         enableSorting: true,
         enableEditing: false,
         size: 150,
-        Header: ({ column }) => (
-            <MetricCatalogColumnHeaderCell Icon={Table} tooltipLabel="Table">
+        Header: ({ column, table }) => (
+            <MetricCatalogColumnHeaderCell
+                disabled={Boolean(
+                    table.getState().columnSizingInfo.isResizingColumn,
+                )}
+                Icon={Table}
+                tooltipLabel="Table"
+            >
                 {column.columnDef.header}
             </MetricCatalogColumnHeaderCell>
         ),
@@ -81,6 +99,7 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
             const projectUuid = useAppSelector(
                 (state) => state.metricsCatalog.projectUuid,
             );
+            const colorScheme = useComputedColorScheme();
 
             const savedChartVersion = createMetricPreviewUnsavedChartVersion({
                 name: row.original.name,
@@ -100,29 +119,21 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
                     component="a"
                     href={url.toString()}
                     target="_blank"
-                    size="xs"
-                    compact
-                    color="ldGray.6"
+                    size="compact-xs"
                     variant="subtle"
-                    leftIcon={<TableFilled />}
+                    leftSection={<TableFilled />}
                     fz="sm"
                     c="ldDark.7"
-                    fw={500}
-                    sx={{
-                        '&[data-disabled]': {
-                            backgroundColor: 'transparent',
-                            fontWeight: 400,
-                        },
-                    }}
+                    className={styles.tableButton}
                     styles={(theme) => ({
-                        leftIcon: {
+                        section: {
                             marginRight: theme.spacing.xxs,
                             color:
-                                theme.colorScheme === 'dark'
+                                colorScheme === 'dark'
                                     ? theme.colors.ldDark[7]
                                     : theme.colors.ldGray[4],
                             '--table-icon-stroke':
-                                theme.colorScheme === 'dark'
+                                colorScheme === 'dark'
                                     ? theme.colors.ldDark[4]
                                     : 'white',
                         },
@@ -140,17 +151,23 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
         size: 400,
         minSize: 200,
         header: 'Description',
-        Header: ({ column }) => (
+        Header: ({ column, table }) => (
             <MetricCatalogColumnHeaderCell
+                disabled={Boolean(
+                    table.getState().columnSizingInfo.isResizingColumn,
+                )}
                 Icon={Description}
                 tooltipLabel="Defined in the metric's .yml file"
             >
                 {column.columnDef.header}
             </MetricCatalogColumnHeaderCell>
         ),
-        Cell: ({ row, table }) => {
-            return <MetricsCatalogColumnDescription row={row} table={table} />;
-        },
+        Cell: ({ row }) => (
+            <MetricsCatalogColumnDescription
+                description={row.original.description}
+                metricLabel={row.original.label}
+            />
+        ),
     },
     {
         accessorKey: SpotlightTableColumns.CATEGORIES,
@@ -162,16 +179,21 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
         mantineTableBodyCellProps: () => {
             return {
                 pos: 'relative',
-                sx: {
+                style: {
                     padding: 0,
+                },
+                sx: {
                     '&:hover': {
                         outline: 'none',
                     },
                 },
             };
         },
-        Header: ({ column }) => (
+        Header: ({ column, table }) => (
             <MetricCatalogColumnHeaderCell
+                disabled={Boolean(
+                    table.getState().columnSizingInfo.isResizingColumn,
+                )}
                 Icon={Tag}
                 tooltipLabel="Categories help you organize your metrics and KPIs. Click on the cell to add or edit a category, if you have the required permissions."
             >
@@ -196,11 +218,11 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
                     h="100%"
                     left={0}
                     top={0}
-                    sx={{
+                    style={{
                         cursor: canManageTags ? 'pointer' : 'default',
                     }}
                 >
-                    <Group mx="md" spacing="xxs">
+                    <Group mx="md" gap="xxs">
                         {categories.map((category) => (
                             <CatalogCategory
                                 key={category.tagUuid}
@@ -232,7 +254,7 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
             );
         },
         Cell: ({ row, table, cell }) => {
-            const { hovered, ref } = useHover();
+            const getUiString = useUiStrings();
             const isCategoryPopoverClosing = useAppSelector(
                 (state) => state.metricsCatalog.popovers.category.isClosing,
             );
@@ -250,7 +272,15 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
 
             return (
                 <Flex
-                    ref={ref}
+                    component="button"
+                    type="button"
+                    disabled={!canManageTags}
+                    aria-label={interpolateUiString(
+                        getUiString('metrics.editCategories'),
+                        { metric: row.original.label },
+                    )}
+                    aria-haspopup="dialog"
+                    className={styles.categoryCell}
                     pos="absolute"
                     py={6}
                     px="md"
@@ -258,6 +288,12 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
                     top={0}
                     w="100%"
                     h="100%"
+                    // Walkthrough anchor (data-tour-via): a metric's category
+                    // cell, by the metric's name.
+                    data-tour-anchor="metric-categories"
+                    data-tour-hint="Open a metric's categories"
+                    data-tour-hint-named="Open the categories of {value}"
+                    data-tour-value={row.original.label}
                     onClick={() => {
                         // Prevent the cell from being clicked if the category or description popover is closing
                         if (
@@ -269,28 +305,28 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
 
                         table.setEditingCell(cell);
                     }}
-                    sx={{
+                    style={{
                         cursor: canManageTags ? 'pointer' : 'default',
                     }}
                 >
-                    {categories.length === 0 && hovered && canManageTags ? (
-                        <Group spacing={2}>
+                    {categories.length === 0 && canManageTags ? (
+                        <Group gap={2} className={styles.categoryPlaceholder}>
                             <MantineIcon
                                 color="ldGray.4"
                                 icon={IconPlus}
                                 size={12}
                             />
-                            <Text span fz="sm" color="ldGray.4">
-                                Click to add
+                            <Text span fz="sm" c="ldGray.4">
+                                {getUiString('metrics.addCategory')}
                             </Text>
                         </Group>
                     ) : (
                         <Group
-                            spacing="xxs"
+                            gap="xxs"
                             pos="relative"
                             w="100%"
                             h="100%"
-                            sx={{
+                            style={{
                                 rowGap: 'unset',
                             }}
                         >
@@ -313,15 +349,19 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
         enableEditing: false,
         size: 150,
         minSize: 100,
+        maxSize: 150,
         mantineTableBodyCellProps: () => {
             return {
-                sx: {
-                    justifyContent: 'center',
+                style: {
+                    textAlign: 'center',
                 },
             };
         },
-        Header: ({ column }) => (
+        Header: ({ column, table }) => (
             <MetricCatalogColumnHeaderCell
+                disabled={Boolean(
+                    table.getState().columnSizingInfo.isResizingColumn,
+                )}
                 Icon={Popularity}
                 tooltipLabel="Shows how many charts use this metric"
             >
@@ -337,8 +377,12 @@ export const MetricsCatalogColumns: MRT_ColumnDef<CatalogField>[] = [
         enableEditing: false,
         size: 200,
         minSize: 100,
-        Header: ({ column }) => (
+        maxSize: 200,
+        Header: ({ column, table }) => (
             <MetricCatalogColumnHeaderCell
+                disabled={Boolean(
+                    table.getState().columnSizingInfo.isResizingColumn,
+                )}
                 Icon={() => (
                     <MantineIcon icon={IconUser} size={14} color="ldGray.5" />
                 )}

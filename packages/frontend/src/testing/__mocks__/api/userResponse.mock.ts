@@ -1,6 +1,6 @@
 import {
-    type LightdashUserWithAbilityRules,
     OrganizationMemberRole,
+    type LightdashUserWithAbilityRules,
 } from '@lightdash/common';
 
 export function mockUserResponse(
@@ -20,6 +20,9 @@ export function mockUserResponse(
         isSetupComplete: true,
         role: OrganizationMemberRole.ADMIN,
         isActive: true,
+        timezone: null,
+        avatarUrl: null,
+        avatarGradient: null,
         abilityRules: [
             {
                 action: 'view',

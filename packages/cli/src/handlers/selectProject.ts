@@ -1,11 +1,93 @@
+import { LightdashError, Project, ProjectType } from '@lightdash/common';
 import inquirer from 'inquirer';
-import { Config } from '../config';
+import { Config, unsetPreviewProject } from '../config';
+import { getAgentConnectionSelection } from '../credentials';
 import GlobalState from '../globalState';
 import * as styles from '../styles';
+import { lightdashApi } from './dbt/apiClient';
+import { resolveProjectFlag } from './resolveProjectFlag';
 
 export type ProjectSelection = {
     projectUuid: string;
     isPreview: boolean;
+};
+
+const validatePreviewProject = async (
+    previewProjectUuid: string | undefined,
+): Promise<string | undefined> => {
+    if (!previewProjectUuid) {
+        return undefined;
+    }
+
+    try {
+        const project = await lightdashApi<Project>({
+            method: 'GET',
+            url: `/api/v1/projects/${previewProjectUuid}`,
+            body: undefined,
+        });
+
+        if (project.type === ProjectType.PREVIEW) {
+            return project.projectUuid;
+        }
+
+        await unsetPreviewProject();
+        return undefined;
+    } catch (error) {
+        if (
+            error instanceof LightdashError &&
+            (error.statusCode === 403 || error.statusCode === 404)
+        ) {
+            await unsetPreviewProject();
+            return undefined;
+        }
+
+        return previewProjectUuid;
+    }
+};
+
+const warnIgnoredPreview = async (
+    config: Config,
+    projectUuid: string,
+): Promise<void> => {
+    const previewProject = await validatePreviewProject(
+        config.context?.previewProject,
+    );
+    if (!previewProject || previewProject === projectUuid) {
+        return;
+    }
+    const previewName = config.context?.previewName;
+    const previewLabel = previewName ? `"${previewName}"` : previewProject;
+    GlobalState.log(
+        styles.warning(
+            `\nUsing project ${projectUuid} from LIGHTDASH_PROJECT; active preview ${previewLabel} ignored.\nPass --project ${previewProject} or unset LIGHTDASH_PROJECT to target the preview.\n`,
+        ),
+    );
+};
+
+/**
+ * Resolves an explicit project override: `--project` wins over
+ * LIGHTDASH_PROJECT, and either one bypasses an active preview.
+ * Returns undefined when neither is set.
+ */
+export const resolveProjectOverride = async (
+    config: Config,
+    explicitProject: string | undefined,
+): Promise<string | undefined> => {
+    if (getAgentConnectionSelection() !== null) {
+        const { resolveAgentConnectionProject } =
+            await import('../agentConnections/projectSelection');
+        return resolveAgentConnectionProject(explicitProject);
+    }
+    if (explicitProject) {
+        return resolveProjectFlag(explicitProject);
+    }
+    const envProject = process.env.LIGHTDASH_PROJECT;
+    if (!envProject) {
+        return undefined;
+    }
+    const projectUuid = await resolveProjectFlag(envProject);
+    await warnIgnoredPreview(config, projectUuid);
+    return projectUuid;
 };
 
 /**
@@ -13,21 +95,27 @@ export type ProjectSelection = {
  *
  * Priority:
  * 1. If `explicitProject` is provided (via --project flag), use it
- * 2. If there's an active preview and we're in interactive mode, ask the user
- * 3. In non-interactive mode with active preview, use preview project
- * 4. Fall back to the main project
+ * 2. If LIGHTDASH_PROJECT is set, use it (warns when a preview is ignored)
+ * 3. If there's an active preview and we're in interactive mode, ask the user
+ * 4. In non-interactive mode with active preview, use preview project
+ * 5. Fall back to the main project
  */
 export const selectProject = async (
     config: Config,
     explicitProject?: string,
 ): Promise<ProjectSelection | undefined> => {
-    // If explicit project provided via --project flag, use it
-    if (explicitProject) {
-        return { projectUuid: explicitProject, isPreview: false };
+    const overrideProjectUuid = await resolveProjectOverride(
+        config,
+        explicitProject,
+    );
+    if (overrideProjectUuid) {
+        return { projectUuid: overrideProjectUuid, isPreview: false };
     }
 
     const mainProject = config.context?.project;
-    const previewProject = config.context?.previewProject;
+    const previewProject = await validatePreviewProject(
+        config.context?.previewProject,
+    );
     const previewName = config.context?.previewName;
     const mainProjectName = config.context?.projectName;
 
@@ -44,6 +132,14 @@ export const selectProject = async (
     // Only main project available (no active preview)
     if (mainProject && !previewProject) {
         return { projectUuid: mainProject, isPreview: false };
+    }
+
+    // If the stored main project is the same UUID as the preview project,
+    // the config was set up incorrectly (e.g. an older `set-project` allowed
+    // selecting a preview). Treat the project as a preview only — otherwise
+    // the prompt would show the same project under both labels.
+    if (mainProject && previewProject && mainProject === previewProject) {
+        return { projectUuid: previewProject, isPreview: true };
     }
 
     // Both are available - need to choose
@@ -103,6 +199,7 @@ export const logSelectedProject = (
     const { projectUuid, isPreview } = selection;
     const previewName = config.context?.previewName;
     const mainProjectName = config.context?.projectName;
+    const mainProjectUuid = config.context?.project;
 
     if (isPreview) {
         const name = previewName ? `"${previewName}"` : projectUuid;
@@ -110,7 +207,14 @@ export const logSelectedProject = (
             `\n${styles.success(`${action} preview project:`)} ${name}\n`,
         );
     } else {
-        const name = mainProjectName ? `"${mainProjectName}"` : projectUuid;
+        // Only use the cached project name when the selection actually points
+        // at the config-set project. With --project, the UUID can differ and
+        // the cached name would be misleading.
+        const isConfigProject = mainProjectUuid === projectUuid;
+        const name =
+            isConfigProject && mainProjectName
+                ? `"${mainProjectName}"`
+                : projectUuid;
         GlobalState.log(`\n${styles.success(`${action} project:`)} ${name}\n`);
     }
 };

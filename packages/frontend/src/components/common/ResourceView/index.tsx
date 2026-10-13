@@ -1,4 +1,8 @@
-import { assertUnreachable } from '@lightdash/common';
+import {
+    assertUnreachable,
+    FeatureFlags,
+    ResourceViewItemType,
+} from '@lightdash/common';
 import {
     Box,
     Divider,
@@ -8,9 +12,10 @@ import {
     Text,
     Title,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconInfoCircle } from '@tabler/icons-react';
 import { useCallback, useMemo, useState, type FC } from 'react';
+import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import MantineIcon from '../MantineIcon';
 import ResourceActionHandlers from './ResourceActionHandlers';
 import ResourceEmptyState from './ResourceEmptyState';
@@ -35,7 +40,7 @@ interface ResourceViewProps extends ResourceViewCommonProps {
 
 const ResourceView: FC<ResourceViewProps> = ({
     view = ResourceViewType.LIST,
-    items: allItems,
+    items: suppliedItems,
     maxItems,
     tabs,
     gridProps = {},
@@ -45,6 +50,18 @@ const ResourceView: FC<ResourceViewProps> = ({
     hasReorder = false,
     defaultActiveTab,
 }) => {
+    const documentsFlag = useServerFeatureFlag(FeatureFlags.Documents);
+    const documentsEnabled =
+        documentsFlag.data?.enabled === true && !documentsFlag.isError;
+    const allItems = useMemo(
+        () =>
+            suppliedItems.filter(
+                (item) =>
+                    item.type !== ResourceViewItemType.DOCUMENT ||
+                    documentsEnabled,
+            ),
+        [suppliedItems, documentsEnabled],
+    );
     const [action, setAction] = useState<ResourceViewItemActionState>({
         type: ResourceViewItemAction.CLOSE,
     });
@@ -112,7 +129,7 @@ const ResourceView: FC<ResourceViewProps> = ({
 
     return (
         <>
-            <Paper withBorder>
+            <Paper>
                 {hasTabs || hasHeader ? (
                     <>
                         <Group>
@@ -146,18 +163,14 @@ const ResourceView: FC<ResourceViewProps> = ({
                                                                 icon={
                                                                     IconInfoCircle
                                                                 }
-                                                                color="ldGray.6"
+                                                                color="dimmed"
                                                             />
                                                         </Tooltip>
                                                     ) : null
                                                 }
                                             >
                                                 {tab.name ? (
-                                                    <Text
-                                                        c="ldGray.9"
-                                                        fz={15}
-                                                        fw={500}
-                                                    >
+                                                    <Text fz={15} fw={500}>
                                                         {tab.name}
                                                     </Text>
                                                 ) : null}
@@ -176,7 +189,7 @@ const ResourceView: FC<ResourceViewProps> = ({
                                     flex={1}
                                 >
                                     {headerProps?.title ? (
-                                        <Title order={5} fw={600}>
+                                        <Title order={5}>
                                             {headerProps.title}
                                         </Title>
                                     ) : null}
@@ -191,7 +204,7 @@ const ResourceView: FC<ResourceViewProps> = ({
                                         >
                                             <MantineIcon
                                                 icon={IconInfoCircle}
-                                                color="ldGray.6"
+                                                color="dimmed"
                                                 size={18}
                                             />
                                         </Tooltip>
@@ -221,6 +234,7 @@ const ResourceView: FC<ResourceViewProps> = ({
                         defaultColumnVisibility={
                             listProps.defaultColumnVisibility
                         }
+                        hideVerification={activeTabId === 'verified'}
                         onAction={handleAction}
                     />
                 ) : view === ResourceViewType.GRID ? (

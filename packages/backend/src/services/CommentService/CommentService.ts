@@ -2,32 +2,32 @@ import { subject } from '@casl/ability';
 import {
     Comment,
     DashboardDAO,
-    FeatureFlags,
     ForbiddenError,
-    LightdashUser,
     SessionUser,
 } from '@lightdash/common';
 import * as Sentry from '@sentry/node';
 import { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
+import { LightdashConfig } from '../../config/parseConfig';
 import { CommentModel } from '../../models/CommentModel/CommentModel';
 import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
-import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
 import { NotificationsModel } from '../../models/NotificationsModel/NotificationsModel';
 import { UserModel } from '../../models/UserModel';
 import { BaseService } from '../BaseService';
 import type { SpacePermissionService } from '../SpaceService/SpacePermissionService';
 
 type CommentServiceArguments = {
+    lightdashConfig: LightdashConfig;
     analytics: LightdashAnalytics;
     dashboardModel: DashboardModel;
     commentModel: CommentModel;
     notificationsModel: NotificationsModel;
     userModel: UserModel;
-    featureFlagModel: FeatureFlagModel;
     spacePermissionService: SpacePermissionService;
 };
 
 export class CommentService extends BaseService {
+    lightdashConfig: LightdashConfig;
+
     analytics: LightdashAnalytics;
 
     dashboardModel: DashboardModel;
@@ -38,26 +38,24 @@ export class CommentService extends BaseService {
 
     userModel: UserModel;
 
-    featureFlagModel: FeatureFlagModel;
-
     spacePermissionService: SpacePermissionService;
 
     constructor({
+        lightdashConfig,
         analytics,
         dashboardModel,
         commentModel,
         notificationsModel,
         userModel,
-        featureFlagModel,
         spacePermissionService,
     }: CommentServiceArguments) {
         super();
+        this.lightdashConfig = lightdashConfig;
         this.analytics = analytics;
         this.dashboardModel = dashboardModel;
         this.commentModel = commentModel;
         this.notificationsModel = notificationsModel;
         this.userModel = userModel;
-        this.featureFlagModel = featureFlagModel;
         this.spacePermissionService = spacePermissionService;
     }
 
@@ -78,17 +76,8 @@ export class CommentService extends BaseService {
         }
     }
 
-    private async isFeatureEnabled(
-        user: Pick<
-            LightdashUser,
-            'userUuid' | 'organizationUuid' | 'organizationName'
-        >,
-    ) {
-        const featureFlag = await this.featureFlagModel.get({
-            user,
-            featureFlagId: FeatureFlags.DashboardComments,
-        });
-        if (!featureFlag.enabled)
+    private throwIfDisabled() {
+        if (!this.lightdashConfig.dashboardComments.enabled)
             throw new ForbiddenError('Feature not enabled');
     }
 
@@ -153,17 +142,19 @@ export class CommentService extends BaseService {
         replyTo: string | null,
         mentions: string[],
     ): Promise<string> {
-        await this.isFeatureEnabled(user);
+        this.throwIfDisabled();
 
         const dashboard =
             await this.dashboardModel.getByIdOrSlug(dashboardUuid);
 
+        const auditedAbility = this.createAuditedAbility(user);
         if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'create',
                 subject('DashboardComments', {
-                    projectUuid: dashboard.projectUuid,
                     organizationUuid: dashboard.organizationUuid,
+                    projectUuid: dashboard.projectUuid,
+                    metadata: { dashboardName: dashboard.name },
                 }),
             )
         ) {
@@ -214,18 +205,25 @@ export class CommentService extends BaseService {
     async findCommentsForDashboard(
         user: SessionUser,
         dashboardUuidOrSlug: string,
+        options?: { projectUuid?: string; resolved?: boolean },
     ): Promise<Record<string, Comment[]>> {
-        await this.isFeatureEnabled(user);
+        this.throwIfDisabled();
 
-        const dashboard =
-            await this.dashboardModel.getByIdOrSlug(dashboardUuidOrSlug);
+        const dashboard = await this.dashboardModel.getByIdOrSlug(
+            dashboardUuidOrSlug,
+            {
+                projectUuid: options?.projectUuid,
+            },
+        );
 
+        const auditedAbility = this.createAuditedAbility(user);
         if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'view',
                 subject('DashboardComments', {
                     organizationUuid: dashboard.organizationUuid,
                     projectUuid: dashboard.projectUuid,
+                    metadata: { dashboardName: dashboard.name },
                 }),
             )
         ) {
@@ -238,11 +236,12 @@ export class CommentService extends BaseService {
             );
         }
 
-        const canUserRemoveAnyComment = user.ability.can(
+        const canUserRemoveAnyComment = auditedAbility.can(
             'manage',
             subject('DashboardComments', {
                 organizationUuid: dashboard.organizationUuid,
                 projectUuid: dashboard.projectUuid,
+                metadata: { dashboardName: dashboard.name },
             }),
         );
 
@@ -250,6 +249,7 @@ export class CommentService extends BaseService {
             dashboard.uuid,
             user.userUuid,
             canUserRemoveAnyComment,
+            options?.resolved ?? false,
         );
     }
 
@@ -257,17 +257,20 @@ export class CommentService extends BaseService {
         user: SessionUser,
         dashboardUuid: string,
         commentId: string,
+        resolved: boolean,
     ): Promise<void> {
-        await this.isFeatureEnabled(user);
+        this.throwIfDisabled();
 
         const dashboard =
             await this.dashboardModel.getByIdOrSlug(dashboardUuid);
+        const auditedAbility = this.createAuditedAbility(user);
         if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'manage',
                 subject('DashboardComments', {
                     organizationUuid: dashboard.organizationUuid,
                     projectUuid: dashboard.projectUuid,
+                    metadata: { dashboardName: dashboard.name },
                 }),
             )
         ) {
@@ -280,10 +283,13 @@ export class CommentService extends BaseService {
             );
         }
 
-        const comment = await this.commentModel.getComment(commentId);
+        const comment = await this.commentModel.getComment(
+            dashboard.uuid,
+            commentId,
+        );
 
         this.analytics.track({
-            event: 'comment.resolved',
+            event: resolved ? 'comment.resolved' : 'comment.unresolved',
             userId: user.userUuid,
             properties: {
                 isReply: !!comment.replyTo,
@@ -294,7 +300,9 @@ export class CommentService extends BaseService {
             },
         });
 
-        return this.commentModel.resolveComment(commentId);
+        return resolved
+            ? this.commentModel.resolveComment(dashboard.uuid, commentId)
+            : this.commentModel.unresolveComment(dashboard.uuid, commentId);
     }
 
     async deleteComment(
@@ -302,7 +310,7 @@ export class CommentService extends BaseService {
         dashboardUuid: string,
         commentId: string,
     ): Promise<void> {
-        await this.isFeatureEnabled(user);
+        this.throwIfDisabled();
 
         const dashboard =
             await this.dashboardModel.getByIdOrSlug(dashboardUuid);
@@ -313,27 +321,36 @@ export class CommentService extends BaseService {
             );
         }
 
-        const canRemoveAnyComment = user.ability.can(
+        const auditedAbility = this.createAuditedAbility(user);
+        const canRemoveAnyComment = auditedAbility.can(
             'manage',
             subject('DashboardComments', {
                 organizationUuid: dashboard.organizationUuid,
                 projectUuid: dashboard.projectUuid,
+                metadata: { dashboardName: dashboard.name },
             }),
         );
 
-        const comment = await this.commentModel.getComment(commentId);
+        const comment = await this.commentModel.getComment(
+            dashboard.uuid,
+            commentId,
+        );
+        const isOwner = comment.userUuid === user.userUuid;
 
-        if (canRemoveAnyComment) {
-            await this.commentModel.deleteComment(commentId);
-        } else {
-            const isOwner = comment.userUuid === user.userUuid;
-
-            if (isOwner) {
-                await this.commentModel.deleteComment(commentId);
-            }
-
+        if (!canRemoveAnyComment && !isOwner) {
             throw new ForbiddenError();
         }
+
+        if (!canRemoveAnyComment && isOwner) {
+            this.logBypassEvent(user, 'delete', {
+                type: 'DashboardComments',
+                organizationUuid: dashboard.organizationUuid,
+                projectUuid: dashboard.projectUuid,
+                metadata: { dashboardName: dashboard.name },
+            });
+        }
+
+        await this.commentModel.deleteComment(dashboard.uuid, commentId);
 
         this.analytics.track({
             event: 'comment.deleted',
@@ -342,7 +359,7 @@ export class CommentService extends BaseService {
                 isReply: !!comment.replyTo,
                 dashboardTileUuid: comment.dashboardTileUuid,
                 dashboardUuid,
-                isOwner: comment.userUuid === user.userUuid,
+                isOwner,
                 hasMention: comment.mentions.length > 0,
             },
         });

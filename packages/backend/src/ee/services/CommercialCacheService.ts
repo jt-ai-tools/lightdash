@@ -1,13 +1,25 @@
+import { FeatureFlags, type QueryResultProducer } from '@lightdash/common';
 import { type S3ResultsFileStorageClient } from '../../clients/ResultsFileStorageClients/S3ResultsFileStorageClient';
-import type { LightdashConfig } from '../../config/parseConfig';
+import { type LightdashConfig } from '../../config/parseConfig';
+import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
+import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
 import { QueryHistoryModel } from '../../models/QueryHistoryModel/QueryHistoryModel';
-import type { ICacheService } from '../../services/CacheService/ICacheService';
+import type {
+    CacheServiceUser,
+    ICacheService,
+} from '../../services/CacheService/ICacheService';
 import { type CacheHitCacheResult } from '../../services/CacheService/types';
+import {
+    isConnectionProducedQuery,
+    isSameResultProducer,
+} from '../../utils/queryResultProducer';
 
 type CacheServiceDependencies = {
-    queryHistoryModel: QueryHistoryModel;
     lightdashConfig: LightdashConfig;
+    queryHistoryModel: QueryHistoryModel;
+    projectModel: ProjectModel;
     storageClient: S3ResultsFileStorageClient;
+    featureFlagModel: FeatureFlagModel;
 };
 
 // Buffer time to ensure cache doesn't expire while being fetched
@@ -15,44 +27,103 @@ type CacheServiceDependencies = {
 const DEFAULT_CACHE_EXPIRY_BUFFER_MS = 10 * 60 * 1000; // 10 minutes in milliseconds
 
 export class CommercialCacheService implements ICacheService {
+    private readonly lightdashConfig: LightdashConfig;
+
     private readonly queryHistoryModel: QueryHistoryModel;
 
-    private readonly lightdashConfig: LightdashConfig;
+    private readonly projectModel: ProjectModel;
+
+    private readonly featureFlagModel: FeatureFlagModel;
 
     storageClient: S3ResultsFileStorageClient;
 
     constructor({
-        queryHistoryModel,
         lightdashConfig,
+        queryHistoryModel,
+        projectModel,
         storageClient,
+        featureFlagModel,
     }: CacheServiceDependencies) {
-        this.queryHistoryModel = queryHistoryModel;
         this.lightdashConfig = lightdashConfig;
+        this.queryHistoryModel = queryHistoryModel;
+        this.projectModel = projectModel;
         this.storageClient = storageClient;
+        this.featureFlagModel = featureFlagModel;
     }
 
-    get isEnabled() {
-        return this.lightdashConfig.results.cacheEnabled;
+    async isResultsCacheEnabled(
+        user: CacheServiceUser | undefined,
+    ): Promise<boolean> {
+        const { enabled } = await this.featureFlagModel.get({
+            user,
+            featureFlagId: FeatureFlags.ResultsCacheEnabled,
+        });
+        return enabled;
     }
 
     async findCachedResultsFile(
         projectUuid: string,
         cacheKey: string,
+        user: CacheServiceUser,
+        requesterProducer: QueryResultProducer | null = null,
+        resolvedIdentityEnabled: boolean | null = null,
     ): Promise<CacheHitCacheResult | null> {
-        // If caching is disabled, return null
-        if (!this.isEnabled) {
+        // Self-protect: gate every cache lookup on the FF, regardless of how
+        // the caller arrived here. Belt-and-suspenders for embed and any
+        // future caller that might forget the outer gate.
+        if (!(await this.isResultsCacheEnabled(user))) {
             return null;
         }
 
+        const identityEnabled =
+            resolvedIdentityEnabled ??
+            (
+                await this.featureFlagModel.get({
+                    user,
+                    featureFlagId: FeatureFlags.AgentIdentity,
+                })
+            ).enabled;
+        if (
+            identityEnabled &&
+            (!requesterProducer || requesterProducer.agentIdentity !== null)
+        )
+            return null;
+
         // Find recent query with matching cache key
-        const latestMatchingQuery =
-            await this.queryHistoryModel.findMostRecentByCacheKey(
+        const [latestMatchingQuery, staleTimeSeconds] = await Promise.all([
+            this.queryHistoryModel.findMostRecentByCacheKey(
                 cacheKey,
                 projectUuid,
-            );
+                {
+                    ...(identityEnabled ? { excludeAgentClaims: true } : {}),
+                    excludeAgentProduced:
+                        identityEnabled ||
+                        this.lightdashConfig?.ai
+                            ?.agentResultIdentityCheckEnabled !== false,
+                },
+            ),
+            this.projectModel.getEffectiveResultsCacheTtlSeconds(projectUuid),
+        ]);
 
-        const staleTimeMilliseconds =
-            this.lightdashConfig.results.cacheStateTimeSeconds * 1000;
+        if (
+            identityEnabled &&
+            (!latestMatchingQuery?.resultProducer ||
+                latestMatchingQuery.resultProducer.agentIdentity !== null ||
+                !requesterProducer ||
+                !isSameResultProducer(
+                    latestMatchingQuery.resultProducer,
+                    requesterProducer,
+                ))
+        )
+            return null;
+
+        if (
+            latestMatchingQuery?.queryHistory &&
+            isConnectionProducedQuery(latestMatchingQuery.queryHistory)
+        )
+            return null;
+
+        const staleTimeMilliseconds = staleTimeSeconds * 1000;
 
         // If stale time is greater than quadruple default buffer, use default buffer
         // Otherwise, use quarter of stale time
@@ -62,7 +133,14 @@ export class CommercialCacheService implements ICacheService {
                 ? DEFAULT_CACHE_EXPIRY_BUFFER_MS
                 : staleTimeMilliseconds / 4;
 
-        // Case 1: Valid cache exists with sufficient buffer time
+        const cacheExpiresAt = latestMatchingQuery?.resultsUpdatedAt
+            ? new Date(
+                  latestMatchingQuery.resultsUpdatedAt.getTime() +
+                      staleTimeMilliseconds,
+              )
+            : null;
+
+        // Availability can outlive cache freshness for retained results.
         if (
             latestMatchingQuery &&
             latestMatchingQuery.resultsFileName &&
@@ -71,16 +149,21 @@ export class CommercialCacheService implements ICacheService {
             latestMatchingQuery.resultsExpiresAt &&
             latestMatchingQuery.resultsUpdatedAt &&
             latestMatchingQuery.totalRowCount !== null &&
+            cacheExpiresAt &&
+            cacheExpiresAt > new Date(Date.now() + expiryBuffer) &&
             latestMatchingQuery.resultsExpiresAt >
                 new Date(Date.now() + expiryBuffer)
         ) {
             return {
                 cacheHit: true,
+                queryUuid: latestMatchingQuery.queryUuid,
+                queryHistory: latestMatchingQuery.queryHistory,
+                resultProducer: latestMatchingQuery.resultProducer ?? null,
                 cacheKey: latestMatchingQuery.cacheKey,
                 fileName: latestMatchingQuery.resultsFileName,
                 createdAt: latestMatchingQuery.resultsCreatedAt,
                 updatedAt: latestMatchingQuery.resultsUpdatedAt,
-                expiresAt: latestMatchingQuery.resultsExpiresAt,
+                expiresAt: cacheExpiresAt,
                 totalRowCount: latestMatchingQuery.totalRowCount,
                 columns: latestMatchingQuery.columns,
                 originalColumns: latestMatchingQuery.originalColumns,

@@ -1,22 +1,36 @@
 import {
-    FilterType,
     createFilterRuleFromField,
+    type FilterOperator,
+    FilterType,
     getFilterRuleFromFieldWithDefaultValue,
     getFilterTypeFromItem,
     getItemId,
     isDateItem,
-    type FilterRule,
+    isField,
+    isRelativeDateFilterOperator,
+    isWithValueFilter,
     type FilterableField,
+    type FilterRule,
 } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
-import { ActionIcon, Box, Group, Select, Tooltip } from '@mantine/core';
+import {
+    ActionIcon,
+    Box,
+    Group,
+    Menu,
+    Select,
+    Tooltip,
+    useMatches,
+} from '@mantine/core';
 import { IconDots, IconX } from '@tabler/icons-react';
 import { memo, useCallback, useMemo, type FC } from 'react';
+import { useUiStrings } from '../../../ee/providers/Embed/useUiStrings';
 import FieldSelect from '../FieldSelect';
 import MantineIcon from '../MantineIcon';
 import { FILTER_SELECT_LIMIT } from './constants';
 import FilterInputComponent from './FilterInputs';
 import { getFilterOperatorOptions } from './FilterInputs/utils';
+import FilterOperatorOption from './FilterOperatorOption';
+import classes from './FilterRuleForm.module.css';
 import useFiltersContext from './useFiltersContext';
 
 type Props = {
@@ -28,6 +42,9 @@ type Props = {
     onConvertToGroup?: () => void;
 };
 
+const isHiddenField = (field: FilterableField) =>
+    isField(field) && field.hidden;
+
 const FilterRuleForm: FC<Props> = memo(
     ({
         fields,
@@ -38,6 +55,8 @@ const FilterRuleForm: FC<Props> = memo(
         onConvertToGroup,
     }) => {
         const { popoverProps, baseTable } = useFiltersContext();
+        const getUiString = useUiStrings();
+        const wrap = useMatches({ base: 'wrap', sm: 'nowrap' } as const);
         const activeField = useMemo(() => {
             return fields.find(
                 (field) => getItemId(field) === filterRule.target.fieldId,
@@ -51,8 +70,12 @@ const FilterRuleForm: FC<Props> = memo(
         }, [activeField]);
 
         const filterOperatorOptions = useMemo(() => {
-            return getFilterOperatorOptions(filterType);
-        }, [filterType]);
+            return getFilterOperatorOptions(
+                filterType,
+                activeField,
+                getUiString,
+            );
+        }, [filterType, activeField, getUiString]);
 
         const onFieldChange = useCallback(
             (fieldId: string) => {
@@ -87,39 +110,82 @@ const FilterRuleForm: FC<Props> = memo(
         );
         const isRequired = filterRule.required;
         const isRequiredLabel = isRequired
-            ? 'This is a required filter defined in the model configuration and cannot be removed.'
+            ? getUiString('filters.requiredFilterTooltip')
             : '';
+        const isActiveFieldHidden = activeField
+            ? isHiddenField(activeField)
+            : false;
+
+        const availableFields = useMemo(() => {
+            const selectableFields = fields.filter(
+                (field) =>
+                    !isHiddenField(field) ||
+                    getItemId(field) === filterRule.target.fieldId,
+            );
+            if (!isRequired) {
+                return selectableFields;
+            }
+            // For required filters, restrict to same-type sub-dimensions
+            const baseFieldId = filterRule.target.fieldId;
+            return selectableFields.filter(
+                (field) =>
+                    getItemId(field).startsWith(baseFieldId) &&
+                    getFilterTypeFromItem(field) === filterType,
+            );
+        }, [isRequired, fields, filterRule.target.fieldId, filterType]);
+
+        const isFieldSelectDisabled =
+            !isEditMode ||
+            isActiveFieldHidden ||
+            (isRequired && availableFields.length <= 1);
+        const fieldSelectDisabledReason = isActiveFieldHidden
+            ? 'Hidden fields cannot be changed.'
+            : isRequiredLabel;
+
+        const isOperatorValid = useMemo(
+            () =>
+                filterOperatorOptions.some(
+                    (o) => o.value === filterRule.operator,
+                ),
+            [filterOperatorOptions, filterRule.operator],
+        );
 
         if (!activeField) {
             return null;
         }
 
+        if (!isOperatorValid) {
+            return null;
+        }
+
         return (
             <Group
-                noWrap
+                className={classes.rule}
+                wrap={wrap}
                 align="start"
-                spacing="xs"
+                gap="xs"
                 data-testid="FilterRuleForm/filter-rule"
             >
                 <Tooltip
-                    label={isRequiredLabel}
-                    disabled={!isRequired}
-                    withinPortal
-                    variant="xs"
-                    multiline
+                    label={fieldSelectDisabledReason}
+                    disabled={!fieldSelectDisabledReason}
                 >
-                    <Box>
+                    <Box className={classes.field}>
                         <FieldSelect
                             size="xs"
-                            disabled={!isEditMode || isRequired}
-                            withinPortal={popoverProps?.withinPortal}
+                            disabled={isFieldSelectDisabled}
+                            comboboxProps={{
+                                withinPortal: popoverProps?.withinPortal,
+                            }}
                             onDropdownOpen={popoverProps?.onOpen}
                             onDropdownClose={popoverProps?.onClose}
                             hasGrouping
                             item={activeField}
-                            items={fields}
+                            items={availableFields}
                             onChange={(field) => {
-                                if (!field) return;
+                                if (!field) {
+                                    return;
+                                }
                                 onFieldChange(getItemId(field));
                             }}
                             baseTable={baseTable}
@@ -129,22 +195,50 @@ const FilterRuleForm: FC<Props> = memo(
                 <Select
                     limit={FILTER_SELECT_LIMIT}
                     size="xs"
-                    w="175px"
-                    sx={{ flexShrink: 0 }}
-                    withinPortal={popoverProps?.withinPortal}
+                    w={{ base: '100%', sm: 175 }}
+                    flex={{ base: '1 1 100%', sm: '0 0 auto' }}
                     onDropdownOpen={popoverProps?.onOpen}
                     onDropdownClose={popoverProps?.onClose}
                     disabled={!isEditMode}
                     value={filterRule.operator}
                     data={filterOperatorOptions}
+                    renderOption={({ option }) => (
+                        <FilterOperatorOption
+                            operator={option.value as FilterOperator}
+                            label={option.label}
+                        />
+                    )}
                     onChange={(value) => {
                         if (!value) return;
+
+                        const operator = value as FilterRule['operator'];
+                        // Absolute date values are already normalized. Running
+                        // them through the defaults again can shift timezones.
+                        const shouldPreserveValues =
+                            filterType === FilterType.DATE &&
+                            (filterRule.values?.length ?? 0) > 0 &&
+                            isWithValueFilter(filterRule.operator) &&
+                            isWithValueFilter(operator) &&
+                            !isRelativeDateFilterOperator(
+                                filterRule.operator,
+                            ) &&
+                            !isRelativeDateFilterOperator(operator);
+
+                        if (shouldPreserveValues) {
+                            onChange({
+                                ...filterRule,
+                                operator,
+                                settings: undefined,
+                            });
+                            return;
+                        }
+
                         onChange(
                             getFilterRuleFromFieldWithDefaultValue(
                                 activeField,
                                 {
                                     ...filterRule,
-                                    operator: value as FilterRule['operator'],
+                                    operator,
                                 },
                                 filterRule.values ?? [],
                             ),
@@ -163,13 +257,7 @@ const FilterRuleForm: FC<Props> = memo(
 
                 {isEditMode &&
                     (!onConvertToGroup ? (
-                        <Tooltip
-                            label={isRequiredLabel}
-                            disabled={!isRequired}
-                            withinPortal
-                            variant="xs"
-                            multiline
-                        >
+                        <Tooltip label={isRequiredLabel} disabled={!isRequired}>
                             <span>
                                 <ActionIcon
                                     onClick={onDelete}
@@ -181,14 +269,9 @@ const FilterRuleForm: FC<Props> = memo(
                             </span>
                         </Tooltip>
                     ) : isRequired ? (
-                        <Tooltip
-                            label={isRequiredLabel}
-                            withinPortal
-                            variant="xs"
-                            multiline
-                        >
+                        <Tooltip label={isRequiredLabel}>
                             <span>
-                                <ActionIcon variant="subtle" disabled>
+                                <ActionIcon disabled>
                                     <IconDots size="20" />
                                 </ActionIcon>
                             </span>
@@ -196,15 +279,13 @@ const FilterRuleForm: FC<Props> = memo(
                     ) : (
                         <Menu
                             position="bottom-end"
-                            shadow="md"
                             closeOnItemClick
                             withArrow
                             arrowPosition="center"
-                            withinPortal
                         >
                             <Menu.Target>
                                 <Box>
-                                    <ActionIcon variant="subtle">
+                                    <ActionIcon>
                                         <IconDots size="20" />
                                     </ActionIcon>
                                 </Box>

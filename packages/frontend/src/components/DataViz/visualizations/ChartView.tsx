@@ -11,7 +11,7 @@ import EChartsReact, {
 type Props = {
     onChartReady?: EChartsReactProps['onChartReady'];
     config: AllVizChartConfig | undefined;
-    spec: EChartsReactProps['option'] | undefined;
+    spec: EChartsReactProps['option'];
     isLoading: boolean;
     error?: SerializedError | null;
 } & Partial<Pick<EChartsReactProps, 'style'>>;
@@ -54,7 +54,12 @@ const ChartView = memo<Props>(
         }
 
         return (
-            <Box h="100%" w="100%" data-testid={`chart-view-${config?.type}`}>
+            <Box
+                h="100%"
+                w="100%"
+                pos="relative"
+                data-testid={`chart-view-${config?.type}`}
+            >
                 <LoadingOverlay
                     visible={isLoading}
                     loaderProps={{ color: 'gray' }}

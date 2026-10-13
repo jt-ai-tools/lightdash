@@ -1,124 +1,699 @@
 import { subject } from '@casl/ability';
 import {
+    assertUnreachable,
     FeatureFlags,
+    getDocumentDeleteAccess,
+    getHighestSpaceRole,
+    getOrganizationRoleForRoleSetSpaceAccess,
+    getProjectRoleForRoleSetSpaceAccess,
     NotFoundError,
+    OrganizationMemberRole,
+    ParameterError,
+    ProjectMemberRole,
     resolveSpaceAccess,
-    resolveSpaceAccessWithInheritance,
+    SpaceMemberRole,
     type AbilityAction,
+    type GrantSource,
+    type KnexPaginateArgs,
+    type KnexPaginatedData,
     type OrganizationSpaceAccess,
     type ProjectSpaceAccess,
     type SessionUser,
     type SpaceAccess,
+    type SpaceAccessListFilters,
     type SpaceAccessUserMetadata,
     type SpaceGroup,
+    type SpaceShare,
 } from '@lightdash/common';
-import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
+import { Knex } from 'knex';
+import { type AppAccessModel } from '../../models/AppAccessModel';
+import { type DashboardAccessModel } from '../../models/DashboardAccessModel';
+import { type DirectAccess } from '../../models/directAccessModelUtils';
+import { type DocumentAccessModel } from '../../models/DocumentAccessModel';
+import type { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
+import { type SavedChartAccessModel } from '../../models/SavedChartAccessModel';
+import { type SavedSqlAccessModel } from '../../models/SavedSqlAccessModel';
 import { SpaceModel } from '../../models/SpaceModel';
-import { SpacePermissionModel } from '../../models/SpacePermissionModel';
+import {
+    SpacePermissionModel,
+    type OrganizationSpaceAccessWithCustomRole,
+    type ProjectSpaceAccessWithCustomRole,
+} from '../../models/SpacePermissionModel';
 import { BaseService } from '../BaseService';
+import { type DirectAccessFeatureGate } from '../DirectAccess/DirectAccessFeatureGate';
+
+export type SpaceAdmin = {
+    userUuid: string;
+    source: 'organization' | 'project';
+};
 
 export type SpaceAccessContextForCasl = {
     organizationUuid: string;
     projectUuid: string;
-    isPrivate: boolean;
+    inheritsFromOrgOrProject: boolean;
     access: SpaceAccess[];
+    // Admins reach the space via CASL even when `resolveSpaceAccess` omits
+    // them (private spaces with no direct entry). Surfaced for audit display.
+    admins: SpaceAdmin[];
 };
 
+export type AccessTarget =
+    | { type: 'space'; spaceUuid: string }
+    | { type: 'document'; documentUuid: string; spaceUuid: string }
+    | {
+          type: 'personalDocument';
+          organizationUuid: string;
+          projectUuid: string;
+          createdByUserUuid: string | null;
+          spaceUuid: null;
+      }
+    | { type: 'dashboard'; dashboardUuid: string; spaceUuid: string }
+    | {
+          type: 'chart';
+          chartUuid: string;
+          dashboardUuid: string | null;
+          spaceUuid: string;
+      }
+    | {
+          type: 'app';
+          appUuid: string;
+          organizationUuid: string;
+          projectUuid: string;
+          spaceUuid: string | null;
+      }
+    | { type: 'sqlChart'; savedSqlUuid: string; spaceUuid: string };
+
+// A content type's direct-grant lookup (e.g. DashboardAccessModel.getUserAccess
+// or SavedChartAccessModel.getUserAccess), pre-bound to the requesting user.
+type GrantLookup = (
+    resourceUuids: string[],
+    opts: {
+        organizationUuid: string;
+        trx?: Knex;
+        includeDeleted?: boolean;
+    },
+) => Promise<Record<string, DirectAccess>>;
+
+type DirectGrantTarget = {
+    source: GrantSource;
+    resourceUuid: string;
+    resourceLabel: string;
+    spaceUuid: string | null;
+};
+
+export type AccessContextForCasl = SpaceAccessContextForCasl & {
+    /**
+     * True when the requester has no space-derived access path (membership,
+     * inheritance, or admin standing) and reaches the content only through
+     * direct content grants.
+     */
+    directOnly: boolean;
+};
+
+export type AccessResult<T extends AccessTarget = AccessTarget> = {
+    target: T;
+    context: AccessContextForCasl | undefined;
+};
+
+/**
+ * Correlates a space-target batch by spaceUuid. Only valid for space targets,
+ * where the context is a pure function of the space — grant-aware targets can
+ * carry different contexts within one space and must correlate per target.
+ */
+export const spaceContextsByUuid = (
+    results: AccessResult<{ type: 'space'; spaceUuid: string }>[],
+): Record<string, AccessContextForCasl | undefined> =>
+    Object.fromEntries(
+        results.map(({ target, context }) => [target.spaceUuid, context]),
+    );
+
 export class SpacePermissionService extends BaseService {
-    constructor(
-        private readonly featureFlagModel: FeatureFlagModel,
-        private readonly spaceModel: SpaceModel,
-        private readonly spacePermissionModel: SpacePermissionModel,
-    ) {
+    private readonly spaceModel: SpaceModel;
+
+    private readonly spacePermissionModel: SpacePermissionModel;
+
+    private readonly appAccessModel: AppAccessModel;
+
+    private readonly documentAccessModel: DocumentAccessModel;
+    private readonly featureFlagModel: FeatureFlagModel;
+
+    private readonly dashboardAccessModel: DashboardAccessModel;
+
+    private readonly savedChartAccessModel: SavedChartAccessModel;
+
+    private readonly savedSqlAccessModel: SavedSqlAccessModel;
+
+    private readonly directAccessFeatureGate: DirectAccessFeatureGate;
+
+    constructor({
+        spaceModel,
+        spacePermissionModel,
+        appAccessModel,
+        documentAccessModel,
+        featureFlagModel,
+        dashboardAccessModel,
+        savedChartAccessModel,
+        savedSqlAccessModel,
+        directAccessFeatureGate,
+    }: {
+        spaceModel: SpaceModel;
+        spacePermissionModel: SpacePermissionModel;
+        appAccessModel: AppAccessModel;
+        documentAccessModel: DocumentAccessModel;
+        featureFlagModel: FeatureFlagModel;
+        dashboardAccessModel: DashboardAccessModel;
+        savedChartAccessModel: SavedChartAccessModel;
+        savedSqlAccessModel: SavedSqlAccessModel;
+        directAccessFeatureGate: DirectAccessFeatureGate;
+    }) {
         super();
+        this.spaceModel = spaceModel;
+        this.spacePermissionModel = spacePermissionModel;
+        this.appAccessModel = appAccessModel;
+        this.documentAccessModel = documentAccessModel;
+        this.featureFlagModel = featureFlagModel;
+        this.dashboardAccessModel = dashboardAccessModel;
+        this.savedChartAccessModel = savedChartAccessModel;
+        this.savedSqlAccessModel = savedSqlAccessModel;
+        this.directAccessFeatureGate = directAccessFeatureGate;
     }
 
     /**
-     * Checks if the actor has access to all the space uuids
+     * Checks if the user has access to all the space uuids
      * @param action - The action to check permissions for
-     * @param actor - The session user to check permissions for
+     * @param user - The session user to check permissions for
      * @param spaceUuids - The space uuids to check permissions for
      * @returns The access context for the given space uuids
      */
     async can(
         action: AbilityAction,
-        actor: Pick<SessionUser, 'ability' | 'userUuid'>,
+        user: SessionUser,
         spaceUuids: string[] | string,
+        { trx }: { trx?: Knex } = {},
     ): Promise<boolean> {
         const spaceUuidsArray = Array.isArray(spaceUuids)
             ? spaceUuids
             : [spaceUuids];
 
-        const accessContext = await this.getSpacesCaslContext(spaceUuidsArray, {
-            userUuid: actor.userUuid,
-        });
+        const accessContext = await this.getSpacesCaslContext(
+            spaceUuidsArray,
+            {
+                userUuid: user.userUuid,
+            },
+            { trx },
+        );
 
-        return Object.values(accessContext).every((access) =>
-            actor.ability.can(action, subject('Space', access)),
+        const uniqueSpaceUuids = [...new Set(spaceUuidsArray)];
+        if (
+            uniqueSpaceUuids.some(
+                (spaceUuid) => accessContext[spaceUuid] === undefined,
+            )
+        ) {
+            return false;
+        }
+
+        const auditedAbility = this.createAuditedAbility(user);
+        return uniqueSpaceUuids.every((spaceUuid) =>
+            auditedAbility.can(
+                action,
+                subject('Space', accessContext[spaceUuid]),
+            ),
         );
     }
 
     /**
-     * Gets the accessible space uuids for a given action and actor
+     * Gets the accessible space uuids for a given action and user
      * @param action - The action to check permissions for
-     * @param actor - The session user to check permissions for
+     * @param user - The session user to check permissions for
      * @param spaceUuids - The space uuids to get the accessible space uuids for
      * @returns The accessible space uuids
      */
     async getAccessibleSpaceUuids(
         action: AbilityAction,
-        actor: Pick<SessionUser, 'ability' | 'userUuid'>,
+        user: SessionUser,
         spaceUuids: string[],
     ): Promise<string[]> {
         const accessContext = await this.getSpacesCaslContext(spaceUuids, {
-            userUuid: actor.userUuid,
+            userUuid: user.userUuid,
         });
 
-        return Object.entries(accessContext)
-            .filter(([_, access]) =>
-                actor.ability.can(action, subject('Space', access)),
-            )
+        const auditedAbility = this.createAuditedAbility(user);
+        const entries = Object.entries(accessContext);
+        const accessResults = auditedAbility.canBulk(
+            action,
+            entries.map(([spaceUuid, access]) =>
+                subject('Space', {
+                    ...access,
+                    metadata: { spaceUuid },
+                }),
+            ),
+        );
+
+        return entries
+            .filter((_, index) => accessResults[index])
             .map(([spaceUuid]) => spaceUuid);
     }
 
-    /**
-     * Returns the CASL context for a space (organizationUuid, projectUuid, isPrivate, access)
-     * without performing any permission checks. Callers use this to build their own
-     * `subject(...)` checks when the resource type is not Space.
-     */
-    async getSpaceAccessContext(
+    /** Returns persisted direct grants without inherited or expanded access. */
+    async getRawDirectAccess(spaceUuids: string[]) {
+        return this.spacePermissionModel.getRawDirectAccess(spaceUuids);
+    }
+
+    async getDocumentDeleteAccessContext(
         userUuid: string,
-        spaceUuid: string,
-    ): Promise<SpaceAccessContextForCasl> {
-        const accessContext = await this.getSpacesCaslContext([spaceUuid], {
-            userUuid,
-        });
-        const ctx = accessContext[spaceUuid];
-        if (!ctx) {
-            throw new NotFoundError(
-                `Couldn't find access context for space ${spaceUuid}`,
-            );
-        }
-        return ctx;
+        target: Extract<
+            AccessTarget,
+            { type: 'document' | 'personalDocument' }
+        >,
+    ): Promise<AccessContextForCasl> {
+        const context = await this.resolveAccess(userUuid, target);
+        return { ...context, access: getDocumentDeleteAccess(context.access) };
     }
 
     /**
-     * Gets the access context for a list of space uuids
-     * @param userUuid - The user uuid to get the access context for
-     * @param spaceUuids - The space uuids to get the access context for
-     * @returns The access context for the given space uuids
+     * Resolves effective access to one supported target. Space permissions are
+     * always the baseline; direct content grants are added when applicable.
+     *
+     * THE BOUNDARY RULE. A direct grant on a dashboard authorizes operations
+     * whose effect stays INSIDE that dashboard; anything that reads, moves, or
+     * copies content BEYOND the dashboard requires real space access.
+     *
+     * This turns on one distinction:
+     *   - A chart OWNED BY a dashboard (`saved_queries.dashboard_uuid` set,
+     *     `space_id` null) inherits the dashboard's grants — sharing the
+     *     dashboard shares its own charts.
+     *   - A chart that merely LIVES IN A SPACE (`space_id` set) is governed by
+     *     space access only — sharing a dashboard that references it grants
+     *     nothing over it.
+     * Why: the grant's scope is "you may work within this dashboard", so it
+     * must never become a lever to reach a chart's private space or to relocate
+     * content into a space the granter never saw.
+     *
+     * Mechanically: returns the space CASL context plus the requester's direct
+     * dashboard grants appended as ordinary `access` rows tagged
+     * `grantedVia: 'dashboard'`, so the existing elemMatch ability rules
+     * interpret them with no dashboard-specific logic. Behind the direct-access
+     * license gate; without a valid license the result equals the plain space
+     * context.
+     *
+     * Boundary-crossing operations pass a `space` target so content grants do
+     * not count. A `chart` target routes through its owning dashboard when it
+     * has one, otherwise through the saved chart's own direct grants.
      */
-    async getSpacesAccessContext(
+    async resolveAccess(
         userUuid: string,
-        spaceUuids: string[],
-    ): Promise<Record<string, SpaceAccessContextForCasl>> {
-        return this.getSpacesCaslContext(spaceUuids, { userUuid });
+        target: AccessTarget,
+        {
+            trx,
+            includeDeleted = false,
+        }: { trx?: Knex; includeDeleted?: boolean } = {},
+    ): Promise<AccessContextForCasl> {
+        const [result] = await this.resolveAccessTargets(userUuid, [target], {
+            onMismatch: 'throw',
+            trx,
+            includeDeleted,
+        });
+        const context = result?.context;
+        if (context === undefined) {
+            throw new NotFoundError(
+                `Couldn't find access context for space ${target.spaceUuid}`,
+            );
+        }
+        return context;
+    }
+
+    /**
+     * Batched access resolution paired with each original target. Unlike the
+     * strict single-target `resolveAccess` (which throws), missing spaces and
+     * mismatched resource refs degrade to `undefined` or space-only access so
+     * one doubtful target never fails an entire hot-path request. The two
+     * entry points differ in that error posture, not just arity.
+     *
+     * All grant-bearing targets must belong to one organization (every caller
+     * is project-scoped); a batch spanning organizations throws.
+     */
+    async resolveAccessBatch<T extends AccessTarget>(
+        userUuid: string,
+        targets: T[],
+        { trx }: { trx?: Knex } = {},
+    ): Promise<AccessResult<T>[]> {
+        return this.resolveAccessTargets(userUuid, targets, {
+            onMismatch: 'fallback',
+            trx,
+        });
+    }
+
+    private static getDirectGrantTarget(
+        target: AccessTarget,
+    ): DirectGrantTarget | undefined {
+        switch (target.type) {
+            case 'space':
+            case 'personalDocument':
+                return undefined;
+            case 'document':
+                return {
+                    source: 'document',
+                    resourceUuid: target.documentUuid,
+                    resourceLabel: 'Document',
+                    spaceUuid: target.spaceUuid,
+                };
+            case 'dashboard':
+                return {
+                    source: 'dashboard',
+                    resourceUuid: target.dashboardUuid,
+                    resourceLabel: 'Dashboard',
+                    spaceUuid: target.spaceUuid,
+                };
+            case 'chart':
+                return target.dashboardUuid
+                    ? {
+                          source: 'dashboard',
+                          resourceUuid: target.dashboardUuid,
+                          resourceLabel: 'Dashboard',
+                          spaceUuid: target.spaceUuid,
+                      }
+                    : {
+                          source: 'saved_chart',
+                          resourceUuid: target.chartUuid,
+                          resourceLabel: 'Saved chart',
+                          spaceUuid: target.spaceUuid,
+                      };
+            case 'sqlChart':
+                return {
+                    source: 'sql_chart',
+                    resourceUuid: target.savedSqlUuid,
+                    resourceLabel: 'Saved SQL chart',
+                    spaceUuid: target.spaceUuid,
+                };
+            case 'app':
+                return {
+                    source: 'app',
+                    resourceUuid: target.appUuid,
+                    resourceLabel: 'Data app',
+                    spaceUuid: target.spaceUuid,
+                };
+            default:
+                return assertUnreachable(
+                    target,
+                    'Unsupported access target type',
+                );
+        }
+    }
+
+    private getGrantLookup(userUuid: string, source: GrantSource): GrantLookup {
+        switch (source) {
+            case 'document':
+                return async (resourceUuids, opts) => {
+                    const flag = await this.featureFlagModel.get({
+                        featureFlagId: FeatureFlags.Documents,
+                        user: {
+                            userUuid,
+                            organizationUuid: opts.organizationUuid,
+                        },
+                    });
+                    return flag.enabled
+                        ? this.documentAccessModel.getUserAccess(
+                              resourceUuids,
+                              userUuid,
+                              opts,
+                          )
+                        : {};
+                };
+            case 'dashboard':
+                return (resourceUuids, opts) =>
+                    this.dashboardAccessModel.getUserAccess(
+                        resourceUuids,
+                        userUuid,
+                        opts,
+                    );
+            case 'saved_chart':
+                return (resourceUuids, opts) =>
+                    this.savedChartAccessModel.getUserAccess(
+                        resourceUuids,
+                        userUuid,
+                        opts,
+                    );
+            case 'sql_chart':
+                return (resourceUuids, opts) =>
+                    this.savedSqlAccessModel.getUserAccess(
+                        resourceUuids,
+                        userUuid,
+                        opts,
+                    );
+            case 'app':
+                return (resourceUuids, opts) =>
+                    this.appAccessModel.getUserAccess(
+                        resourceUuids,
+                        userUuid,
+                        opts,
+                    );
+            default:
+                return assertUnreachable(
+                    source,
+                    'Unsupported direct grant source',
+                );
+        }
+    }
+
+    private async resolveAccessTargets<T extends AccessTarget>(
+        userUuid: string,
+        targets: T[],
+        {
+            onMismatch,
+            trx,
+            includeDeleted = false,
+        }: {
+            onMismatch: 'throw' | 'fallback';
+            trx?: Knex;
+            includeDeleted?: boolean;
+        },
+    ): Promise<AccessResult<T>[]> {
+        if (targets.length === 0) {
+            return [];
+        }
+
+        const uniqueSpaceUuids = [
+            ...new Set(
+                targets.flatMap((target) =>
+                    target.spaceUuid === null ? [] : [target.spaceUuid],
+                ),
+            ),
+        ];
+        const spaceContexts = await this.getSpacesCaslContext(
+            uniqueSpaceUuids,
+            { userUuid },
+            { trx },
+        );
+        const baselineOnly = (target: T): AccessContextForCasl | undefined => {
+            if (target.spaceUuid === null) {
+                return SpacePermissionService.getSpacelessContext(target);
+            }
+            const { spaceUuid } = target;
+            const context = spaceContexts[spaceUuid];
+            if (context === undefined) {
+                return undefined;
+            }
+            if (
+                target.type === 'app' &&
+                (context.organizationUuid !== target.organizationUuid ||
+                    context.projectUuid !== target.projectUuid)
+            ) {
+                return undefined;
+            }
+            return { ...context, directOnly: false };
+        };
+        const resultFor = (
+            target: T,
+            context: AccessContextForCasl | undefined,
+        ): AccessResult<T> => ({ target, context });
+        const grantTargets = targets.flatMap((target) => {
+            const baselineContext = baselineOnly(target);
+            const grantTarget =
+                SpacePermissionService.getDirectGrantTarget(target);
+            return grantTarget && baselineContext
+                ? [
+                      {
+                          ...grantTarget,
+                          organizationUuid: baselineContext.organizationUuid,
+                      },
+                  ]
+                : [];
+        });
+        if (grantTargets.length === 0) {
+            return targets.map((target) =>
+                resultFor(target, baselineOnly(target)),
+            );
+        }
+
+        // Every caller is project-scoped, so grant-bearing targets can only
+        // ever belong to one organization. A batch that spans organizations is
+        // a caller bug or a probing attempt — refuse it rather than service it.
+        const organizationUuids = [
+            ...new Set(grantTargets.map((target) => target.organizationUuid)),
+        ];
+        if (organizationUuids.length > 1) {
+            throw new ParameterError(
+                'Access targets must belong to a single organization',
+            );
+        }
+        const [organizationUuid] = organizationUuids;
+        const directAccessEnabled =
+            await this.directAccessFeatureGate.isEnabledForUser({
+                userUuid,
+                organizationUuid,
+            });
+        if (!directAccessEnabled) {
+            return targets.map((target) =>
+                resultFor(target, baselineOnly(target)),
+            );
+        }
+
+        const grantBatches = new Map<GrantSource, Set<string>>();
+        grantTargets.forEach((target) => {
+            const resourceUuids = grantBatches.get(target.source) ?? new Set();
+            resourceUuids.add(target.resourceUuid);
+            grantBatches.set(target.source, resourceUuids);
+        });
+
+        const grantResults = await Promise.all(
+            [...grantBatches].map(async ([source, resourceUuids]) => ({
+                source,
+                grants: await this.getGrantLookup(userUuid, source)(
+                    [...resourceUuids],
+                    {
+                        organizationUuid,
+                        ...(trx ? { trx } : {}),
+                        ...(source === 'app' && includeDeleted
+                            ? { includeDeleted: true }
+                            : {}),
+                    },
+                ),
+            })),
+        );
+        const grantsBySource = new Map<
+            GrantSource,
+            Record<string, DirectAccess>
+        >(grantResults.map(({ source, grants }) => [source, grants]));
+
+        return targets.map((target) => {
+            const baselineContext = baselineOnly(target);
+            const grantTarget =
+                SpacePermissionService.getDirectGrantTarget(target);
+            if (baselineContext === undefined || grantTarget === undefined) {
+                return resultFor(target, baselineContext);
+            }
+            const grant = grantsBySource.get(grantTarget.source)?.[
+                grantTarget.resourceUuid
+            ];
+            if (grant === undefined) {
+                return resultFor(target, baselineContext);
+            }
+            const grantRoles = [
+                ...(grant.userRole ? [grant.userRole] : []),
+                ...grant.groupRoles,
+            ];
+            if (grantRoles.length === 0) {
+                return resultFor(target, baselineContext);
+            }
+            const isMismatched = grant.spaceUuid !== target.spaceUuid;
+            if (isMismatched && onMismatch === 'throw') {
+                throw new ParameterError(
+                    `${grantTarget.resourceLabel} ${grantTarget.resourceUuid} does not belong to space ${target.spaceUuid}`,
+                );
+            }
+            if (isMismatched) {
+                return resultFor(target, baselineContext);
+            }
+            return resultFor(
+                target,
+                SpacePermissionService.withGrantAccess(
+                    baselineContext,
+                    userUuid,
+                    grantRoles,
+                    grantTarget,
+                ),
+            );
+        });
+    }
+
+    /**
+     * Personal apps rely on their creator rule in CASL. A personal Document
+     * instead acts like a private space whose only member is its creator, as
+     * admin, so the space-based Document rules apply unchanged.
+     */
+    private static getSpacelessContext(
+        target: AccessTarget,
+    ): AccessContextForCasl | undefined {
+        switch (target.type) {
+            case 'app':
+                return {
+                    organizationUuid: target.organizationUuid,
+                    projectUuid: target.projectUuid,
+                    inheritsFromOrgOrProject: false,
+                    access: [],
+                    admins: [],
+                    directOnly: false,
+                };
+            case 'personalDocument':
+                return {
+                    organizationUuid: target.organizationUuid,
+                    projectUuid: target.projectUuid,
+                    inheritsFromOrgOrProject: false,
+                    access:
+                        target.createdByUserUuid === null
+                            ? []
+                            : [
+                                  {
+                                      userUuid: target.createdByUserUuid,
+                                      role: SpaceMemberRole.ADMIN,
+                                      hasDirectAccess: true,
+                                      projectRole: undefined,
+                                      inheritedRole: undefined,
+                                      inheritedFrom: undefined,
+                                  },
+                              ],
+                    admins: [],
+                    directOnly: false,
+                };
+            default:
+                return undefined;
+        }
+    }
+
+    private static withGrantAccess(
+        spaceContext: SpaceAccessContextForCasl,
+        userUuid: string,
+        grantRoles: SpaceMemberRole[],
+        grantTarget: DirectGrantTarget,
+    ): AccessContextForCasl {
+        const hasSpacePath =
+            spaceContext.access.some(
+                (access) => access.userUuid === userUuid,
+            ) ||
+            spaceContext.admins.some((admin) => admin.userUuid === userUuid);
+        return {
+            ...spaceContext,
+            access: [
+                ...spaceContext.access,
+                ...grantRoles.map((role) => ({
+                    userUuid,
+                    role,
+                    hasDirectAccess: true,
+                    projectRole: undefined,
+                    inheritedRole: undefined,
+                    inheritedFrom: undefined,
+                    grantedVia: grantTarget.source,
+                    grantSourceUuid: grantTarget.resourceUuid,
+                })),
+            ],
+            directOnly: !hasSpacePath,
+        };
     }
 
     /**
      * Returns the CASL context for a space with ALL users' resolved access
      * (not filtered to a single user). Used for access propagation and
-     * building SpaceShare[] for the share modal UI.
+     * inheritance writes.
      */
     async getAllSpaceAccessContext(
         spaceUuid: string,
@@ -133,135 +708,213 @@ export class SpacePermissionService extends BaseService {
         return ctx;
     }
 
+    mergeAdminAccess(ctx: SpaceAccessContextForCasl): SpaceAccess[] {
+        const existingAccessUuids = new Set(
+            ctx.access.map((access) => access.userUuid),
+        );
+        const adminAccess: SpaceAccess[] = ctx.admins
+            .filter((admin) => !existingAccessUuids.has(admin.userUuid))
+            .map((admin) => ({
+                userUuid: admin.userUuid,
+                role: SpaceMemberRole.ADMIN,
+                hasDirectAccess: false,
+                projectRole: ProjectMemberRole.ADMIN,
+                inheritedRole:
+                    admin.source === 'organization'
+                        ? OrganizationMemberRole.ADMIN
+                        : ProjectMemberRole.ADMIN,
+                inheritedFrom: admin.source,
+            }));
+
+        return [...ctx.access, ...adminAccess];
+    }
+
+    async getPaginatedSpaceAccess(
+        spaceUuid: string,
+        {
+            paginateArgs,
+            filters,
+            currentUserUuid,
+        }: {
+            paginateArgs?: KnexPaginateArgs;
+            filters?: SpaceAccessListFilters;
+            currentUserUuid?: string;
+        },
+    ): Promise<KnexPaginatedData<SpaceShare[]>> {
+        const accessContexts = await this.getSpacesCaslContext(
+            [spaceUuid],
+            filters?.userUuids?.length
+                ? { userUuids: filters.userUuids }
+                : undefined,
+        );
+        const ctx = accessContexts[spaceUuid];
+        if (!ctx) {
+            throw new NotFoundError(
+                `Couldn't find access context for space ${spaceUuid}`,
+            );
+        }
+
+        const allAccess = this.mergeAdminAccess(ctx);
+        const filteredAccess = filters?.directOnly
+            ? allAccess.filter(
+                  (access) =>
+                      access.inheritedFrom !== 'parent_space' &&
+                      (access.hasDirectAccess ||
+                          access.inheritedFrom === 'space_group'),
+              )
+            : allAccess;
+        const accessByUserUuid = new Map(
+            filteredAccess.map((access) => [access.userUuid, access]),
+        );
+        const { data, pagination } =
+            await this.spacePermissionModel.getPaginatedUserMetadata(
+                filteredAccess.map((access) => access.userUuid),
+                paginateArgs,
+                {
+                    searchQuery: filters?.searchQuery,
+                    currentUserUuidFirst: currentUserUuid,
+                },
+            );
+
+        return {
+            data: data.map(({ userUuid, ...metadata }) => ({
+                ...accessByUserUuid.get(userUuid)!,
+                userUuid,
+                ...metadata,
+            })),
+            ...(pagination ? { pagination } : {}),
+        };
+    }
+
+    /**
+     * Custom-role assignments persist a placeholder in the legacy `role`
+     * column (`viewer` on project/group access, `member` on org memberships)
+     * with the real role in `role_uuid`. Replace the placeholder with the
+     * role derived from the custom role's scopes so inherited space access
+     * reflects what the role actually grants.
+     */
+    private async resolveCustomRoleAccess(
+        projectAccessMap: Record<string, ProjectSpaceAccessWithCustomRole[]>,
+        organizationAccessMap: Record<
+            string,
+            OrganizationSpaceAccessWithCustomRole[]
+        >,
+        { trx }: { trx?: Knex } = {},
+    ): Promise<{
+        projectAccessMap: Record<string, ProjectSpaceAccess[]>;
+        organizationAccessMap: Record<string, OrganizationSpaceAccess[]>;
+    }> {
+        const heldCustomRoleUuids = (access: {
+            roleUuid: string | null;
+            extraRoleUuids: string[];
+        }) => [
+            ...(access.roleUuid ? [access.roleUuid] : []),
+            ...access.extraRoleUuids,
+        ];
+        const customRoleUuids = [
+            ...new Set(
+                [
+                    ...Object.values(projectAccessMap).flat(),
+                    ...Object.values(organizationAccessMap).flat(),
+                ].flatMap(heldCustomRoleUuids),
+            ),
+        ];
+        if (customRoleUuids.length === 0) {
+            return { projectAccessMap, organizationAccessMap };
+        }
+
+        const scopesByRole = await this.spacePermissionModel.getRoleScopes(
+            customRoleUuids,
+            { trx },
+        );
+        const unionScopes = (roleUuids: string[]) =>
+            roleUuids.flatMap((roleUuid) => scopesByRole[roleUuid] ?? []);
+
+        return {
+            projectAccessMap: Object.fromEntries(
+                Object.entries(projectAccessMap).map(
+                    ([spaceUuid, accessList]) => [
+                        spaceUuid,
+                        accessList.map(
+                            ({ roleUuid, extraRoleUuids, ...access }) => {
+                                const held = heldCustomRoleUuids({
+                                    roleUuid,
+                                    extraRoleUuids,
+                                });
+                                return held.length > 0
+                                    ? {
+                                          ...access,
+                                          role: getProjectRoleForRoleSetSpaceAccess(
+                                              {
+                                                  systemRole: roleUuid
+                                                      ? null
+                                                      : access.role,
+                                                  customRoleScopes:
+                                                      unionScopes(held),
+                                              },
+                                          ),
+                                      }
+                                    : access;
+                            },
+                        ),
+                    ],
+                ),
+            ),
+            organizationAccessMap: Object.fromEntries(
+                Object.entries(organizationAccessMap).map(
+                    ([spaceUuid, accessList]) => [
+                        spaceUuid,
+                        accessList.map(
+                            ({ roleUuid, extraRoleUuids, ...access }) => {
+                                const held = heldCustomRoleUuids({
+                                    roleUuid,
+                                    extraRoleUuids,
+                                });
+                                return held.length > 0
+                                    ? {
+                                          ...access,
+                                          role: getOrganizationRoleForRoleSetSpaceAccess(
+                                              {
+                                                  systemRole: roleUuid
+                                                      ? null
+                                                      : access.role,
+                                                  customRoleScopes:
+                                                      unionScopes(held),
+                                              },
+                                          ),
+                                      }
+                                    : access;
+                            },
+                        ),
+                    ],
+                ),
+            ),
+        };
+    }
+
     /**
      * Gets the access context for a list of space uuids so we can check against CASL.
      *
-     * Dispatches to the legacy (root-based) or chain-aware (inheritance) strategy
-     * based on the NestedSpacesPermissions feature flag.
-     */
-    private async getSpacesCaslContext(
-        spaceUuidsArg: string[],
-        filters?: { userUuid?: string },
-    ): Promise<Record<string, SpaceAccessContextForCasl>> {
-        // Feature flag: NestedSpacesPermissions
-        // When ready to remove, delete getSpacesCaslContextLegacy and inline
-        // getSpacesCaslContextWithInheritance here.
-        const { enabled } = await this.featureFlagModel.get({
-            featureFlagId: FeatureFlags.NestedSpacesPermissions,
-        });
-        if (enabled) {
-            return this.getSpacesCaslContextWithInheritance(
-                spaceUuidsArg,
-                filters,
-            );
-        }
-        return this.getSpacesCaslContextLegacy(spaceUuidsArg, filters);
-    }
-
-    /**
-     * Legacy resolution: resolves every space to its root space, fetches access
-     * for the root, and uses resolveSpaceAccess (flat, no chain awareness).
-     *
-     * Remove this method when NestedSpacesPermissions is fully rolled out.
-     */
-    private async getSpacesCaslContextLegacy(
-        spaceUuidsArg: string[],
-        filters?: { userUuid?: string },
-    ): Promise<Record<string, SpaceAccessContextForCasl>> {
-        const uniqueSpaceUuids = [...new Set(spaceUuidsArg)];
-
-        // Getting the root space uuids since for nested spaces that's what is used
-        const rootSpaceUuids = await Promise.all(
-            uniqueSpaceUuids.map((uuid) =>
-                this.spaceModel
-                    .getSpaceRootFromCacheOrDB(uuid)
-                    .then((r) => r.spaceRoot),
-            ),
-        );
-
-        // Unique space uuids to root space uuids have the same index
-        const spaceToRootSpaceTuples = rootSpaceUuids.map(
-            (rootSpaceUuid, index) => [uniqueSpaceUuids[index], rootSpaceUuid],
-        );
-
-        const uniqueRootSpaceUuids = [...new Set(rootSpaceUuids)];
-        const [directAccessMap, projectAccessMap, orgAccessMap, spaceInfo] =
-            await Promise.all([
-                this.spacePermissionModel.getDirectSpaceAccess(
-                    uniqueRootSpaceUuids,
-                    filters,
-                ),
-                this.spacePermissionModel.getProjectSpaceAccess(
-                    uniqueRootSpaceUuids,
-                    filters,
-                ),
-                this.spacePermissionModel.getOrganizationSpaceAccess(
-                    uniqueRootSpaceUuids,
-                    filters,
-                ),
-                this.spacePermissionModel.getSpaceInfo(uniqueRootSpaceUuids),
-            ]);
-
-        const rootSpaceAccessContext: Record<
-            string,
-            SpaceAccessContextForCasl
-        > = {};
-        for (const rootSpaceUuid of uniqueRootSpaceUuids) {
-            const space = spaceInfo[rootSpaceUuid];
-            if (!space) {
-                throw new NotFoundError(
-                    `Space with uuid ${rootSpaceUuid} not found`,
-                );
-            }
-
-            const { isPrivate, projectUuid, organizationUuid } =
-                spaceInfo[rootSpaceUuid];
-
-            const access = resolveSpaceAccess({
-                spaceUuid: rootSpaceUuid,
-                inheritsFromOrgOrProject: !isPrivate,
-                directAccess: directAccessMap[rootSpaceUuid] ?? [],
-                projectAccess: projectAccessMap[rootSpaceUuid] ?? [],
-                organizationAccess: orgAccessMap[rootSpaceUuid] ?? [],
-            });
-
-            rootSpaceAccessContext[rootSpaceUuid] = {
-                organizationUuid,
-                projectUuid,
-                isPrivate,
-                access,
-            };
-        }
-
-        // Map back space access to space uuids
-        return Object.fromEntries(
-            spaceToRootSpaceTuples.map(([spaceUuid, rootSpaceUuid]) => [
-                spaceUuid,
-                rootSpaceAccessContext[rootSpaceUuid],
-            ]),
-        );
-    }
-
-    /**
      * Chain-aware resolution: walks each space's inheritance chain (up to the
      * first ancestor with inherit_parent_permissions=false, or the root).
      * Direct access is aggregated from all spaces in the chain. Project/org
      * access is only included when the chain reaches a root space that inherits
      * from the project.
      *
-     * Uses resolveSpaceAccessWithInheritance ("most permissive wins" across chain).
+     * Uses resolveSpaceAccess ("most permissive wins" across chain).
      */
-    private async getSpacesCaslContextWithInheritance(
+    private async getSpacesCaslContext(
         spaceUuidsArg: string[],
-        filters?: { userUuid?: string },
+        filters?: { userUuid?: string; userUuids?: string[] },
+        { trx }: { trx?: Knex } = {},
     ): Promise<Record<string, SpaceAccessContextForCasl>> {
         const uniqueSpaceUuids = [...new Set(spaceUuidsArg)];
 
         // Get inheritance chains for all spaces in a single batched query
-        const chainMap =
-            await this.spacePermissionModel.getInheritanceChains(
-                uniqueSpaceUuids,
-            );
+        const chainMap = await this.spacePermissionModel.getInheritanceChains(
+            uniqueSpaceUuids,
+            { trx },
+        );
         const chains = uniqueSpaceUuids
             .filter((uuid) => chainMap[uuid] !== undefined)
             .map((uuid) => ({
@@ -289,40 +942,62 @@ export class SpacePermissionService extends BaseService {
         ];
 
         // Batch-fetch access data
-        const [directAccessMap, projectAccessMap, orgAccessMap, spaceInfo] =
-            await Promise.all([
-                this.spacePermissionModel.getDirectSpaceAccess(
-                    allChainSpaceUuids,
-                    filters,
-                ),
-                allChainsRootSpaceUuids.length > 0
-                    ? this.spacePermissionModel.getProjectSpaceAccess(
-                          allChainsRootSpaceUuids,
-                          filters,
-                      )
-                    : Promise.resolve(
-                          {} as Record<string, ProjectSpaceAccess[]>,
-                      ),
-                allChainsRootSpaceUuids.length > 0
-                    ? this.spacePermissionModel.getOrganizationSpaceAccess(
-                          allChainsRootSpaceUuids,
-                          filters,
-                      )
-                    : Promise.resolve(
-                          {} as Record<string, OrganizationSpaceAccess[]>,
-                      ),
-                this.spacePermissionModel.getSpaceInfo(uniqueSpaceUuids),
-            ]);
+        const [
+            directAccessMap,
+            rawProjectAccessMap,
+            rawOrgAccessMap,
+            spaceInfo,
+        ] = await Promise.all([
+            this.spacePermissionModel.getDirectSpaceAccess(
+                allChainSpaceUuids,
+                filters,
+                { trx },
+            ),
+            allChainsRootSpaceUuids.length > 0
+                ? this.spacePermissionModel.getProjectSpaceAccess(
+                      allChainsRootSpaceUuids,
+                      filters,
+                      { trx },
+                  )
+                : Promise.resolve(
+                      {} as Record<string, ProjectSpaceAccessWithCustomRole[]>,
+                  ),
+            allChainsRootSpaceUuids.length > 0
+                ? this.spacePermissionModel.getOrganizationSpaceAccess(
+                      allChainsRootSpaceUuids,
+                      filters,
+                      { trx },
+                  )
+                : Promise.resolve(
+                      {} as Record<
+                          string,
+                          OrganizationSpaceAccessWithCustomRole[]
+                      >,
+                  ),
+            this.spacePermissionModel.getSpaceInfo(uniqueSpaceUuids, {
+                trx,
+            }),
+        ]);
 
-        // For each requested space, aggregate access from its chain
+        // Substitute scope-derived roles for custom-role placeholder rows
+        const { projectAccessMap, organizationAccessMap: orgAccessMap } =
+            await this.resolveCustomRoleAccess(
+                rawProjectAccessMap,
+                rawOrgAccessMap,
+                { trx },
+            );
+
+        // Omit spaces deleted between the chain and metadata reads.
+        const existingChains = chains.filter(
+            ({ spaceUuid }) => spaceInfo[spaceUuid] !== undefined,
+        );
         const result: Record<string, SpaceAccessContextForCasl> = {};
-        for (const { spaceUuid, chain, inheritsFromOrgOrProject } of chains) {
+        for (const {
+            spaceUuid,
+            chain,
+            inheritsFromOrgOrProject,
+        } of existingChains) {
             const space = spaceInfo[spaceUuid];
-            if (!space) {
-                throw new NotFoundError(
-                    `Space with uuid ${spaceUuid} not found`,
-                );
-            }
 
             // Build chain-ordered direct access (preserves leaf-to-root ordering)
             const chainDirectAccess = chain.map((item) => ({
@@ -338,7 +1013,7 @@ export class SpacePermissionService extends BaseService {
             const projectAccess = projectAccessMap[rootSpaceUuid] ?? [];
             const orgAccess = orgAccessMap[rootSpaceUuid] ?? [];
 
-            const access = resolveSpaceAccessWithInheritance({
+            const access = resolveSpaceAccess({
                 spaceUuid,
                 inheritsFromOrgOrProject,
                 chainDirectAccess,
@@ -346,11 +1021,30 @@ export class SpacePermissionService extends BaseService {
                 organizationAccess: orgAccess,
             });
 
+            // Build the admin map project-first, then overwrite with org —
+            // org source wins on dedup.
+            const adminSource = new Map<string, SpaceAdmin['source']>();
+            for (const a of projectAccess) {
+                if (a.role === ProjectMemberRole.ADMIN) {
+                    adminSource.set(a.userUuid, 'project');
+                }
+            }
+            for (const a of orgAccess) {
+                if (a.role === OrganizationMemberRole.ADMIN) {
+                    adminSource.set(a.userUuid, 'organization');
+                }
+            }
+            const admins: SpaceAdmin[] = Array.from(
+                adminSource,
+                ([userUuid, source]) => ({ userUuid, source }),
+            );
+
             result[spaceUuid] = {
                 organizationUuid: space.organizationUuid,
                 projectUuid: space.projectUuid,
-                isPrivate: !inheritsFromOrgOrProject,
+                inheritsFromOrgOrProject,
                 access,
+                admins,
             };
         }
         return result;
@@ -358,35 +1052,49 @@ export class SpacePermissionService extends BaseService {
 
     /**
      * Gets group access for a space.
-     * Resolves to the root space for nested spaces.
      */
     async getGroupAccess(spaceUuid: string): Promise<SpaceGroup[]> {
-        const { spaceRoot: rootSpaceUuid } =
-            await this.spaceModel.getSpaceRootFromCacheOrDB(spaceUuid);
-        return this.spacePermissionModel.getGroupAccess(rootSpaceUuid);
+        return this.spacePermissionModel.getGroupAccess(spaceUuid);
     }
 
     /**
-     * Returns the UUID of the first root space the actor can view in the project.
+     * Returns the UUID of the first root space the user can view in the project.
      * Uses CASL-based permission checking via getAccessibleSpaceUuids.
      */
     async getFirstViewableSpaceUuid(
-        actor: Pick<SessionUser, 'ability' | 'userUuid'>,
+        user: SessionUser,
         projectUuid: string,
     ): Promise<string> {
-        const allRootSpaceUuids =
-            await this.spaceModel.getRootSpaceUuidsForProject(projectUuid);
-        const accessible = await this.getAccessibleSpaceUuids(
-            'view',
-            actor,
-            allRootSpaceUuids,
-        );
-        if (accessible.length === 0) {
+        // Deleting a root space between listing the spaces and resolving
+        // access makes the access check throw, so resolve once more.
+        const firstViewable = await this.findFirstViewableSpaceUuid(
+            user,
+            projectUuid,
+        ).catch((e: unknown) => {
+            if (e instanceof NotFoundError) {
+                return this.findFirstViewableSpaceUuid(user, projectUuid);
+            }
+            throw e;
+        });
+        if (!firstViewable) {
             throw new NotFoundError(
                 `No viewable space found for project ${projectUuid}`,
             );
         }
-        return accessible[0];
+        return firstViewable;
+    }
+
+    private async findFirstViewableSpaceUuid(
+        user: SessionUser,
+        projectUuid: string,
+    ): Promise<string | undefined> {
+        const allRootSpaceUuids =
+            await this.spaceModel.getRootSpaceUuidsForProject(projectUuid);
+        const accessible = new Set(
+            await this.getAccessibleSpaceUuids('view', user, allRootSpaceUuids),
+        );
+        // Oldest root space first, so the fallback is stable across calls
+        return allRootSpaceUuids.find((spaceUuid) => accessible.has(spaceUuid));
     }
 
     /**
@@ -401,30 +1109,80 @@ export class SpacePermissionService extends BaseService {
 
         const uniqueSpaceUuids = [...new Set(spaceUuids)];
 
-        // Getting the root space uuids since for nested spaces that's what is used
-        const rootSpaceUuids = await Promise.all(
-            uniqueSpaceUuids.map((uuid) =>
-                this.spaceModel
-                    .getSpaceRootFromCacheOrDB(uuid)
-                    .then((r) => r.spaceRoot),
-            ),
-        );
-
-        const spaceToRootSpaceTuples = rootSpaceUuids.map(
-            (rootSpaceUuid, index) => [uniqueSpaceUuids[index], rootSpaceUuid],
-        );
-
         const directAccessMap =
             await this.spacePermissionModel.getDirectSpaceAccess(
-                rootSpaceUuids,
+                uniqueSpaceUuids,
             );
 
         return Object.fromEntries(
-            spaceToRootSpaceTuples.map(([spaceUuid, rootSpaceUuid]) => [
+            uniqueSpaceUuids.map((spaceUuid) => [
                 spaceUuid,
-                directAccessMap[rootSpaceUuid]?.map((e) => e.userUuid) ?? [],
+                directAccessMap[spaceUuid]?.map((e) => e.userUuid) ?? [],
             ]),
         );
+    }
+
+    /**
+     * Copies inherited permissions as direct access entries on a space.
+     * Called when inheritParentPermissions transitions true → false so that
+     * users who had access via parent spaces don't suddenly lose it.
+     *
+     * Returns the user/group entries to insert (caller wraps in transaction
+     * together with the space update via SpaceModel.updateWithCopiedPermissions).
+     */
+    async getInheritedPermissionsToCopy(spaceUuid: string): Promise<{
+        userAccessEntries: { userUuid: string; role: SpaceAccess['role'] }[];
+        groupAccessEntries: {
+            groupUuid: string;
+            role: SpaceGroup['spaceRole'];
+        }[];
+    }> {
+        const chainEntry = await this.spacePermissionModel.getInheritanceChains(
+            [spaceUuid],
+        );
+
+        if (!chainEntry) {
+            throw new NotFoundError(`Space ${spaceUuid} not found`);
+        }
+        const { chain } = chainEntry[spaceUuid];
+        const ancestorUuids = chain
+            .map((item) => item.spaceUuid)
+            .filter((uuid) => uuid !== spaceUuid);
+
+        const ancestorDirectAccess =
+            await this.spacePermissionModel.getDirectSpaceAccess(ancestorUuids);
+
+        // Deduplicate user and group access entries, keeping highest role per user/group
+        const userAccessMap = new Map<string, SpaceAccess['role']>();
+        const groupAccessMap = new Map<string, SpaceGroup['spaceRole']>();
+
+        for (const access of Object.values(ancestorDirectAccess).flat()) {
+            if (access.from === 'user_access') {
+                const existing = userAccessMap.get(access.userUuid);
+                const highest = getHighestSpaceRole([existing, access.role]);
+                if (highest !== undefined) {
+                    userAccessMap.set(access.userUuid, highest);
+                }
+            } else if (
+                access.from === 'group_access' &&
+                access.groupUuid !== null
+            ) {
+                const existing = groupAccessMap.get(access.groupUuid);
+                const highest = getHighestSpaceRole([existing, access.role]);
+                if (highest !== undefined) {
+                    groupAccessMap.set(access.groupUuid, highest);
+                }
+            }
+        }
+
+        const userAccessEntries = [...userAccessMap.entries()].map(
+            ([userUuid, role]) => ({ userUuid, role }),
+        );
+        const groupAccessEntries = [...groupAccessMap.entries()].map(
+            ([groupUuid, role]) => ({ groupUuid, role }),
+        );
+
+        return { userAccessEntries, groupAccessEntries };
     }
 
     async getUserMetadataByUuids(

@@ -162,3 +162,59 @@ parameters:
       model: orders
       dimension: order_date
 `;
+
+export const validConfigWithCustomGranularities = `
+spotlight:
+  default_visibility: show
+custom_granularities:
+  slt_week:
+    label: "SLT Week"
+    sql: "DATE_TRUNC('week', \${COLUMN} + INTERVAL '2 days') - INTERVAL '2 days'"
+  fiscal_quarter:
+    label: "Fiscal Quarter"
+    type: string
+    sql: "'Q' || EXTRACT(QUARTER FROM \${COLUMN} + INTERVAL '1 month')"
+`;
+
+export const invalidConfigCustomGranularityNoSql = `
+spotlight:
+  default_visibility: show
+custom_granularities:
+  bad:
+    label: "Bad"
+`;
+
+export const invalidConfigCustomGranularityNoLabel = `
+spotlight:
+  default_visibility: show
+custom_granularities:
+  bad:
+    sql: "something"
+`;
+
+export const invalidConfigCustomGranularityConflictsWithTimeFrames = `
+spotlight:
+  default_visibility: show
+custom_granularities:
+  week:
+    label: "Custom Week"
+    sql: "something"
+`;
+
+export const validConfigWithoutCustomGranularities = `
+spotlight:
+  default_visibility: show
+`;
+
+export const validConfigWithLabeledOptions = `
+spotlight:
+  default_visibility: show
+parameters:
+  status:
+    label: Status
+    options:
+      - label: Active
+        value: "active_id_1"
+      - label: Inactive
+        value: "inactive_id_2"
+`;

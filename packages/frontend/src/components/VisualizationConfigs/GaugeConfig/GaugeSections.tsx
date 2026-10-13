@@ -3,6 +3,7 @@ import { Accordion, Stack } from '@mantine/core';
 import { memo, useCallback, type FC } from 'react';
 import { isGaugeVisualizationConfig } from '../../LightdashVisualization/types';
 import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import accordionClasses from '../common/Accordion.module.css';
 import { AddButton } from '../common/AddButton';
 import { Config } from '../common/Config';
 import { useControlledAccordion } from '../common/hooks/useControlledAccordion';
@@ -86,24 +87,14 @@ const GaugeSections: FC = memo(() => {
                     <AddButton onClick={addSection} />
                 </Config.Group>
 
-                <Stack spacing="md">
+                <Stack gap="md">
                     {sections.length > 0 && (
                         <Accordion
                             multiple
                             variant="contained"
                             value={openItems}
                             onChange={handleAccordionChange}
-                            styles={(theme) => ({
-                                control: {
-                                    padding: theme.spacing.xs,
-                                },
-                                label: {
-                                    padding: 0,
-                                },
-                                panel: {
-                                    padding: 0,
-                                },
-                            })}
+                            className={accordionClasses.containedList}
                         >
                             {sections.map((section, index) => (
                                 <GaugeSectionComponent

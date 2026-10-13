@@ -1,19 +1,21 @@
-import { ContentType } from '@lightdash/common';
-import { Box, Divider, SegmentedControl, Text, Tooltip } from '@mantine-8/core';
+import { ContentType, FeatureFlags } from '@lightdash/common';
+import { Box, Divider, SegmentedControl, Text, Tooltip } from '@mantine/core';
 import {
+    IconAppWindow,
     IconChartBar,
     IconFolder,
+    IconFileText,
     IconLayoutDashboard,
+    IconPuzzle,
 } from '@tabler/icons-react';
 import type { FC } from 'react';
 import MantineIcon from '../../../components/common/MantineIcon';
+import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
+import {
+    CHART_TYPES_FILTER_VALUE,
+    type DeletedContentTypeFilter,
+} from '../types';
 import classes from './ContentTypeFilter.module.css';
-
-type DeletedContentTypeFilter =
-    | 'all'
-    | ContentType.CHART
-    | ContentType.DASHBOARD
-    | ContentType.SPACE;
 
 type ContentTypeFilterProps = {
     selectedContentType: DeletedContentTypeFilter;
@@ -24,6 +26,12 @@ export const ContentTypeFilter: FC<ContentTypeFilterProps> = ({
     selectedContentType,
     setSelectedContentType,
 }) => {
+    const dataAppsFlag = useServerFeatureFlag(FeatureFlags.EnableDataApps);
+    const dataAppsEnabled = dataAppsFlag.data?.enabled ?? false;
+    const documentsFlag = useServerFeatureFlag(FeatureFlags.Documents);
+    const documentsEnabled =
+        !documentsFlag.isError && documentsFlag.data?.enabled;
+
     const iconProps = {
         style: { display: 'block' },
         size: 18,
@@ -34,7 +42,7 @@ export const ContentTypeFilter: FC<ContentTypeFilterProps> = ({
         {
             value: 'all',
             label: (
-                <Tooltip label="Show all deleted items" withinPortal>
+                <Tooltip label="Show all deleted items">
                     <Box>
                         <Text fz="xs" fw={500}>
                             All
@@ -46,12 +54,7 @@ export const ContentTypeFilter: FC<ContentTypeFilterProps> = ({
         {
             value: ContentType.CHART,
             label: (
-                <Tooltip
-                    variant="xs"
-                    label="Show only deleted charts"
-                    withinPortal
-                    maw={200}
-                >
+                <Tooltip label="Show only deleted charts" maw={200}>
                     <Box>
                         <MantineIcon icon={IconChartBar} {...iconProps} />
                     </Box>
@@ -61,7 +64,7 @@ export const ContentTypeFilter: FC<ContentTypeFilterProps> = ({
         {
             value: ContentType.DASHBOARD,
             label: (
-                <Tooltip label="Show only deleted dashboards" withinPortal>
+                <Tooltip label="Show only deleted dashboards">
                     <Box>
                         <MantineIcon
                             icon={IconLayoutDashboard}
@@ -71,10 +74,57 @@ export const ContentTypeFilter: FC<ContentTypeFilterProps> = ({
                 </Tooltip>
             ),
         },
+        ...(documentsEnabled
+            ? [
+                  {
+                      value: ContentType.DOCUMENT,
+                      label: (
+                          <Tooltip label="Show only deleted documents">
+                              <Box aria-label="Documents">
+                                  <MantineIcon
+                                      icon={IconFileText}
+                                      {...iconProps}
+                                  />
+                              </Box>
+                          </Tooltip>
+                      ),
+                  },
+              ]
+            : []),
+        ...(dataAppsEnabled
+            ? [
+                  {
+                      value: ContentType.DATA_APP,
+                      label: (
+                          <Tooltip label="Show only deleted data apps">
+                              <Box>
+                                  <MantineIcon
+                                      icon={IconAppWindow}
+                                      {...iconProps}
+                                  />
+                              </Box>
+                          </Tooltip>
+                      ),
+                  },
+                  {
+                      value: CHART_TYPES_FILTER_VALUE,
+                      label: (
+                          <Tooltip label="Show only deleted custom chart types">
+                              <Box>
+                                  <MantineIcon
+                                      icon={IconPuzzle}
+                                      {...iconProps}
+                                  />
+                              </Box>
+                          </Tooltip>
+                      ),
+                  },
+              ]
+            : []),
         {
             value: ContentType.SPACE,
             label: (
-                <Tooltip label="Show only deleted spaces" withinPortal>
+                <Tooltip label="Show only deleted spaces">
                     <Box>
                         <MantineIcon icon={IconFolder} {...iconProps} />
                     </Box>
@@ -85,15 +135,9 @@ export const ContentTypeFilter: FC<ContentTypeFilterProps> = ({
 
     return (
         <>
-            <Divider
-                orientation="vertical"
-                w={1}
-                h={20}
-                style={{ alignSelf: 'center' }}
-            />
+            <Divider orientation="vertical" w={1} h={20} />
             <SegmentedControl
                 size="xs"
-                radius="md"
                 value={selectedContentType}
                 onChange={(value) =>
                     setSelectedContentType(value as DeletedContentTypeFilter)

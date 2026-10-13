@@ -8,7 +8,7 @@ import {
     type CustomDimension,
     type Explore,
 } from '@lightdash/common';
-import { LD_FIELD_COLORS } from '../../../../../mantineTheme';
+import { LD_FIELD_COLORS } from '../../../../../theme';
 import { sortNodes } from '../Tree/sortNodes';
 import {
     isGroupNode,
@@ -34,7 +34,9 @@ import {
 } from './types';
 
 /**
- * Recursively flatten a node and its children
+ * Recursively flatten a node and its children.
+ * Active (selected) fields are excluded — they render in the pinned
+ * "Selected" section instead of the tree.
  */
 function flattenNodeRecursive(
     node: TreeNode,
@@ -44,6 +46,7 @@ function flattenNodeRecursive(
     expandedGroups: Set<string>,
     searchResults: string[],
     isSearching: boolean,
+    activeFields: Set<string>,
     depth: number = 0,
     parentPath: string = '',
 ): TreeNodeItem[] {
@@ -54,23 +57,26 @@ function flattenNodeRecursive(
 
     const isGroup = isGroupNode(node);
 
-    if (!isVisible && !isGroup) return items;
+    if (!isGroup && (!isVisible || activeFields.has(node.key))) return items;
 
     // If it's a group, check if any children are visible
     if (isGroup) {
         const groupNode = node;
-        const hasVisibleChildren = Object.values(groupNode.children).some(
-            (child) =>
-                !isSearching ||
-                searchResults.includes(child.key) ||
-                ('children' in child &&
-                    child.children &&
-                    Object.values(child.children).some((grandchild) =>
-                        searchResults.includes(grandchild.key),
-                    )),
-        );
+        const hasVisibleDescendant = (treeNode: TreeNode): boolean => {
+            if (isGroupNode(treeNode)) {
+                return Object.values(treeNode.children).some(
+                    hasVisibleDescendant,
+                );
+            }
+            if (activeFields.has(treeNode.key)) return false;
+            return !isSearching || searchResults.includes(treeNode.key);
+        };
 
-        if (!hasVisibleChildren && isSearching) {
+        const isGroupVisible =
+            (isSearching && searchResults.includes(node.key)) ||
+            Object.values(groupNode.children).some(hasVisibleDescendant);
+
+        if (!isGroupVisible) {
             return items;
         }
 
@@ -113,6 +119,7 @@ function flattenNodeRecursive(
                         expandedGroups,
                         searchResults,
                         isSearching,
+                        activeFields,
                         depth + 1,
                         childParentPath,
                     ),
@@ -176,6 +183,7 @@ function flattenSection(
             sectionInfo.missingItems
                 ? sectionInfo.missingItems.filter((i) => isCustomDimension(i))
                 : undefined,
+        dashboardMetricIds: options.dashboardMetricIds,
         itemsAlerts: sectionInfo.itemsAlerts,
         orderFieldsBy: sectionInfo.orderFieldsBy,
         isGithubIntegrationEnabled: options.isGithubIntegrationEnabled,
@@ -204,6 +212,7 @@ function flattenSection(
                 expandedGroups,
                 searchResults,
                 isSearching,
+                options.activeFields,
                 baseDepth,
             ),
         );

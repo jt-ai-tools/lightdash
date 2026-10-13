@@ -1,15 +1,14 @@
 import {
-    FeatureFlags,
     QueryExecutionContext,
     QueryHistoryStatus,
     type ApiExecuteAsyncDashboardChartQueryResults,
+    type DateZoom,
 } from '@lightdash/common';
 import { useCallback, useMemo } from 'react';
 import { lightdashApi } from '../../api';
 import { Limit } from '../../components/ExportResults/types';
 import { pollForResults } from '../../features/queryRunner/executeQuery';
 import useDashboardContext from '../../providers/Dashboard/useDashboardContext';
-import { useServerFeatureFlag } from '../useServerOrClientFeatureFlag';
 import useDashboardFiltersForTile from './useDashboardFiltersForTile';
 
 export const useDashboardChartDownload = (
@@ -18,6 +17,8 @@ export const useDashboardChartDownload = (
     projectUuid: string | undefined,
     dashboardUuid: string | undefined,
     originalQueryUuid: string,
+    canExportPivotedData: boolean,
+    dateZoom?: DateZoom,
 ) => {
     // Get dashboard filters and sorts for this tile
     const dashboardFilters = useDashboardFiltersForTile(tileUuid);
@@ -27,19 +28,20 @@ export const useDashboardChartDownload = (
         () => chartSort[tileUuid] || [],
         [chartSort, tileUuid],
     );
-    const dateZoomGranularity = useDashboardContext(
-        (c) => c.dateZoomGranularity,
-    );
-
-    const { data: useSqlPivotResults } = useServerFeatureFlag(
-        FeatureFlags.UseSqlPivotResults,
-    );
 
     const getDownloadQueryUuid = useCallback(
-        async (limit: number | null, limitType: Limit): Promise<string> => {
+        async (
+            limit: number | null,
+            limitType: Limit,
+            exportPivotedData: boolean = true,
+        ): Promise<string> => {
             if (!projectUuid || !dashboardUuid) {
                 throw new Error('Missing required parameters');
             }
+
+            const originalQueryIsPivoted = canExportPivotedData;
+            const shouldPivotResults =
+                exportPivotedData && originalQueryIsPivoted;
 
             // When limiting to the table, use the original query uuid so we don't execute a new query
             if (limitType === Limit.TABLE) {
@@ -59,13 +61,11 @@ export const useDashboardChartDownload = (
                         dashboardUuid,
                         dashboardFilters: dashboardFilters || {},
                         dashboardSorts: dashboardSorts || [],
-                        dateZoom: dateZoomGranularity
-                            ? { granularity: dateZoomGranularity }
-                            : undefined,
+                        dateZoom,
                         limit,
                         invalidateCache: false,
                         parameters,
-                        pivotResults: useSqlPivotResults?.enabled,
+                        pivotResults: shouldPivotResults,
                     }),
                 });
 
@@ -75,7 +75,10 @@ export const useDashboardChartDownload = (
                 executeQueryResponse.queryUuid,
             );
 
-            if (results.status === QueryHistoryStatus.ERROR) {
+            if (
+                results.status === QueryHistoryStatus.ERROR ||
+                results.status === QueryHistoryStatus.EXPIRED
+            ) {
                 throw new Error(results.error || 'Error executing SQL query');
             }
 
@@ -92,9 +95,9 @@ export const useDashboardChartDownload = (
             chartUuid,
             dashboardFilters,
             dashboardSorts,
-            dateZoomGranularity,
+            dateZoom,
             parameters,
-            useSqlPivotResults?.enabled,
+            canExportPivotedData,
             originalQueryUuid,
         ],
     );

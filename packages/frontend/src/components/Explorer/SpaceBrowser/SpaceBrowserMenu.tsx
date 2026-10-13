@@ -1,7 +1,6 @@
 import { subject } from '@casl/ability';
 import { ContentType } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
-import { ActionIcon, Box } from '@mantine/core';
+import { Menu } from '@mantine/core';
 import {
     IconEdit,
     IconFolderSymlink,
@@ -10,6 +9,7 @@ import {
     IconStar,
     IconStarFilled,
     IconTrash,
+    IconUsers,
 } from '@tabler/icons-react';
 import React from 'react';
 import { useProjectUuid } from '../../../hooks/useProjectUuid';
@@ -18,21 +18,24 @@ import useFavoritesContext from '../../../providers/Favorites/useFavoritesContex
 import MantineIcon from '../../common/MantineIcon';
 
 interface Props {
+    children: React.ReactElement;
     isPinned: boolean;
     spaceUuid: string;
     onRename: () => void;
     onDelete: () => void;
     onTogglePin: () => void;
     onTransferToSpace: () => void;
+    onShare: () => void;
 }
 
-export const SpaceBrowserMenu: React.FC<React.PropsWithChildren<Props>> = ({
+export const SpaceBrowserMenu: React.FC<Props> = ({
     isPinned,
     spaceUuid,
     onRename,
     onDelete,
     onTogglePin,
     onTransferToSpace,
+    onShare,
     children,
 }) => {
     const { user } = useApp();
@@ -43,19 +46,13 @@ export const SpaceBrowserMenu: React.FC<React.PropsWithChildren<Props>> = ({
 
     return (
         <Menu
-            withinPortal
             position="bottom-end"
             withArrow
             arrowPosition="center"
-            shadow="md"
             closeOnItemClick
             closeOnClickOutside
         >
-            <Menu.Target>
-                <Box>
-                    <ActionIcon>{children}</ActionIcon>
-                </Box>
-            </Menu.Target>
+            <Menu.Target>{children}</Menu.Target>
             <Menu.Dropdown>
                 {favoritesContext && (
                     <>
@@ -91,7 +88,7 @@ export const SpaceBrowserMenu: React.FC<React.PropsWithChildren<Props>> = ({
                     leftSection={<MantineIcon icon={IconEdit} />}
                     onClick={onRename}
                 >
-                    Rename
+                    Update space
                 </Menu.Item>
 
                 {user.data?.ability.can(
@@ -128,6 +125,18 @@ export const SpaceBrowserMenu: React.FC<React.PropsWithChildren<Props>> = ({
                     }}
                 >
                     Move
+                </Menu.Item>
+
+                <Menu.Item
+                    component="button"
+                    role="menuitem"
+                    leftSection={<IconUsers size={18} />}
+                    onClick={onShare}
+                    // Anchor for scope walkthroughs (data-tour-via)
+                    data-tour-anchor="space-share"
+                    data-tour-hint="Click Share"
+                >
+                    Share
                 </Menu.Item>
 
                 <Menu.Divider />

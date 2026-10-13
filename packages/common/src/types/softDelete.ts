@@ -1,3 +1,4 @@
+import type { DataAppTemplate, DataAppVizsFilter } from '../ee/apps/types';
 import type { ChartSourceType, ContentType } from './content';
 import type { KnexPaginatedData } from './knex-paginate';
 import type { ChartKind } from './savedCharts';
@@ -5,7 +6,13 @@ import type { ChartKind } from './savedCharts';
 // ---------------------------------------------------------------------------
 // Utility: WithDescendantCounts
 // ---------------------------------------------------------------------------
-type DescendantCountKey = 'nestedSpace' | 'dashboard' | 'chart' | 'scheduler';
+type DescendantCountKey =
+    | 'nestedSpace'
+    | 'dashboard'
+    | 'chart'
+    | 'scheduler'
+    | 'document'
+    | 'app';
 
 export type WithDescendantCounts<T, K extends DescendantCountKey = never> = [
     K,
@@ -64,6 +71,11 @@ export type DeletedDashboardContentSummary = {
     organizationUuid: string;
 };
 
+export type DeletedDocumentContentSummary = Omit<
+    DeletedDashboardContentSummary,
+    'contentType'
+> & { contentType: ContentType.DOCUMENT };
+
 export type DeletedSpaceContentSummary = {
     uuid: string;
     name: string;
@@ -81,10 +93,34 @@ export type DeletedSpaceContentSummary = {
     organizationUuid: string;
 };
 
+export type DeletedDataAppContentSummary = {
+    uuid: string;
+    name: string;
+    description: string | null;
+    contentType: ContentType.DATA_APP;
+    deletedAt: Date;
+    deletedBy: {
+        userUuid: string;
+        firstName: string;
+        lastName: string;
+    } | null;
+    // Apps can be personal (no space), so these are nullable unlike for
+    // dashboards/charts which always belong to a space.
+    spaceUuid: string | null;
+    spaceName: string | null;
+    projectUuid: string;
+    organizationUuid: string;
+    // 'data_app_viz' marks a reusable custom chart type rather than a
+    // standalone app — labelled and restored differently in the UI.
+    template: DataAppTemplate | null;
+};
+
 export type DeletedContentSummary =
     | DeletedChartContentSummary
     | DeletedDashboardContentSummary
-    | DeletedSpaceContentSummary;
+    | DeletedDocumentContentSummary
+    | DeletedSpaceContentSummary
+    | DeletedDataAppContentSummary;
 
 // ---------------------------------------------------------------------------
 // Content-with-descendant-counts (returned by ContentModel / API)
@@ -98,14 +134,24 @@ export type DeletedContentWithDescendants =
       >
     | WithDescendantCounts<
           DeletedSpaceContentSummary,
-          'nestedSpace' | 'dashboard' | 'chart' | 'scheduler'
-      >;
+          | 'nestedSpace'
+          | 'dashboard'
+          | 'chart'
+          | 'scheduler'
+          | 'app'
+          | 'document'
+      >
+    | WithDescendantCounts<DeletedDocumentContentSummary, never>
+    | WithDescendantCounts<DeletedDataAppContentSummary, never>;
 
 export type DeletedContentFilters = {
     projectUuids: string[];
     search?: string;
     contentTypes?: ContentType[];
     deletedByUserUuids?: string[];
+    // Narrows DATA_APP rows: 'exclude' = data apps only, 'only' = custom
+    // chart types only. Omitted = both (labelled distinctly by the UI).
+    dataAppVizsFilter?: DataAppVizsFilter;
 };
 
 // API types
@@ -115,6 +161,10 @@ export type ApiDeletedContentResponse = {
 };
 
 export type DeletedContentItem =
+    | {
+          uuid: string;
+          contentType: ContentType.DOCUMENT;
+      }
     | {
           uuid: string;
           contentType: ContentType.CHART;
@@ -127,6 +177,10 @@ export type DeletedContentItem =
     | {
           uuid: string;
           contentType: ContentType.SPACE;
+      }
+    | {
+          uuid: string;
+          contentType: ContentType.DATA_APP;
       };
 
 export type ApiRestoreContentBody = {

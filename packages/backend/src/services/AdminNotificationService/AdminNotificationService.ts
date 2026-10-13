@@ -2,13 +2,12 @@ import {
     Account,
     AdminNotificationPayload,
     AdminNotificationType,
-    FeatureFlags,
     OrganizationMemberRole,
     ProjectMemberRole,
 } from '@lightdash/common';
+import { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
 import EmailClient from '../../clients/EmailClient/EmailClient';
 import { LightdashConfig } from '../../config/parseConfig';
-import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
 import { OrganizationMemberProfileModel } from '../../models/OrganizationMemberProfileModel';
 import { OrganizationModel } from '../../models/OrganizationModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
@@ -17,8 +16,8 @@ import { BaseService } from '../BaseService';
 
 type AdminNotificationServiceArguments = {
     lightdashConfig: LightdashConfig;
+    analytics: LightdashAnalytics;
     emailClient: EmailClient;
-    featureFlagModel: FeatureFlagModel;
     organizationMemberProfileModel: OrganizationMemberProfileModel;
     organizationModel: OrganizationModel;
     projectModel: ProjectModel;
@@ -28,9 +27,9 @@ type AdminNotificationServiceArguments = {
 export class AdminNotificationService extends BaseService {
     private readonly lightdashConfig: LightdashConfig;
 
-    private readonly emailClient: EmailClient;
+    private readonly analytics: LightdashAnalytics;
 
-    private readonly featureFlagModel: FeatureFlagModel;
+    private readonly emailClient: EmailClient;
 
     private readonly organizationMemberProfileModel: OrganizationMemberProfileModel;
 
@@ -42,8 +41,8 @@ export class AdminNotificationService extends BaseService {
 
     constructor({
         lightdashConfig,
+        analytics,
         emailClient,
-        featureFlagModel,
         organizationMemberProfileModel,
         organizationModel,
         projectModel,
@@ -51,45 +50,19 @@ export class AdminNotificationService extends BaseService {
     }: AdminNotificationServiceArguments) {
         super({ serviceName: 'AdminNotificationService' });
         this.lightdashConfig = lightdashConfig;
+        this.analytics = analytics;
         this.emailClient = emailClient;
-        this.featureFlagModel = featureFlagModel;
         this.organizationMemberProfileModel = organizationMemberProfileModel;
         this.organizationModel = organizationModel;
         this.projectModel = projectModel;
         this.userModel = userModel;
     }
 
-    private async isFeatureEnabled(
-        organizationUuid: string,
-        account?: Account,
-    ): Promise<boolean> {
-        try {
-            const registeredUser =
-                account?.user?.type === 'registered' ? account.user : undefined;
-
-            const flag = await this.featureFlagModel.get({
-                featureFlagId: FeatureFlags.AdminChangeNotifications,
-                user: registeredUser
-                    ? {
-                          userUuid: registeredUser.userUuid,
-                          organizationUuid,
-                          organizationName:
-                              account?.organization?.name ?? undefined,
-                      }
-                    : undefined,
-            });
-            return flag.enabled;
-        } catch {
-            return false;
-        }
-    }
-
     private static getServiceAccountDescription(
         account: Account,
     ): string | undefined {
         if (account.authentication?.type === 'service-account') {
-            return (account.authentication as { description?: string })
-                .description;
+            return account.authentication.serviceAccountDescription;
         }
         return undefined;
     }
@@ -164,15 +137,6 @@ export class AdminNotificationService extends BaseService {
         previousRole: OrganizationMemberRole | undefined,
         newRole: OrganizationMemberRole,
     ): Promise<void> {
-        const isEnabled = await this.isFeatureEnabled(
-            organizationUuid,
-            account,
-        );
-        if (!isEnabled) {
-            this.logger.debug('Admin change notifications disabled');
-            return;
-        }
-
         const isPromotion = newRole === OrganizationMemberRole.ADMIN;
         const isDemotion = previousRole === OrganizationMemberRole.ADMIN;
 
@@ -234,6 +198,15 @@ export class AdminNotificationService extends BaseService {
                 recipientEmails,
                 payload,
             );
+            this.analytics.track({
+                event: 'admin_notification.sent',
+                userId: payload.changedBy.userUuid,
+                properties: {
+                    organizationId: payload.organizationUuid,
+                    projectId: payload.projectUuid,
+                    notificationType: payload.type,
+                },
+            });
 
             this.logger.info(
                 `Sent org admin ${
@@ -265,15 +238,6 @@ export class AdminNotificationService extends BaseService {
             previousRole,
             newRole,
         } = params;
-        const isEnabled = await this.isFeatureEnabled(
-            organizationUuid,
-            account,
-        );
-        if (!isEnabled) {
-            this.logger.debug('Admin change notifications disabled');
-            return;
-        }
-
         const isPromotion =
             newRole === ProjectMemberRole.ADMIN &&
             previousRole !== ProjectMemberRole.ADMIN;
@@ -332,6 +296,15 @@ export class AdminNotificationService extends BaseService {
                 recipientEmails,
                 payload,
             );
+            this.analytics.track({
+                event: 'admin_notification.sent',
+                userId: payload.changedBy.userUuid,
+                properties: {
+                    organizationId: payload.organizationUuid,
+                    projectId: payload.projectUuid,
+                    notificationType: payload.type,
+                },
+            });
 
             this.logger.info(
                 `Sent project admin ${
@@ -356,18 +329,6 @@ export class AdminNotificationService extends BaseService {
         projectName: string;
         changedBy: Account;
     }): Promise<void> {
-        if (
-            !(await this.isFeatureEnabled(
-                params.organizationUuid,
-                params.changedBy,
-            ))
-        ) {
-            this.logger.debug('Admin change notifications disabled', {
-                organizationUuid: params.organizationUuid,
-            });
-            return;
-        }
-
         try {
             const orgName = await this.getOrganizationName(
                 params.organizationUuid,
@@ -418,6 +379,15 @@ export class AdminNotificationService extends BaseService {
                 recipients,
                 payload,
             );
+            this.analytics.track({
+                event: 'admin_notification.sent',
+                userId: payload.changedBy.userUuid,
+                properties: {
+                    organizationId: payload.organizationUuid,
+                    projectId: payload.projectUuid,
+                    notificationType: payload.type,
+                },
+            });
         } catch (error) {
             this.logger.error(
                 'Failed to send connection settings change notification',

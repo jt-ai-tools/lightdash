@@ -1,8 +1,13 @@
-import { type CreateSavedChartVersion } from '@lightdash/common';
+import {
+    type CreateSavedChartVersion,
+    type SavedChart,
+} from '@lightdash/common';
 import { IconChartBar } from '@tabler/icons-react';
 import { useCallback, useEffect, useMemo, useState, type FC } from 'react';
-import { useParams } from 'react-router';
 import useDashboardStorage from '../../../../hooks/dashboard/useDashboardStorage';
+import { useContentAuthoringEnabled } from '../../../../hooks/useContentAuthoringEnabled';
+import { useProjectUuid } from '../../../../hooks/useProjectUuid';
+import { useModalHostedDashboard } from '../../../../providers/Explorer/useIsModalHosted';
 import MantineModal, { type MantineModalProps } from '../../MantineModal';
 import { SaveToDashboard } from './SaveToDashboard';
 import { SaveToSpaceOrDashboard } from './SaveToSpaceOrDashboard';
@@ -14,8 +19,25 @@ interface ChartCreateModalProps extends Pick<
 > {
     savedData: CreateSavedChartVersion;
     defaultSpaceUuid?: string;
-    onConfirm: (savedData: CreateSavedChartVersion) => void;
+    onConfirm: (savedChart: SavedChart) => void;
     chartMetadata?: ChartMetadata;
+    /**
+     * When true, ignore the editing-dashboard context and let the user choose a
+     * space or dashboard destination instead of auto-saving to the originating
+     * dashboard.
+     */
+    forceSpaceOrDashboardChoice?: boolean;
+    /**
+     * When true, the modal is being used to save an existing chart as a new
+     * chart. The title becomes "Save as..." and, if the editor was opened from
+     * a dashboard, the originating dashboard is offered as a destination.
+     */
+    isSaveAs?: boolean;
+    redirectOnSuccess?: boolean;
+    showViewChartAction?: boolean;
+    forcedSpaceUuid?: string;
+    /** Chart-level palette chosen before the first save. */
+    colorPaletteUuid?: string | null;
 }
 
 enum SaveMode {
@@ -30,13 +52,35 @@ const ChartCreateModal: FC<ChartCreateModalProps> = ({
     defaultSpaceUuid,
     onConfirm,
     chartMetadata,
+    forceSpaceOrDashboardChoice = false,
+    isSaveAs = false,
+    redirectOnSuccess = true,
+    showViewChartAction = true,
+    forcedSpaceUuid,
+    colorPaletteUuid,
 }) => {
+    const authoringEnabled = useContentAuthoringEnabled();
     // Store it in the state to avoid losing the param when the user switches between tables
     const [spaceUuid] = useState(defaultSpaceUuid);
 
     const { getEditingDashboardInfo } = useDashboardStorage();
-    const [editingDashboardInfo, setEditingDashboardInfo] = useState(() =>
+    const hostDashboard = useModalHostedDashboard();
+    const [storedDashboardInfo, setEditingDashboardInfo] = useState(() =>
         getEditingDashboardInfo(),
+    );
+    // A modal host supplies the dashboard directly; sessionStorage is only for
+    // the navigate-away flow.
+    const editingDashboardInfo = useMemo(
+        () =>
+            hostDashboard
+                ? {
+                      name: hostDashboard.name,
+                      dashboardUuid: hostDashboard.uuid,
+                      dashboardSlug: null,
+                      activeTabUuid: null,
+                  }
+                : storedDashboardInfo,
+        [hostDashboard, storedDashboardInfo],
     );
 
     useEffect(() => {
@@ -46,20 +90,38 @@ const ChartCreateModal: FC<ChartCreateModalProps> = ({
     }, [opened, getEditingDashboardInfo]);
 
     const saveMode = useMemo(() => {
+        if (forceSpaceOrDashboardChoice) {
+            return SaveMode.DEFAULT;
+        }
         if (editingDashboardInfo.name && editingDashboardInfo.dashboardUuid) {
             return SaveMode.TO_DASHBOARD;
         }
         return SaveMode.DEFAULT;
-    }, [editingDashboardInfo]);
+    }, [editingDashboardInfo, forceSpaceOrDashboardChoice]);
 
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
 
     const getModalTitle = useCallback(() => {
+        if (isSaveAs) {
+            return 'Save as new chart';
+        }
         if (saveMode === SaveMode.TO_DASHBOARD) {
             return `Save chart to "${editingDashboardInfo.name}"`;
         }
         return 'Save chart';
-    }, [saveMode, editingDashboardInfo]);
+    }, [saveMode, editingDashboardInfo, isSaveAs]);
+
+    const originatingDashboard =
+        isSaveAs &&
+        editingDashboardInfo.dashboardUuid &&
+        editingDashboardInfo.name
+            ? {
+                  dashboardUuid: editingDashboardInfo.dashboardUuid,
+                  dashboardName: editingDashboardInfo.name,
+              }
+            : null;
+
+    if (!authoringEnabled) return null;
 
     return (
         <MantineModal
@@ -76,6 +138,7 @@ const ChartCreateModal: FC<ChartCreateModalProps> = ({
                     dashboardName={editingDashboardInfo.name}
                     dashboardUuid={editingDashboardInfo.dashboardUuid}
                     savedData={savedData}
+                    colorPaletteUuid={colorPaletteUuid}
                     onClose={onClose}
                     defaults={chartMetadata}
                 />
@@ -85,14 +148,19 @@ const ChartCreateModal: FC<ChartCreateModalProps> = ({
                 <SaveToSpaceOrDashboard
                     projectUuid={projectUuid}
                     savedData={savedData}
+                    colorPaletteUuid={colorPaletteUuid}
                     onConfirm={onConfirm}
                     onClose={onClose}
                     defaultSpaceUuid={spaceUuid}
+                    forcedSpaceUuid={forcedSpaceUuid}
                     dashboardInfoFromSavedData={{
                         dashboardName: savedData.dashboardName ?? null,
                         dashboardUuid: savedData.dashboardUuid ?? null,
                     }}
+                    originatingDashboard={originatingDashboard}
                     chartMetadata={chartMetadata}
+                    redirectOnSuccess={redirectOnSuccess}
+                    showViewChartAction={showViewChartAction}
                 />
             )}
         </MantineModal>

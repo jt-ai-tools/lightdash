@@ -1,11 +1,16 @@
+import {
+    type CustomDimensionWriteback,
+    type CustomMetricWriteback,
+    type WritebackColumn,
+} from '../../compiler/writebackColumn';
 // Mock schema file with comments, different multi-line strings, different types of quotes, different types of arrays
 import {
     BinType,
-    type CustomBinDimension,
     CustomDimensionType,
-    type CustomSqlDimension,
     DimensionType,
     MetricType,
+    type CustomBinDimension,
+    type CustomSqlDimension,
 } from '../../types/field';
 import { type AdditionalMetric } from '../../types/metricQuery';
 
@@ -101,6 +106,12 @@ models:
  - label: table_a
 `;
 
+export const dimensionColumn = (
+    model: string,
+    column: string,
+    sql: string = `\${TABLE}.${column}`,
+): WritebackColumn => ({ model, column, sql, isScalarArrayElement: false });
+
 export const CUSTOM_METRIC: AdditionalMetric = {
     name: 'new_metric',
     description: 'description',
@@ -180,19 +191,15 @@ models:
             fixed_width_id:
               label: Fixed width name
               type: string
-              sql: CONCAT(FLOOR(\${TABLE}.dim_a / 10) * 10, ' - ', (FLOOR(\${TABLE}.dim_a / 10)
-                + 1) * 10 - 1)
+              sql: CONCAT(FLOOR(\${TABLE}.dim_a / 10) * 10, ' - ', (FLOOR(\${TABLE}.dim_a / 10) + 1) * 10 - 1)
             range_id:
               label: Range name
               type: string
-              sql: >-
+              sql: |-
                 CASE
                             WHEN \${TABLE}.dim_a IS NULL THEN NULL
-                WHEN \${TABLE}.dim_a >= 0 AND \${TABLE}.dim_a < 10 THEN CONCAT(0,
-                '-', 10)
-
-                WHEN \${TABLE}.dim_a >= 11 AND \${TABLE}.dim_a < 20 THEN
-                CONCAT(11, '-', 20)
+                WHEN \${TABLE}.dim_a >= 0 AND \${TABLE}.dim_a < 10 THEN CONCAT(0, '-', 10)
+                WHEN \${TABLE}.dim_a >= 11 AND \${TABLE}.dim_a < 20 THEN CONCAT(11, '-', 20)
                             END
   - name: table_b
     description: >-
@@ -241,3 +248,17 @@ export const EXPECTED_SCHEMA_YML_WITH_NEW_MODEL = `models:
           dimension:
             type: string
 `;
+
+export const CUSTOM_METRIC_WRITEBACK: CustomMetricWriteback = {
+    field: CUSTOM_METRIC,
+    column: dimensionColumn('table_a', 'dim_a'),
+};
+
+export const CUSTOM_DIMENSION_WRITEBACKS: CustomDimensionWriteback[] = [
+    CUSTOM_SQL_DIMENSION,
+    FIXED_WIDTH_BIN_DIMENSION,
+    CUSTOM_RANGE_BIN_DIMENSION,
+].map((dimension) => ({
+    field: dimension,
+    column: dimensionColumn('table_a', 'dim_a'),
+}));

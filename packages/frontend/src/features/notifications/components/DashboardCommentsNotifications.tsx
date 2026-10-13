@@ -1,6 +1,5 @@
-import { type Notification } from '@lightdash/common';
-import { Menu } from '@mantine-8/core';
-import { Text, Tooltip, useMantineTheme } from '@mantine/core';
+import { type NotificationDashboardComment } from '@lightdash/common';
+import { Menu, Text, Tooltip, useMantineTheme } from '@mantine/core';
 import { IconCircleFilled } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import { useCallback, type FC } from 'react';
@@ -10,10 +9,11 @@ import { useTimeAgo } from '../../../hooks/useTimeAgo';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { EventName } from '../../../types/Events';
 import { useUpdateNotification } from '../hooks/useNotifications';
+import classes from './DashboardCommentsNotifications.module.css';
 
 type Props = {
     projectUuid: string;
-    notifications: Notification[];
+    notifications: NotificationDashboardComment[];
 };
 
 const NotificationTime: FC<{ createdAt: Date }> = ({ createdAt }) => {
@@ -29,7 +29,13 @@ const NotificationTime: FC<{ createdAt: Date }> = ({ createdAt }) => {
                 </Text>
             }
         >
-            <Text ta="right" mb="one" fw={500} color="ldGray.5">
+            <Text
+                fz="sm"
+                ta="right"
+                mb="one"
+                fw={500}
+                className={classes.notificationTime}
+            >
                 {date}
             </Text>
         </Tooltip>
@@ -46,7 +52,7 @@ export const DashboardCommentsNotifications: FC<Props> = ({
     const { mutateAsync: updateNotification } = useUpdateNotification();
 
     const handleOnNotificationClick = useCallback(
-        async (notification: Notification) => {
+        async (notification: NotificationDashboardComment) => {
             await updateNotification({
                 notificationId: notification.notificationId,
                 resourceType: notification.resourceType,
@@ -93,11 +99,13 @@ export const DashboardCommentsNotifications: FC<Props> = ({
                         />
                     }
                     onClick={() => handleOnNotificationClick(notification)}
-                    fz="xs"
+                    fz="sm"
                 >
                     <>
                         <NotificationTime createdAt={notification.createdAt} />
-                        <Text c="ldGray.3">{notification.message} </Text>
+                        <Text fz="sm" className={classes.notificationMessage}>
+                            {notification.message}
+                        </Text>
                     </>
                 </Menu.Item>
             ))}

@@ -1,23 +1,17 @@
 import {
     assertUnreachable,
     getErrorMessage,
-    type OrganizationMemberProfile,
     type Space,
 } from '@lightdash/common';
-import {
-    Button,
-    Group,
-    MantineProvider,
-    useMantineColorScheme,
-    type DefaultMantineColor,
-} from '@mantine/core';
-import { useForm, zodResolver, type UseFormReturnType } from '@mantine/form';
+import { Button, Group, type DefaultMantineColor } from '@mantine/core';
+import { useForm, type UseFormReturnType } from '@mantine/form';
 import { type Icon } from '@tabler/icons-react';
+import { zod4Resolver as zodResolver } from 'mantine-form-zod-resolver';
 import { useState, type FC } from 'react';
 import { useNavigate } from 'react-router';
 import { z } from 'zod';
 import useToaster from '../../../hooks/toaster/useToaster';
-import { useOrganizationUsers } from '../../../hooks/useOrganizationUsers';
+import { useOptionalProjectRoute } from '../../../hooks/useProjectRoute';
 import {
     useCreateMutation,
     useSpace,
@@ -25,10 +19,10 @@ import {
     useUpdateMutation,
 } from '../../../hooks/useSpaces';
 import MantineModal from '../MantineModal';
-import { SpacePrivateAccessType } from '../ShareSpaceModal/ShareSpaceSelect';
+import { InheritanceType } from '../ShareSpaceModal/ShareSpaceModalUtils';
 import CreateSpaceModalContent from './CreateSpaceModalContent';
 import { DeleteSpaceModal } from './DeleteSpaceModal';
-import { ActionType, CreateModalStep } from './types';
+import { ActionType } from './types';
 import UpdateSpaceModalContent from './UpdateSpaceModalContent';
 
 interface ActionModalProps {
@@ -46,7 +40,6 @@ interface ActionModalProps {
     isLoading: boolean;
     shouldRedirect?: boolean;
     parentSpaceUuid: Space['parentSpaceUuid'];
-    rootSpace?: Pick<Space, 'name' | 'uuid'>;
 }
 
 export interface SpaceModalBody {
@@ -54,19 +47,8 @@ export interface SpaceModalBody {
     form: UseFormReturnType<Space>;
 }
 
-export interface CreateSpaceModalBody
-    extends Pick<ActionModalProps, 'parentSpaceUuid' | 'onClose' | 'rootSpace'>,
-        SpaceModalBody {
-    modalStep: CreateModalStep;
-    projectUuid: string;
-    privateAccessType: SpacePrivateAccessType;
-    onPrivateAccessTypeChange: (type: SpacePrivateAccessType) => void;
-    organizationUsers: OrganizationMemberProfile[] | undefined;
-}
-
 export interface DeleteSpaceModalBody
-    extends Pick<CreateSpaceModalBody, 'data' | 'form'>,
-        Pick<ActionModalProps, 'title' | 'icon'> {
+    extends SpaceModalBody, Pick<ActionModalProps, 'title' | 'icon'> {
     isLoading: boolean;
     handleSubmit: (values: Space) => void;
     onClose: () => void;
@@ -89,17 +71,13 @@ const SpaceModal: FC<ActionModalProps> = ({
     onClose = () => {},
     onSubmitForm,
     parentSpaceUuid,
-    rootSpace,
 }) => {
     const { showToastError } = useToaster();
-    const { colorScheme } = useMantineColorScheme();
 
-    const { data: organizationUsers } = useOrganizationUsers();
-    const [privateAccessType, setPrivateAccessType] = useState(
-        SpacePrivateAccessType.PRIVATE,
+    const isNestedSpace = !!parentSpaceUuid;
+    const [inheritanceValue, setInheritanceValue] = useState<InheritanceType>(
+        InheritanceType.INHERIT,
     );
-
-    const [modalStep, setModalStep] = useState(CreateModalStep.SET_NAME);
 
     const form = useForm<Space>({
         initialValues: actionType === ActionType.CREATE ? undefined : data,
@@ -107,17 +85,17 @@ const SpaceModal: FC<ActionModalProps> = ({
     });
 
     const handleSubmit = (values: Space) => {
-        if (
-            actionType === ActionType.CREATE &&
-            modalStep === CreateModalStep.SET_NAME &&
-            privateAccessType === SpacePrivateAccessType.SHARED
-        ) {
-            setModalStep(CreateModalStep.SET_ACCESS);
-            return;
-        }
-
         try {
-            onSubmitForm?.(values);
+            if (actionType === ActionType.CREATE) {
+                onSubmitForm?.({
+                    ...values,
+                    inheritParentPermissions: isNestedSpace
+                        ? true
+                        : inheritanceValue === InheritanceType.INHERIT,
+                });
+            } else {
+                onSubmitForm?.(values);
+            }
         } catch (e: any) {
             showToastError({
                 title: 'Error saving',
@@ -145,109 +123,61 @@ const SpaceModal: FC<ActionModalProps> = ({
     }
 
     return (
-        <MantineProvider inherit theme={{ colorScheme }}>
-            <MantineModal
-                opened
-                size="lg"
-                icon={icon}
-                title={title}
-                onClose={onClose}
-                actions={
-                    <Group spacing="xs" position="right">
-                        {actionType === ActionType.CREATE &&
-                            modalStep === CreateModalStep.SET_ACCESS && (
-                                <>
-                                    <Button
-                                        variant="outline"
-                                        onClick={(
-                                            ev: React.MouseEvent<HTMLButtonElement>,
-                                        ) => {
-                                            form.setValues({
-                                                access: undefined,
-                                            });
-                                            setModalStep(
-                                                CreateModalStep.SET_NAME,
-                                            );
-                                            ev.preventDefault();
-                                        }}
-                                    >
-                                        Back
-                                    </Button>
-
-                                    <Button
-                                        type="submit"
-                                        disabled={isDisabled || !form.isValid}
-                                        color={confirmButtonColor}
-                                        loading={isLoading}
-                                        form="form-space-action-modal"
-                                    >
-                                        {confirmButtonLabel}
-                                    </Button>
-                                </>
-                            )}
-
-                        {actionType === ActionType.CREATE &&
-                            modalStep === CreateModalStep.SET_NAME &&
-                            !(
-                                privateAccessType ===
-                                SpacePrivateAccessType.PRIVATE
-                            ) && (
-                                <Button
-                                    type="submit"
-                                    disabled={isDisabled || !form.isValid}
-                                    form="form-space-action-modal"
-                                >
-                                    Continue
-                                </Button>
-                            )}
-
-                        {(actionType !== ActionType.CREATE ||
-                            (actionType === ActionType.CREATE &&
-                                modalStep === CreateModalStep.SET_NAME &&
-                                privateAccessType ===
-                                    SpacePrivateAccessType.PRIVATE)) && (
-                            <Button
-                                type="submit"
-                                disabled={isDisabled || !form.isValid}
-                                color={confirmButtonColor}
-                                loading={isLoading}
-                                form="form-space-action-modal"
-                            >
-                                {confirmButtonLabel}
-                            </Button>
-                        )}
-                    </Group>
-                }
+        <MantineModal
+            opened
+            size="lg"
+            icon={icon}
+            title={title}
+            onClose={onClose}
+            actions={
+                <Group gap="xs" justify="flex-end">
+                    <Button
+                        type="submit"
+                        disabled={isDisabled || !form.isValid}
+                        color={confirmButtonColor}
+                        loading={isLoading}
+                        form="form-space-action-modal"
+                        // Walkthrough marker for create:Space: the space is
+                        // created here; the learner then opens it by name.
+                        // See scripts/scope-tours/generate.ts.
+                        data-tour-scope="create:Space"
+                        data-tour-step="2"
+                        data-tour-route="/projects/:projectUuid/spaces"
+                        data-tour-label="Click Create"
+                        data-tour-title="Create a space"
+                        data-tour-interactive="true"
+                        data-tour-via='[data-tour-nav="browse"] >> [data-tour-nav="all-spaces"] >> [data-tour-anchor="add-space"] >> [data-tour-anchor="space-name"]'
+                        data-tour-docs="explore/spaces.mdx#creating-a-space:1"
+                    >
+                        {confirmButtonLabel}
+                    </Button>
+                </Group>
+            }
+        >
+            <form
+                name={title}
+                onSubmit={form.onSubmit(handleSubmit)}
+                id="form-space-action-modal"
             >
-                <form
-                    name={title}
-                    onSubmit={form.onSubmit(handleSubmit)}
-                    id="form-space-action-modal"
-                >
-                    {actionType === ActionType.CREATE ? (
-                        <CreateSpaceModalContent
-                            projectUuid={projectUuid}
-                            data={data}
-                            modalStep={modalStep}
-                            form={form}
-                            privateAccessType={privateAccessType}
-                            onPrivateAccessTypeChange={setPrivateAccessType}
-                            organizationUsers={organizationUsers}
-                            parentSpaceUuid={parentSpaceUuid}
-                            rootSpace={rootSpace}
-                            onClose={onClose}
-                        />
-                    ) : actionType === ActionType.UPDATE ? (
-                        <UpdateSpaceModalContent data={data} form={form} />
-                    ) : (
-                        assertUnreachable(
-                            actionType,
-                            'Unexpected action in space',
-                        )
-                    )}
-                </form>
-            </MantineModal>
-        </MantineProvider>
+                {actionType === ActionType.CREATE ? (
+                    <CreateSpaceModalContent
+                        form={form}
+                        projectUuid={projectUuid}
+                        parentSpaceUuid={parentSpaceUuid}
+                        inheritanceValue={inheritanceValue}
+                        onInheritanceChange={setInheritanceValue}
+                    />
+                ) : actionType === ActionType.UPDATE ? (
+                    <UpdateSpaceModalContent
+                        data={data}
+                        form={form}
+                        projectUuid={projectUuid}
+                    />
+                ) : (
+                    assertUnreachable(actionType, 'Unexpected action in space')
+                )}
+            </form>
+        </MantineModal>
     );
 };
 
@@ -262,6 +192,9 @@ const SpaceActionModal: FC<
     parentSpaceUuid,
     ...props
 }) => {
+    const projectRoute = useOptionalProjectRoute();
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ?? projectUuid;
     const { data, isInitialLoading } = useSpace(projectUuid, spaceUuid, {
         enabled: !!spaceUuid,
     });
@@ -273,7 +206,7 @@ const SpaceActionModal: FC<
             onSuccess: (space) => {
                 if (shouldRedirect) {
                     void navigate(
-                        `/projects/${projectUuid}/spaces/${space.uuid}`,
+                        `/projects/${projectUrlIdentifier}/spaces/${space.uuid}`,
                     );
                 }
             },
@@ -293,7 +226,6 @@ const SpaceActionModal: FC<
         if (actionType === ActionType.CREATE) {
             const result = await createMutation({
                 name: state.name,
-                isPrivate: state.isPrivate,
                 access: state.access?.map((access) => ({
                     userUuid: access.userUuid,
                     role: access.role,
@@ -301,14 +233,18 @@ const SpaceActionModal: FC<
                 ...(parentSpaceUuid && {
                     parentSpaceUuid,
                 }),
+                ...(state.inheritParentPermissions !== undefined && {
+                    inheritParentPermissions: state.inheritParentPermissions,
+                }),
             });
             onSubmitForm?.(result);
         } else if (actionType === ActionType.UPDATE) {
             const result = await updateMutation({
                 name: state.name,
                 ...(!parentSpaceUuid && {
-                    isPrivate: state.isPrivate,
+                    inheritParentPermissions: state.inheritParentPermissions,
                 }),
+                colorPaletteUuid: state.colorPaletteUuid,
             });
             onSubmitForm?.(result);
         } else if (actionType === ActionType.DELETE) {
@@ -337,7 +273,6 @@ const SpaceActionModal: FC<
             isDisabled={isWorking}
             isLoading={isWorking}
             parentSpaceUuid={parentSpaceUuid}
-            rootSpace={data?.breadcrumbs?.[0]}
             {...props}
         />
     );

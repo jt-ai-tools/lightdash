@@ -1,27 +1,40 @@
-// eslint-disable-next-line import/extensions
-import { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
-// eslint-disable-next-line import/extensions
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import express, { type Router } from 'express';
-import { IncomingMessage } from 'http';
-
 import {
+    AgentActorSurface,
     ApiKeyAccount,
     ForbiddenError,
     getErrorMessage,
     LightdashError,
     MissingConfigError,
     OauthAccount,
+    ParameterError,
     ServiceAcctAccount,
     UserAttributeValueMap,
 } from '@lightdash/common';
+// eslint-disable-next-line import/extensions
+import { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+// eslint-disable-next-line import/extensions
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { randomUUID } from 'crypto';
+import express, { type RequestHandler, type Router } from 'express';
+import { IncomingMessage } from 'http';
+import { validate as isValidUuid } from 'uuid';
+import { z } from 'zod';
+import { assertOAuthMcpToolAllowed } from '../auth/oauthScopes/mcpTools';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
+import { allowApiKeyAuthentication } from '../controllers/authentication';
 import {
-    allowApiKeyAuthentication,
-    allowOauthAuthentication,
-} from '../controllers/authentication';
-import { ExtraContext, McpService } from '../ee/services/McpService/McpService';
+    ExtraContext,
+    isProjectScopedMcpTool,
+    McpService,
+    type McpServerToolOptions,
+} from '../ee/services/McpService/McpService';
 import Logger from '../logging/logger';
+import {
+    agentExecutionContext,
+    createAgentExecutionContext,
+} from '../services/AiAccessService/agentExecutionContext';
 import { userAttributeOverridesSchema } from '../services/UserAttributesService/UserAttributeUtils';
+import { aliasMcpBearerPersonalAccessToken } from './mcpAuthentication';
 
 const mcpRouter: Router = express.Router({ mergeParams: true });
 
@@ -34,6 +47,34 @@ function getMcpService(req: express.Request): McpService {
 }
 
 const MCP_USER_ATTRIBUTE_HEADER = 'X-Lightdash-User-Attributes';
+const MCP_PROJECT_HEADER = 'X-Lightdash-Project';
+
+/**
+ * Extracts the project binding from the project-specific route or the legacy
+ * X-Lightdash-Project header. Project-level permissions are enforced by the
+ * services invoked by each MCP tool.
+ */
+export function extractMcpProjectUuid(
+    req: Pick<express.Request, 'headers' | 'params'>,
+): string | undefined {
+    const routeProjectUuid = req.params.projectUuid;
+    if (routeProjectUuid !== undefined) {
+        if (!isValidUuid(routeProjectUuid)) {
+            throw new ParameterError('Invalid project UUID in MCP URL');
+        }
+        return routeProjectUuid;
+    }
+
+    const headerValue = req.headers[MCP_PROJECT_HEADER.toLowerCase()];
+    if (!headerValue || typeof headerValue !== 'string') {
+        return undefined;
+    }
+    if (!isValidUuid(headerValue)) {
+        Logger.warn(`Invalid ${MCP_PROJECT_HEADER} header: not a UUID`);
+        return undefined;
+    }
+    return headerValue;
+}
 
 /**
  * Extracts user attribute overrides from the X-Lightdash-User-Attributes header.
@@ -70,6 +111,129 @@ function extractUserAttributesFromHeader(
     }
 }
 
+const legacyToolCallSchema = z
+    .object({
+        method: z.literal('tools/call'),
+        params: z
+            .object({
+                name: z.string(),
+                arguments: z.record(z.string(), z.unknown()).optional(),
+            })
+            .passthrough(),
+    })
+    .passthrough();
+
+const injectLegacyToolScope = (
+    body: unknown,
+    scope: { projectUuid: string; agentUuid: string | null },
+): { body: unknown; injected: boolean } => {
+    const toolCall = legacyToolCallSchema.safeParse(body);
+    if (
+        !toolCall.success ||
+        !isProjectScopedMcpTool(toolCall.data.params.name) ||
+        toolCall.data.params.arguments?.projectUuid !== undefined
+    ) {
+        return { body, injected: false };
+    }
+
+    return {
+        body: {
+            ...toolCall.data,
+            params: {
+                ...toolCall.data.params,
+                arguments: {
+                    projectUuid: scope.projectUuid,
+                    ...(scope.agentUuid ? { agentUuid: scope.agentUuid } : {}),
+                    ...toolCall.data.params.arguments,
+                },
+            },
+        },
+        injected: true,
+    };
+};
+
+const MCP_PROTOCOL_VERSION_HEADER = 'MCP-Protocol-Version';
+
+function extractProtocolVersionFromHeader(
+    req: express.Request,
+): string | undefined {
+    const headerValue = req.headers[MCP_PROTOCOL_VERSION_HEADER.toLowerCase()];
+    return typeof headerValue === 'string' ? headerValue : undefined;
+}
+
+/**
+ * Only single-message bodies are inspected: a method inside a JSON-RPC batch
+ * array is missed (batching was removed in protocol 2025-06-18, so this only
+ * affects older clients).
+ */
+function getJsonRpcMethod(req: express.Request): string | undefined {
+    const { body }: { body: unknown } = req;
+    return typeof body === 'object' &&
+        body !== null &&
+        'method' in body &&
+        typeof body.method === 'string'
+        ? body.method
+        : undefined;
+}
+
+function isInitializeRequest(req: express.Request): boolean {
+    return getJsonRpcMethod(req) === 'initialize';
+}
+
+function isToolsListRequest(req: express.Request): boolean {
+    return getJsonRpcMethod(req) === 'tools/list';
+}
+
+const MCP_SESSION_ID_HEADER = 'Mcp-Session-Id';
+
+/**
+ * The transport is stateless, so the session id is purely an analytics
+ * correlation token: minted on initialize, echoed back by spec-compliant
+ * clients on every subsequent request, never used as server-side state.
+ * Only UUIDs (the shape we mint) are accepted back — anything else is
+ * dropped rather than persisted.
+ */
+function extractSessionIdFromHeader(req: express.Request): string | undefined {
+    const headerValue = req.headers[MCP_SESSION_ID_HEADER.toLowerCase()];
+    if (typeof headerValue !== 'string' || !isValidUuid(headerValue)) {
+        return undefined;
+    }
+    return headerValue;
+}
+
+/**
+ * Reads the client identity from an MCP initialize request body
+ * ({ method: 'initialize', params: { clientInfo: { name, version } } }).
+ * Non-initialize requests never carry clientInfo (stateless transport).
+ */
+function extractClientInfoFromInitialize(
+    req: express.Request,
+): { name: string; version: string | null } | undefined {
+    if (!isInitializeRequest(req)) {
+        return undefined;
+    }
+    const { body } = req as { body: object };
+    const params =
+        'params' in body && typeof body.params === 'object'
+            ? (body.params as { clientInfo?: unknown })
+            : undefined;
+    const clientInfo = params?.clientInfo;
+    if (
+        typeof clientInfo !== 'object' ||
+        clientInfo === null ||
+        !('name' in clientInfo) ||
+        typeof clientInfo.name !== 'string' ||
+        clientInfo.name.length === 0
+    ) {
+        return undefined;
+    }
+    const version =
+        'version' in clientInfo && typeof clientInfo.version === 'string'
+            ? clientInfo.version
+            : null;
+    return { name: clientInfo.name, version };
+}
+
 /*
 MCP servers MUST use the HTTP header WWW-Authenticate when returning a 401 Unauthorized to indicate
 the location of the resource server metadata URL as described in RFC9728 Section 5.1 "WWW-Authenticate Response".
@@ -83,6 +247,10 @@ const returnHeaderIfUnauthenticated = (
     if (req.account?.isAuthenticated()) {
         next();
     } else {
+        const authHeaderPresent = !!req.headers.authorization;
+        Logger.warn(
+            `[MCP] Auth failed — header present: ${authHeaderPresent}, account: ${req.account?.authentication?.type ?? 'none'}`,
+        );
         const oauthService = req.services.getOauthService();
         const baseUrl = oauthService.getSiteUrl();
         res.set(
@@ -93,19 +261,40 @@ const returnHeaderIfUnauthenticated = (
     }
 };
 
+// Passport 401s credential-less requests itself, hiding the WWW-Authenticate header OAuth discovery needs
+const authenticateOnlyWithCredentials: RequestHandler = (req, res, next) => {
+    if (!req.headers.authorization && !req.isAuthenticated()) {
+        next();
+        return;
+    }
+    allowApiKeyAuthentication(req, res, next);
+};
+
 // MCP endpoint - supports Streamable HTTP
 // Keep the MCP router as raw Express because:
 // - MCP protocol requirements don't align with REST/TSOA patterns
 // - We need full control over HTTP streaming and headers
 // - It follows the same pattern as other protocol-specific endpoints (OAuth)
 mcpRouter.all(
-    '/',
-    allowOauthAuthentication,
-    allowApiKeyAuthentication,
+    ['/', '/projects/:projectUuid'],
+    aliasMcpBearerPersonalAccessToken,
+    authenticateOnlyWithCredentials,
+    requireOAuthScopeOperation('mcpRouter.handle'),
     returnHeaderIfUnauthenticated,
     async (req, res) => {
         try {
+            const authType = req.account?.authentication?.type ?? 'none';
+            const userEmail = req.user?.email ?? 'unknown';
+            Logger.info(
+                `[MCP] ${req.method} request — auth: ${authType}, user: ${userEmail}`,
+            );
+
             const mcpService = getMcpService(req);
+            const { account } = req;
+            if (!account) {
+                throw new ForbiddenError('MCP request is missing an account');
+            }
+            mcpService.canAccessMcp(account);
 
             // Check if MCP is enabled (either via config or AI Copilot flag)
             const isEnabled = await mcpService.isEnabled(req.user!);
@@ -142,7 +331,112 @@ mcpRouter.all(
                 // SDK 1.26.0 requires a new server+transport per request in stateless mode
                 // to prevent cross-client response data leaks (CVE-2026-25536)
                 // See: https://github.com/advisories/GHSA-345p-7cg4-v4c7
-                const mcpServer = mcpService.createServer();
+                const pinnedProjectUuid = extractMcpProjectUuid(req);
+                const parsedToolCall = legacyToolCallSchema.safeParse(req.body);
+                if (parsedToolCall.success) {
+                    assertOAuthMcpToolAllowed(
+                        req.user!.ability,
+                        parsedToolCall.data.params.name,
+                    );
+                }
+                let legacyContextInjected = false;
+                if (
+                    parsedToolCall.success &&
+                    isProjectScopedMcpTool(parsedToolCall.data.params.name) &&
+                    parsedToolCall.data.params.arguments?.projectUuid ===
+                        undefined
+                ) {
+                    const legacyScope = await mcpService.getLegacyToolScope(
+                        req.user!,
+                        pinnedProjectUuid,
+                    );
+                    if (legacyScope) {
+                        const injectedRequest = injectLegacyToolScope(
+                            req.body,
+                            legacyScope,
+                        );
+                        req.body = injectedRequest.body;
+                        legacyContextInjected = injectedRequest.injected;
+                    }
+                }
+                const userAgent = req.account?.requestContext?.userAgent;
+                const protocolVersion = extractProtocolVersionFromHeader(req);
+
+                // Session ids group tool calls made over one client
+                // connection. Assigned on initialize (spec: clients MUST echo
+                // the header on all subsequent requests); the stateless
+                // transport skips session validation, so this stays a pure
+                // correlation token with no server-side session state.
+                const isInitialize = isInitializeRequest(req);
+                const sessionId = isInitialize
+                    ? randomUUID()
+                    : extractSessionIdFromHeader(req);
+                if (isInitialize && sessionId) {
+                    res.setHeader(MCP_SESSION_ID_HEADER, sessionId);
+                }
+
+                // The transport is stateless, so clientInfo only ever appears
+                // on initialize requests; store it so later tool calls can
+                // attach the client identity by matching user agent.
+                const clientInfo = extractClientInfoFromInitialize(req);
+                if (clientInfo && userAgent && req.user) {
+                    await mcpService.captureClientInfo({
+                        user: req.user,
+                        clientName: clientInfo.name,
+                        clientVersion: clientInfo.version,
+                        userAgent,
+                    });
+                }
+                // Content-write tools are only registered when the org-level
+                // setting allows it, so admins can lock down MCP edits.
+                // run_sql is only registered when the caller has
+                // manage:SqlRunner, so viewers don't see (and the LLM doesn't
+                // loop on) a tool they can never invoke.
+                // These lookups are independent, so resolve them together
+                // rather than paying each round trip serially per request.
+                const [
+                    mcpContentWritesEnabled,
+                    scheduledDeliveryEnabled,
+                    runSqlEnabled,
+                    runMetricQueryEnabled,
+                    filterExpressionsEnabled,
+                    documentsEnabled,
+                    dataAppBuildsEnabled,
+                    agentIdentityEnabled,
+                ] = await Promise.all([
+                    mcpService.isContentToolsEnabled(req.user!),
+                    mcpService.isCreateScheduledDeliveryEnabled(req.user!),
+                    mcpService.isRunSqlEnabled(req.user!, pinnedProjectUuid),
+                    mcpService.isRunMetricQueryEnabled(
+                        req.user!,
+                        pinnedProjectUuid,
+                    ),
+                    mcpService.isFilterExpressionsEnabled(req.user!),
+                    mcpService.isDocumentsEnabled(req.user!),
+                    mcpService.isDataAppBuildsEnabled(
+                        req.user!,
+                        pinnedProjectUuid,
+                    ),
+                    mcpService.isAgentIdentityEnabled(req.user!),
+                ]);
+                const toolOptions: McpServerToolOptions = {
+                    req: {
+                        pinnedProjectUuid,
+                        user: req.user,
+                        account: req.account,
+                    },
+                    featureAvailability: {
+                        mcpContentWritesEnabled,
+                        scheduledDeliveryEnabled,
+                        runSqlEnabled,
+                        runMetricQueryEnabled,
+                        filterExpressionsEnabled,
+                        documentsEnabled,
+                        dataAppBuildsEnabled,
+                        agentIdentityEnabled,
+                    },
+                };
+                const mcpServer = await mcpService.createServer(toolOptions);
                 const transport = new StreamableHTTPServerTransport({
                     enableJsonResponse: true,
                     sessionIdGenerator: undefined,
@@ -154,7 +448,7 @@ mcpRouter.all(
                     extractUserAttributesFromHeader(req);
 
                 // Add auth info to request for the transport
-                // The token details is loaded on the authentication middleware allowOauthAuthentication
+                // The token details is loaded on the authentication middleware allowApiKeyAuthentication
                 const authReq: IncomingMessage & {
                     auth?: AuthInfo;
                 } = req;
@@ -164,7 +458,14 @@ mcpRouter.all(
                     const extra: ExtraContext = {
                         user: req.user,
                         account: oauthAuth,
+                        getAgentPermissionService: () =>
+                            req.services.getAgentPermissionService(),
                         headerUserAttributes,
+                        headerProjectUuid: pinnedProjectUuid,
+                        legacyContextInjected,
+                        userAgent,
+                        protocolVersion,
+                        sessionId,
                     };
                     authReq.auth = {
                         token: oauthAuth.authentication.token,
@@ -180,6 +481,11 @@ mcpRouter.all(
                         user: req.user,
                         account: apiKeyAuth,
                         headerUserAttributes,
+                        headerProjectUuid: pinnedProjectUuid,
+                        legacyContextInjected,
+                        userAgent,
+                        protocolVersion,
+                        sessionId,
                     };
                     authReq.auth = {
                         token: apiKeyAuth.authentication.source,
@@ -196,6 +502,11 @@ mcpRouter.all(
                         user: req.user,
                         account: serviceAccountAuth,
                         headerUserAttributes,
+                        headerProjectUuid: pinnedProjectUuid,
+                        legacyContextInjected,
+                        userAgent,
+                        protocolVersion,
+                        sessionId,
                     };
                     authReq.auth = {
                         token: serviceAccountAuth.authentication.source,
@@ -205,7 +516,34 @@ mcpRouter.all(
                     };
                 }
 
-                return await transport.handleRequest(authReq, res, req.body);
+                const startedAt = Date.now();
+                if (!req.account)
+                    throw new Error('Authenticated account not found');
+                await agentExecutionContext.run(
+                    createAgentExecutionContext({
+                        account: req.account,
+                        surface: AgentActorSurface.MCP,
+                        clientId: null,
+                        agentUuid: null,
+                        agentIdentityEnabled,
+                    }),
+                    async () => {
+                        await mcpService.recordDisabledToolRefusal(
+                            req.user!,
+                            req.body,
+                            toolOptions.featureAvailability,
+                        );
+                        return transport.handleRequest(authReq, res, req.body);
+                    },
+                );
+                if (authReq.auth && isToolsListRequest(req)) {
+                    mcpService.recordToolList({
+                        catalogue: toolOptions,
+                        authInfo: authReq.auth,
+                        durationMs: Date.now() - startedAt,
+                    });
+                }
+                return undefined;
             }
 
             res.status(405).json({ error: 'Method not allowed' });

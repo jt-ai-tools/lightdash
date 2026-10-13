@@ -8,11 +8,12 @@ import {
     Button,
     Divider,
     Group,
+    Paper,
+    Stack,
     Text,
-} from '@mantine-8/core';
-import { IconBook, IconInfoCircle } from '@tabler/icons-react';
+} from '@mantine/core';
+import { IconBook, IconBrandGithub, IconInfoCircle } from '@tabler/icons-react';
 import { useState, type FC } from 'react';
-
 import useApp from '../providers/App/useApp';
 import {
     TrackPage,
@@ -39,15 +40,41 @@ const AboutFooter: FC<{ minimal?: boolean; maxWidth?: number }> = ({
         healthState.data?.latest.version &&
         healthState.data.version !== healthState.data.latest.version &&
         healthState.data?.mode === LightdashMode.DEFAULT;
+    // Cloud plans are per organization; the instance license says nothing about them
+    const isCloud = healthState.data?.mode === LightdashMode.CLOUD_BETA;
+    const licenseStatus = healthState.data?.license;
+    const licenseDisplay = licenseStatus?.valid
+        ? {
+              badge: 'Valid',
+              color: 'green',
+              description: 'Enterprise features are enabled.',
+          }
+        : licenseStatus?.hasLicenseKey
+          ? {
+                badge: 'Not valid',
+                color: 'red',
+                description: 'The configured license key is not valid.',
+            }
+          : {
+                badge: 'No license',
+                color: 'gray',
+                description: 'No enterprise license key is configured.',
+            };
 
     return (
         <TrackSection name={SectionName.PAGE_FOOTER}>
-            <Box mt={FOOTER_MARGIN} h={FOOTER_HEIGHT} component="footer">
+            <Box
+                mt={FOOTER_MARGIN}
+                h={FOOTER_HEIGHT}
+                component="footer"
+                style={{ flexShrink: 0 }}
+            >
                 <Divider color="ldGray.2" w="100%" mb="-1px" />
 
                 <Group
                     h="100%"
-                    miw={minimal ? '100%' : maxWidth}
+                    miw={0}
+                    w="100%"
                     maw={maxWidth}
                     justify="space-between"
                     mx="auto"
@@ -55,7 +82,7 @@ const AboutFooter: FC<{ minimal?: boolean; maxWidth?: number }> = ({
                     <Button
                         variant={minimal ? 'transparent' : 'subtle'}
                         color="ldGray.7"
-                        p="xs"
+                        size="xs"
                         fw="500"
                         leftSection={<Logo />}
                         loading={healthState.isInitialLoading}
@@ -64,12 +91,7 @@ const AboutFooter: FC<{ minimal?: boolean; maxWidth?: number }> = ({
                         {!minimal && 'Lightdash - '}
                         {healthState.data && `v${healthState.data.version}`}
                         {showUpdateBadge && (
-                            <Badge
-                                variant="light"
-                                ml="xs"
-                                radius="xs"
-                                size="xs"
-                            >
+                            <Badge ml="xs" radius="xs" size="xs">
                                 New version available!
                             </Badge>
                         )}
@@ -80,15 +102,10 @@ const AboutFooter: FC<{ minimal?: boolean; maxWidth?: number }> = ({
                             href="https://docs.lightdash.com/"
                             target="_blank"
                         >
-                            <ActionIcon
-                                color="ldGray.7"
-                                p="xs"
-                                size="lg"
-                                variant="subtle"
-                            >
+                            <ActionIcon color="ldGray.7" size="md">
                                 <MantineIcon
                                     icon={IconBook}
-                                    size="lg"
+                                    size="sm"
                                     color="ldGray.7"
                                 />
                             </ActionIcon>
@@ -100,14 +117,14 @@ const AboutFooter: FC<{ minimal?: boolean; maxWidth?: number }> = ({
                             leftSection={
                                 <MantineIcon
                                     icon={IconBook}
-                                    size="lg"
+                                    size="sm"
                                     color="ldGray.7"
                                 />
                             }
-                            variant="light"
+                            variant="subtle"
                             color="ldGray.7"
+                            size="xs"
                             fw="500"
-                            p="xs"
                         >
                             Documentation
                         </MantineLinkButton>
@@ -120,58 +137,116 @@ const AboutFooter: FC<{ minimal?: boolean; maxWidth?: number }> = ({
                 onClose={() => setIsOpen(false)}
                 title="About Lightdash"
                 icon={IconInfoCircle}
-                cancelLabel={false}
-                actions={
-                    <Group gap="sm">
-                        <MantineLinkButton
-                            href="https://docs.lightdash.com/"
-                            target="_blank"
-                            variant="default"
-                        >
-                            Docs
-                        </MantineLinkButton>
-                        <MantineLinkButton
-                            href="https://github.com/lightdash/lightdash"
-                            target="_blank"
-                            variant="default"
-                        >
-                            Github
-                        </MantineLinkButton>
-                    </Group>
-                }
+                size="md"
+                modalBodyProps={{ py: 'lg' }}
             >
                 <TrackPage
                     name={PageName.ABOUT_LIGHTDASH}
                     type={PageType.MODAL}
                 >
-                    <Text fw={500}>
-                        <b>Version:</b>{' '}
-                        {healthState.data
-                            ? `v${healthState.data.version}`
-                            : 'n/a'}
-                    </Text>
-                    {showUpdateBadge && (
-                        <Alert
-                            title="New version available!"
-                            color="blue"
-                            icon={<IconInfoCircle size={17} />}
-                        >
-                            <Text c="blue">
-                                The version v{healthState.data?.latest.version}{' '}
-                                is now available. Please follow the instructions
-                                in the{' '}
-                                <Anchor
-                                    href="https://docs.lightdash.com/self-host/update-lightdash"
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    underline="always"
-                                >
-                                    How to update version
-                                </Anchor>{' '}
-                                documentation.
-                            </Text>
-                        </Alert>
-                    )}
+                    <Stack gap="md">
+                        <Text fz="sm" c="dimmed">
+                            {isCloud
+                                ? 'Instance details.'
+                                : 'Instance details and licensing status.'}
+                        </Text>
+
+                        <Paper radius="md" p="md">
+                            <Stack gap="md">
+                                <Group justify="space-between" wrap="nowrap">
+                                    <Text fz="sm" c="dimmed">
+                                        Version
+                                    </Text>
+                                    <Text fz="sm" fw={600}>
+                                        {healthState.data
+                                            ? `v${healthState.data.version}`
+                                            : 'n/a'}
+                                    </Text>
+                                </Group>
+
+                                {!isCloud && (
+                                    <>
+                                        <Divider />
+
+                                        <Group
+                                            justify="space-between"
+                                            align="center"
+                                            wrap="nowrap"
+                                        >
+                                            <Box>
+                                                <Text fz="sm" fw={500}>
+                                                    Enterprise license
+                                                </Text>
+                                                <Text fz="xs" c="dimmed">
+                                                    {licenseDisplay.description}
+                                                </Text>
+                                            </Box>
+                                            <Badge
+                                                color={licenseDisplay.color}
+                                                flex="none"
+                                            >
+                                                {licenseDisplay.badge}
+                                            </Badge>
+                                        </Group>
+                                    </>
+                                )}
+                            </Stack>
+                        </Paper>
+
+                        {showUpdateBadge && (
+                            <Alert
+                                title="New version available!"
+                                color="blue"
+                                icon={<IconInfoCircle size={17} />}
+                            >
+                                <Text>
+                                    The version v
+                                    {healthState.data?.latest.version} is now
+                                    available. Please follow the instructions in
+                                    the{' '}
+                                    <Anchor
+                                        href="https://docs.lightdash.com/self-host/update-lightdash"
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        underline="always"
+                                    >
+                                        How to update version
+                                    </Anchor>{' '}
+                                    documentation.
+                                </Text>
+                            </Alert>
+                        )}
+
+                        <Group gap="xs">
+                            <MantineLinkButton
+                                href="https://docs.lightdash.com/"
+                                target="_blank"
+                                variant="subtle"
+                                color="ldGray.7"
+                                size="compact-sm"
+                                leftSection={
+                                    <MantineIcon icon={IconBook} size="sm" />
+                                }
+                            >
+                                Documentation
+                            </MantineLinkButton>
+                            <MantineLinkButton
+                                href="https://github.com/lightdash/lightdash"
+                                target="_blank"
+                                variant="subtle"
+                                color="ldGray.7"
+                                size="compact-sm"
+                                leftSection={
+                                    <MantineIcon
+                                        icon={IconBrandGithub}
+                                        size="sm"
+                                    />
+                                }
+                            >
+                                GitHub
+                            </MantineLinkButton>
+                        </Group>
+                    </Stack>
                 </TrackPage>
             </MantineModal>
         </TrackSection>

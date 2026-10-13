@@ -2,13 +2,18 @@ import { z } from 'zod';
 
 export const saveToDashboardSchema = z.object({
     dashboardUuid: z.string().nullable(),
+    newDashboardName: z
+        .string()
+        .min(1, 'Dashboard name is required')
+        .nullable(),
+    newDashboardDescription: z.string().nullable(),
 });
 
 export type SaveToDashboardFormType = z.infer<typeof saveToDashboardSchema>;
 
 export const saveToSpaceSchema = z.object({
     spaceUuid: z.string().nullable(),
-    newSpaceName: z.string().min(1).nullable(),
+    newSpaceName: z.string().min(1, 'Space name is required').nullable(),
 });
 
 export type SaveToSpaceFormType = z.infer<typeof saveToSpaceSchema>;
@@ -25,6 +30,7 @@ export const DEFAULT_CHART_METADATA = {
 
 export enum SaveDestination {
     Dashboard = 'dashboard',
+    OriginatingDashboard = 'originating_dashboard',
     Space = 'space',
 }
 

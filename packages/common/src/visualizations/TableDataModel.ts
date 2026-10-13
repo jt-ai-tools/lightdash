@@ -2,7 +2,6 @@ import { type AnyType } from '../types/any';
 import { type RawResultRow } from '../types/results';
 import { type ChartKind } from '../types/savedCharts';
 import { type SqlRunnerQuery, type SqlRunnerSortBy } from '../types/sqlRunner';
-
 import {
     type PivotChartData,
     type VizTableConfig,
@@ -22,7 +21,9 @@ export class TableDataModel {
     }) {
         this.resultsRunner = args.resultsRunner;
         this.columnsConfig =
-            args.columnsConfig ?? this.getResultOptions().defaultColumnConfig;
+            args.columnsConfig && Object.keys(args.columnsConfig).length > 0
+                ? args.columnsConfig
+                : this.getResultOptions().defaultColumnConfig;
     }
 
     private getColumns() {

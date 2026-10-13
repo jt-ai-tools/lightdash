@@ -3,28 +3,40 @@ import {
     ApiColorPalettesResponse,
     ApiCreatedColorPaletteResponse,
     ApiCreateGroupResponse,
+    ApiEnableLearnResponse,
+    ApiEnsurePlaygroundProjectResponse,
     ApiErrorPayload,
     ApiGroupListResponse,
+    ApiImpersonationOrganizationSettingsResponse,
+    ApiLearnAccessResponse,
     ApiOrganization,
     ApiOrganizationAllowedEmailDomains,
+    ApiOrganizationBrandResponse,
     ApiOrganizationMemberProfile,
     ApiOrganizationMemberProfiles,
     ApiOrganizationProjects,
+    ApiReassignUserDashboardsResponse,
     ApiReassignUserSchedulersResponse,
     ApiSuccessEmpty,
+    ApiUserDashboardsSummaryResponse,
     ApiUserSchedulersSummaryResponse,
-    AuthorizationError,
+    assertRegisteredAccount,
     CreateColorPalette,
     CreateGroup,
     CreateOrganization,
+    EnsurePlaygroundProjectRequest,
     getRequestMethod,
     KnexPaginateArgs,
     LightdashRequestMethodHeader,
     OrganizationMemberProfileUpdate,
+    ReassignUserDashboardsRequest,
     ReassignUserSchedulersRequest,
+    SaveOrganizationBrandRequest,
     UpdateAllowedEmailDomains,
     UpdateColorPalette,
+    UpdateImpersonationOrganizationSettings,
     UpdateOrganization,
+    UpdateOrganizationBrandRequest,
     UUID,
     type ApiCreateProjectResults,
     type ApiSuccess,
@@ -33,6 +45,7 @@ import {
 import {
     Body,
     Delete,
+    Deprecated,
     Get,
     Middlewares,
     OperationId,
@@ -47,8 +60,11 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
+    getDeprecatedRouteMiddleware,
     isAuthenticated,
     unauthorisedInDemo,
 } from './authentication';
@@ -63,7 +79,11 @@ export class OrganizationController extends BaseController {
      * @summary Get current organization
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('OrganizationController.getOrganization'),
+    ])
     @Get()
     @OperationId('GetMyOrganization')
     async getOrganization(
@@ -85,19 +105,24 @@ export class OrganizationController extends BaseController {
      * @param req express request
      * @param body the new organization settings
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('OrganizationController.createOrganization'),
+    ])
     @Put()
     @OperationId('CreateOrganization')
     async createOrganization(
         @Request() req: express.Request,
         @Body() body: CreateOrganization,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         await this.services
             .getOrganizationService()
-            .createAndJoinOrg(req.user!, body);
+            .createAndJoinOrg(toSessionUser(req.account), body);
         const sessionUser = await req.services
             .getUserService()
-            .getSessionByUserUuid(req.user!.userUuid);
+            .getSessionByUserUuid(req.account.user.userUuid);
         await new Promise<void>((resolve, reject) => {
             req.login(sessionUser, (err) => {
                 if (err) {
@@ -126,11 +151,93 @@ export class OrganizationController extends BaseController {
         @Request() req: express.Request,
         @Body() body: UpdateOrganization,
     ): Promise<ApiSuccessEmpty> {
-        await this.services.getOrganizationService().updateOrg(req.user!, body);
+        assertRegisteredAccount(req.account);
+        await this.services
+            .getOrganizationService()
+            .updateOrg(toSessionUser(req.account), body);
         this.setStatus(200);
         return {
             status: 'ok',
             results: undefined,
+        };
+    }
+
+    /**
+     * Get the organization's brand profile, previously fetched from Brandfetch.
+     * Returns null if no brand profile has been fetched yet.
+     * @summary Get organization brand
+     * @param req express request
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Get('/brand')
+    @OperationId('GetOrganizationBrand')
+    async getOrganizationBrand(
+        @Request() req: express.Request,
+    ): Promise<ApiOrganizationBrandResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getOrganizationService()
+                .getBrand(req.account),
+        };
+    }
+
+    /**
+     * Fetch the brand profile for a domain from Brandfetch without storing it.
+     * Used to preview a brand in the appearance settings before saving.
+     * Requires the Brandfetch API key to be configured on the instance.
+     * @summary Fetch organization brand
+     * @param req express request
+     * @param body the domain to fetch the brand for
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @Post('/brand/fetch')
+    @OperationId('FetchOrganizationBrand')
+    async fetchOrganizationBrand(
+        @Request() req: express.Request,
+        @Body() body: UpdateOrganizationBrandRequest,
+    ): Promise<ApiOrganizationBrandResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getOrganizationService()
+                .fetchBrandFromDomain(req.account, body.domain),
+        };
+    }
+
+    /**
+     * Save the organization's brand appearance as edited by the user. Stores the
+     * provided colors, logos, fonts and domain as-is without calling Brandfetch.
+     * @summary Save organization brand
+     * @param req express request
+     * @param body the brand appearance to persist
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @Put('/brand')
+    @OperationId('SaveOrganizationBrand')
+    async saveOrganizationBrand(
+        @Request() req: express.Request,
+        @Body() body: SaveOrganizationBrandRequest,
+    ): Promise<ApiOrganizationBrandResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getOrganizationService()
+                .saveBrand(req.account, body),
         };
     }
 
@@ -147,9 +254,10 @@ export class OrganizationController extends BaseController {
         @Request() req: express.Request,
         @Path() organizationUuid: string,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         await this.services
             .getOrganizationService()
-            .delete(organizationUuid, req.user!);
+            .delete(organizationUuid, toSessionUser(req.account));
         await new Promise<void>((resolve, reject) => {
             req.session.destroy((err) => {
                 if (err) {
@@ -170,7 +278,11 @@ export class OrganizationController extends BaseController {
      * @summary List organization projects
      * @param req express request
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('OrganizationController.getProjects'),
+    ])
     @Get('/projects')
     @OperationId('ListOrganizationProjects')
     async getProjects(
@@ -203,6 +315,7 @@ export class OrganizationController extends BaseController {
         @Query() projectUuid?: string,
         @Query() googleOidcOnly?: boolean,
     ): Promise<ApiOrganizationMemberProfiles> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         let paginateArgs: KnexPaginateArgs | undefined;
 
@@ -218,7 +331,7 @@ export class OrganizationController extends BaseController {
             results: await this.services
                 .getOrganizationService()
                 .getUsers(
-                    req.user!,
+                    toSessionUser(req.account),
                     includeGroups,
                     paginateArgs,
                     searchQuery,
@@ -233,20 +346,31 @@ export class OrganizationController extends BaseController {
      * @summary Get organization member by UUID
      * @param req express request
      * @param userUuid the uuid of the user
+     *
+     * @deprecated Use the GET /api/v1/org/users list endpoint instead
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use the GET /api/v1/org/users list endpoint instead.',
+        }),
+    ])
     @Get('/users/{userUuid}')
     @OperationId('GetOrganizationMemberByUuid')
+    @Deprecated()
     async getOrganizationMemberByUuid(
         @Request() req: express.Request,
         @Path() userUuid: UUID,
     ): Promise<ApiOrganizationMemberProfile> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getOrganizationService()
-                .getMemberByUuid(req.user!, userUuid),
+                .getMemberByUuid(toSessionUser(req.account), userUuid),
         };
     }
 
@@ -255,20 +379,31 @@ export class OrganizationController extends BaseController {
      * @summary Get organization member by email
      * @param req express request
      * @param email the email of the user
+     *
+     * @deprecated Use the GET /api/v1/org/users list endpoint instead
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use the GET /api/v1/org/users list endpoint instead.',
+        }),
+    ])
     @Get('/users/email/{email}')
     @OperationId('GetOrganizationMemberByEmail')
+    @Deprecated()
     async getOrganizationMemberByEmail(
         @Request() req: express.Request,
         @Path() email: string,
     ): Promise<ApiOrganizationMemberProfile> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getOrganizationService()
-                .getMemberByEmail(req.user!, email),
+                .getMemberByEmail(toSessionUser(req.account), email),
         };
     }
 
@@ -285,6 +420,10 @@ export class OrganizationController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        getDeprecatedRouteMiddleware(new Date('2025-08-27'), {
+            suffixMessage:
+                'Use the /api/v2/org/assignments/user/{userId} endpoint instead.',
+        }),
     ])
     @Patch('/users/{userUuid}')
     @OperationId('UpdateOrganizationMember')
@@ -294,12 +433,13 @@ export class OrganizationController extends BaseController {
         @Path() userUuid: string,
         @Body() body: OrganizationMemberProfileUpdate,
     ): Promise<ApiOrganizationMemberProfile> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getOrganizationService()
-                .updateMember(req.user!, userUuid, body),
+                .updateMember(toSessionUser(req.account), userUuid, body),
         };
     }
 
@@ -320,7 +460,10 @@ export class OrganizationController extends BaseController {
         @Request() req: express.Request,
         @Path() userUuid: string,
     ): Promise<ApiSuccessEmpty> {
-        await this.services.getUserService().delete(req.user!, userUuid);
+        assertRegisteredAccount(req.account);
+        await this.services
+            .getUserService()
+            .delete(toSessionUser(req.account), userUuid);
         this.setStatus(200);
         return {
             status: 'ok',
@@ -334,23 +477,26 @@ export class OrganizationController extends BaseController {
      * @param req express request
      * @param userUuid the uuid of the user
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'OrganizationController.getUserSchedulersSummary',
+        ),
+    ])
     @Get('/user/{userUuid}/schedulers-summary')
     @OperationId('GetUserSchedulersSummary')
     async getUserSchedulersSummary(
         @Request() req: express.Request,
         @Path() userUuid: string,
     ): Promise<ApiUserSchedulersSummaryResponse> {
-        if (!req.user) {
-            throw new AuthorizationError('User session not found');
-        }
-
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getSchedulerService()
-                .getUserSchedulersSummary(req.user, userUuid),
+                .getUserSchedulersSummary(toSessionUser(req.account), userUuid),
         };
     }
 
@@ -373,17 +519,79 @@ export class OrganizationController extends BaseController {
         @Path() userUuid: string,
         @Body() body: ReassignUserSchedulersRequest,
     ): Promise<ApiReassignUserSchedulersResponse> {
-        if (!req.user) {
-            throw new AuthorizationError('User session not found');
-        }
-
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getSchedulerService()
                 .reassignUserSchedulers(
-                    req.user,
+                    toSessionUser(req.account),
+                    userUuid,
+                    body.newOwnerUserUuid,
+                ),
+        };
+    }
+
+    /**
+     * Gets a summary of dashboards owned by a user across all projects
+     * @summary Get user dashboards
+     * @param req express request
+     * @param userUuid the uuid of the user
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'OrganizationController.getUserDashboardsSummary',
+        ),
+    ])
+    @Get('/user/{userUuid}/dashboards-summary')
+    @OperationId('GetUserDashboardsSummary')
+    async getUserDashboardsSummary(
+        @Request() req: express.Request,
+        @Path() userUuid: UUID,
+    ): Promise<ApiUserDashboardsSummaryResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getDashboardService()
+                .getUserDashboardsSummary(toSessionUser(req.account), userUuid),
+        };
+    }
+
+    /**
+     * Transfers ownership of all dashboards from one user to another
+     * @summary Reassign dashboards
+     * @param req express request
+     * @param userUuid the uuid of the user whose dashboards will be reassigned
+     * @param body the new owner details
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+        requireOAuthScopeOperation(
+            'OrganizationController.reassignUserDashboards',
+        ),
+    ])
+    @Patch('/user/{userUuid}/reassign-dashboards')
+    @OperationId('ReassignUserDashboards')
+    async reassignUserDashboards(
+        @Request() req: express.Request,
+        @Path() userUuid: UUID,
+        @Body() body: ReassignUserDashboardsRequest,
+    ): Promise<ApiReassignUserDashboardsResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getDashboardService()
+                .reassignUserDashboards(
+                    toSessionUser(req.account),
                     userUuid,
                     body.newOwnerUserUuid,
                 ),
@@ -401,12 +609,13 @@ export class OrganizationController extends BaseController {
     async getOrganizationAllowedEmailDomains(
         @Request() req: express.Request,
     ): Promise<ApiOrganizationAllowedEmailDomains> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getOrganizationService()
-                .getAllowedEmailDomains(req.user!),
+                .getAllowedEmailDomains(toSessionUser(req.account)),
         };
     }
 
@@ -423,12 +632,13 @@ export class OrganizationController extends BaseController {
         @Request() req: express.Request,
         @Body() body: UpdateAllowedEmailDomains,
     ): Promise<ApiOrganizationAllowedEmailDomains> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getOrganizationService()
-                .updateAllowedEmailDomains(req.user!, body),
+                .updateAllowedEmailDomains(toSessionUser(req.account), body),
         };
     }
 
@@ -449,9 +659,10 @@ export class OrganizationController extends BaseController {
         @Request() req: express.Request,
         @Body() body: CreateGroup,
     ): Promise<ApiCreateGroupResponse> {
+        assertRegisteredAccount(req.account);
         const group = await this.services
             .getOrganizationService()
-            .addGroupToOrganization(req.user!, body);
+            .addGroupToOrganization(toSessionUser(req.account), body);
         this.setStatus(201);
         return {
             status: 'ok',
@@ -465,7 +676,13 @@ export class OrganizationController extends BaseController {
      * @param req
      * @param includeMembers number of members to include
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'OrganizationController.listGroupsInOrganization',
+        ),
+    ])
     @Get('/groups')
     @OperationId('ListGroupsInOrganization')
     async listGroupsInOrganization(
@@ -475,6 +692,7 @@ export class OrganizationController extends BaseController {
         @Query() includeMembers?: number,
         @Query() searchQuery?: string,
     ): Promise<ApiGroupListResponse> {
+        assertRegisteredAccount(req.account);
         let paginateArgs: KnexPaginateArgs | undefined;
 
         if (pageSize && page) {
@@ -487,7 +705,7 @@ export class OrganizationController extends BaseController {
         const groups = await this.services
             .getOrganizationService()
             .listGroupsInOrganization(
-                req.user!,
+                toSessionUser(req.account),
                 includeMembers,
                 paginateArgs,
                 searchQuery,
@@ -505,19 +723,24 @@ export class OrganizationController extends BaseController {
      * Create a new color palette
      * @summary Create color palette
      */
-    @Middlewares([isAuthenticated, unauthorisedInDemo])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
     @Post('/color-palettes')
     @OperationId('CreateColorPalette')
     async createColorPalette(
         @Request() req: express.Request,
         @Body() body: CreateColorPalette,
     ): Promise<ApiCreatedColorPaletteResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(201);
         return {
             status: 'ok',
             results: await this.services
                 .getOrganizationService()
-                .createColorPalette(req.user!, body),
+                .createColorPalette(toSessionUser(req.account), body),
         };
     }
 
@@ -525,7 +748,11 @@ export class OrganizationController extends BaseController {
      * List all color palettes in the organization
      * @summary List color palettes
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('OrganizationController.getColorPalettes'),
+    ])
     @Get('/color-palettes')
     @OperationId('ListColorPalettes')
     async getColorPalettes(
@@ -536,7 +763,7 @@ export class OrganizationController extends BaseController {
             status: 'ok',
             results: await this.services
                 .getOrganizationService()
-                .getColorPalettes(req.user!),
+                .getColorPalettes(req.account!),
         };
     }
 
@@ -544,7 +771,11 @@ export class OrganizationController extends BaseController {
      * Update a color palette
      * @summary Update color palette
      */
-    @Middlewares([isAuthenticated, unauthorisedInDemo])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
     @Patch('/color-palettes/{colorPaletteUuid}')
     @OperationId('UpdateColorPalette')
     async updateColorPalette(
@@ -552,12 +783,17 @@ export class OrganizationController extends BaseController {
         @Path() colorPaletteUuid: string,
         @Body() body: UpdateColorPalette,
     ): Promise<ApiColorPaletteResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getOrganizationService()
-                .updateColorPalette(req.user!, colorPaletteUuid, body),
+                .updateColorPalette(
+                    toSessionUser(req.account),
+                    colorPaletteUuid,
+                    body,
+                ),
         };
     }
 
@@ -565,16 +801,21 @@ export class OrganizationController extends BaseController {
      * Delete a color palette
      * @summary Delete color palette
      */
-    @Middlewares([isAuthenticated, unauthorisedInDemo])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
     @Delete('/color-palettes/{colorPaletteUuid}')
     @OperationId('DeleteColorPalette')
     async deleteColorPalette(
         @Request() req: express.Request,
         @Path() colorPaletteUuid: string,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         await this.services
             .getOrganizationService()
-            .deleteColorPalette(req.user!, colorPaletteUuid);
+            .deleteColorPalette(toSessionUser(req.account), colorPaletteUuid);
         this.setStatus(200);
         return {
             status: 'ok',
@@ -586,19 +827,27 @@ export class OrganizationController extends BaseController {
      * Set a color palette as the active palette
      * @summary Set active color palette
      */
-    @Middlewares([isAuthenticated, unauthorisedInDemo])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
     @Post('/color-palettes/{colorPaletteUuid}/active')
     @OperationId('SetActiveColorPalette')
     async setActiveColorPalette(
         @Request() req: express.Request,
         @Path() colorPaletteUuid: string,
     ): Promise<ApiColorPaletteResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getOrganizationService()
-                .setActiveColorPalette(req.user!, colorPaletteUuid),
+                .setActiveColorPalette(
+                    toSessionUser(req.account),
+                    colorPaletteUuid,
+                ),
         };
     }
 
@@ -610,6 +859,7 @@ export class OrganizationController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('OrganizationController.createProject'),
     ])
     @Post('/projects')
     @OperationId('CreateProject')
@@ -617,17 +867,165 @@ export class OrganizationController extends BaseController {
         @Request() req: express.Request,
         @Body() body: CreateProjectOptionalCredentials,
     ): Promise<ApiSuccess<ApiCreateProjectResults>> {
+        assertRegisteredAccount(req.account);
         const results = await this.services
             .getProjectService()
             .createWithoutCompile(
-                req.user!,
+                toSessionUser(req.account),
                 body,
                 getRequestMethod(req.header(LightdashRequestMethodHeader)),
+                undefined,
+                body.asyncCopyContent
+                    ? { mode: 'async', compile: null }
+                    : { mode: 'sync' },
             );
 
         return {
             status: 'ok',
             results,
+        };
+    }
+
+    /**
+     * Return the organization's existing project or provision its sample-data
+     * playground when the new onboarding flow is available.
+     * @summary Ensure playground project
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @Post('/playground-projects/ensure')
+    @OperationId('EnsurePlaygroundProject')
+    async ensurePlaygroundProject(
+        @Request() req: express.Request,
+        @Body() body?: EnsurePlaygroundProjectRequest,
+    ): Promise<ApiEnsurePlaygroundProjectResponse> {
+        assertRegisteredAccount(req.account);
+        const user = toSessionUser(req.account);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getProjectService()
+                .ensurePlaygroundProject(user, body?.trigger),
+        };
+    }
+
+    /**
+     * Enable Learn for the current organization: create the training project
+     * with the caller as its admin. Org admins only. Idempotent.
+     * @summary Enable Learn
+     * @param req express request
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @Post('/training-project')
+    @OperationId('EnableLearn')
+    async enableLearn(
+        @Request() req: express.Request,
+    ): Promise<ApiEnableLearnResponse> {
+        assertRegisteredAccount(req.account);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getProjectService()
+                .enableLearn(toSessionUser(req.account)),
+        };
+    }
+
+    /**
+     * Everything the caller can do, anywhere: the scopes they hold through
+     * their organization role, any organization-level custom roles, and
+     * every project role they hold directly or through a group. The Learn
+     * library shows those features and keeps the rest behind a toggle.
+     * @summary Get Learn access
+     * @param req express request
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('OrganizationController.getLearnAccess'),
+    ])
+    @Get('/training-project/access')
+    @OperationId('GetLearnAccess')
+    async getLearnAccess(
+        @Request() req: express.Request,
+    ): Promise<ApiLearnAccessResponse> {
+        assertRegisteredAccount(req.account);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getRolesService()
+                .getLearnAccess(toSessionUser(req.account)),
+        };
+    }
+
+    /**
+     * Get the impersonation setting for the current organization
+     * @summary Get impersonation settings
+     * @param req express request
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation(
+            'OrganizationController.getImpersonationSettings',
+        ),
+    ])
+    @Get('/impersonation')
+    @OperationId('GetImpersonationSettings')
+    async getImpersonationSettings(
+        @Request() req: express.Request,
+    ): Promise<ApiImpersonationOrganizationSettingsResponse> {
+        assertRegisteredAccount(req.account);
+        const enabled = await this.services
+            .getOrganizationService()
+            .getImpersonationEnabled(toSessionUser(req.account));
+
+        return {
+            status: 'ok',
+            results: {
+                organizationUuid: req.account.organization.organizationUuid!,
+                impersonationEnabled: enabled,
+            },
+        };
+    }
+
+    /**
+     * Update the impersonation setting for the current organization
+     * @summary Update impersonation settings
+     * @param req express request
+     * @param body the new impersonation settings
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @Patch('/impersonation')
+    @OperationId('UpdateImpersonationSettings')
+    async updateImpersonationSettings(
+        @Request() req: express.Request,
+        @Body() body: UpdateImpersonationOrganizationSettings,
+    ): Promise<ApiImpersonationOrganizationSettingsResponse> {
+        assertRegisteredAccount(req.account);
+        await this.services
+            .getOrganizationService()
+            .updateImpersonationEnabled(
+                toSessionUser(req.account),
+                body.impersonationEnabled,
+            );
+
+        return {
+            status: 'ok',
+            results: {
+                organizationUuid: req.account.organization.organizationUuid!,
+                impersonationEnabled: body.impersonationEnabled,
+            },
         };
     }
 }

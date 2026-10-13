@@ -1,11 +1,18 @@
-import { MapChartLocation, MapChartType } from '@lightdash/common';
+import {
+    MapChartLocation,
+    MapChartType,
+    MapTileBackground,
+} from '@lightdash/common';
 import { useDisclosure } from '@mantine/hooks';
+import { captureException } from '@sentry/react';
 import { IconMap } from '@tabler/icons-react';
 import { scaleSqrt } from 'd3-scale';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
+    lazy,
     memo,
+    Suspense,
     useCallback,
     useEffect,
     useMemo,
@@ -14,17 +21,16 @@ import {
     type FC,
     type RefObject,
 } from 'react';
-import { renderToString } from 'react-dom/server';
 import {
     CircleMarker,
     GeoJSON,
     MapContainer,
-    TileLayer,
     Tooltip,
     useMap,
 } from 'react-leaflet';
 import * as topojson from 'topojson-client';
 import type { Topology } from 'topojson-specification';
+import useEmbed from '../../ee/providers/Embed/useEmbed';
 import {
     explorerActions,
     useExplorerDispatch,
@@ -33,15 +39,28 @@ import useLeafletMapConfig, {
     type ScatterPoint,
     type TooltipFieldInfo,
 } from '../../hooks/leaflet/useLeafletMapConfig';
+import { useMapTileTelemetry } from '../../hooks/leaflet/useMapTileTelemetry';
+import { useTileFallback } from '../../hooks/leaflet/useTileFallback';
 import { useContextMenuPermissions } from '../../hooks/useContextMenuPermissions';
+import { useProjectUuid } from '../../hooks/useProjectUuid';
+import { useAccount } from '../../hooks/user/useAccount';
+import { type MapUsageContext } from '../../providers/Tracking/types';
+import useTracking from '../../providers/Tracking/useTracking';
+import { EventName } from '../../types/Events';
 import { createMultiColorScale } from '../../utils/colorUtils';
-import { isMapVisualizationConfig } from '../LightdashVisualization/types';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
+import { resolveRequestUrl } from '../../utils/request';
+import Callout from '../common/Callout';
 import LoadingChart from '../common/LoadingChart';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
+import { isMapVisualizationConfig } from '../LightdashVisualization/types';
+import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
 import HeatmapLayer from './HeatmapLayer';
+import { MAX_HEXBIN_POINTS } from './hexbin/hexbinUtils';
 import MapContextMenu from './MapContextMenu';
 import MapLegend from './MapLegend';
+import MapTileLayer from './MapTileLayer';
+
+const HexbinLayer = lazy(() => import('./hexbin/HexbinLayer'));
 
 // Types for Leaflet internals used in the monkey-patch below
 interface LeafletMapPrototype {
@@ -53,11 +72,18 @@ interface LeafletAugmentedContainer extends HTMLElement {
     _leaflet_map?: L.Map;
 }
 
-// Monkey-patch Leaflet to handle "Map container is already initialized" error
-// that occurs with React 18 StrictMode's double-mounting behavior.
-// Instead of throwing, we remove the existing map and allow re-initialization.
+// Monkey-patch Leaflet to work around two React lifecycle issues:
+// 1. "Map container is already initialized" — React 18 StrictMode double-mounts,
+//    so we remove the existing map and allow re-initialization.
+// 2. "Cannot read properties of undefined (reading '_leaflet_pos')" — zoom
+//    transition callbacks can fire after React unmounts and destroys the DOM.
 (() => {
-    const MapPrototype = L.Map.prototype as unknown as LeafletMapPrototype;
+    const MapPrototype = L.Map.prototype as unknown as LeafletMapPrototype & {
+        _getMapPanePos: () => L.Point;
+        _mapPane: HTMLElement | undefined;
+    };
+
+    // Fix 1: Handle double-initialization
     const originalMapInitialize = MapPrototype.initialize;
     MapPrototype.initialize = function (
         this: L.Map,
@@ -67,27 +93,34 @@ interface LeafletAugmentedContainer extends HTMLElement {
         const container: LeafletAugmentedContainer | null =
             typeof id === 'string' ? document.getElementById(id) : id;
         if (container && container._leaflet_id) {
-            // Container already has a map - properly remove it first
-            // The map instance stores itself on the container as _leaflet_map
             const existingMap = container._leaflet_map;
             if (existingMap) {
                 existingMap.remove();
             } else {
-                // Fallback: just clear the ID if we can't find the map instance
                 delete container._leaflet_id;
             }
         }
-        // Store reference to this map on the container for future cleanup
         const result = originalMapInitialize.call(this, id, options);
         if (container) {
             container._leaflet_map = this;
         }
         return result;
     };
+
+    // Fix 2: Guard against destroyed map pane
+    const originalGetMapPanePos = MapPrototype._getMapPanePos;
+    MapPrototype._getMapPanePos = function (
+        this: typeof MapPrototype,
+    ): L.Point {
+        if (!this._mapPane) {
+            return new L.Point(0, 0);
+        }
+        return originalGetMapPanePos.call(this);
+    };
 })();
+import { MAP_FILL_NO_BASE_MAP_OPACITY } from './constants';
 // eslint-disable-next-line css-modules/no-unused-class
 import classes from './SimpleMap.module.css';
-import { MAP_FILL_NO_BASE_MAP_OPACITY } from './constants';
 
 // Helper to get formatted value from row data
 const getFormattedValue = (
@@ -114,8 +147,7 @@ type MapContentBaseProps = {
 
 type MapTooltipContentProps = MapContentBaseProps;
 
-// NOTE: Using inline styles because this is rendered via renderToString
-// and Mantine styles won't be applied
+// Inline styles: rendered into a Leaflet tooltip where Mantine styles don't apply
 const MapTooltipContent: FC<MapTooltipContentProps> = ({
     tooltipFields,
     rowData,
@@ -168,6 +200,50 @@ const MapTooltipContent: FC<MapTooltipContentProps> = ({
             )}
         </div>
     );
+};
+
+const escapeHtml = (value: string): string =>
+    value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+// HTML-string twin of MapTooltipContent, for Leaflet's imperative bindTooltip
+const getMapTooltipHtml = ({
+    tooltipFields,
+    rowData,
+    lat,
+    lon,
+    noData,
+}: MapContentBaseProps): string => {
+    if (noData) {
+        return `<div style="padding:4px 6px"><div style="font-size:14px"><strong>${escapeHtml(
+            noData.locationLabel,
+        )}:</strong> ${escapeHtml(
+            noData.locationValue,
+        )}</div><div style="font-size:14px;color:#868e96;font-style:italic">No data</div></div>`;
+    }
+
+    const rows = tooltipFields
+        .filter((f) => f.visible)
+        .map(
+            (field) =>
+                `<div style="font-size:14px"><strong>${escapeHtml(
+                    field.label,
+                )}:</strong> ${escapeHtml(
+                    getFormattedValue(rowData, field.fieldId),
+                )}</div>`,
+        )
+        .join('');
+    const coords =
+        lat !== undefined && lon !== undefined
+            ? `<div style="font-size:12px;color:#868e96;margin-top:8px">Lat: ${lat.toFixed(
+                  4,
+              )}, Lon: ${lon.toFixed(4)}</div>`
+            : '';
+    return `<div style="padding:4px 6px"><div style="display:flex;flex-direction:column;gap:2px">${rows}</div>${coords}</div>`;
 };
 
 // MapMarker component for scatter points with tooltip/context menu behavior
@@ -260,6 +336,25 @@ const MapRefUpdater: FC<{ mapRef: RefObject<L.Map | null> }> = ({ mapRef }) => {
 
 // Component to track map extent and dispatch to Redux
 // This does NOT cause re-renders because nothing subscribes to mapExtent during render
+const MapInteractionTracker: FC<{
+    onInteraction: (type: 'zoom' | 'pan', zoomLevel: number) => void;
+}> = ({ onInteraction }) => {
+    const map = useMap();
+
+    useEffect(() => {
+        const handleZoom = () => onInteraction('zoom', map.getZoom());
+        const handlePan = () => onInteraction('pan', map.getZoom());
+        map.on('zoomend', handleZoom);
+        map.on('dragend', handlePan);
+        return () => {
+            map.off('zoomend', handleZoom);
+            map.off('dragend', handlePan);
+        };
+    }, [map, onInteraction]);
+
+    return null;
+};
+
 const MapExtentTracker: FC = () => {
     const map = useMap();
     const dispatch = useExplorerDispatch();
@@ -334,23 +429,40 @@ const MapBoundsFitter: FC<{
             return; // Already fitted for this configuration, skip
         }
 
-        // For built-in maps, use fixed center/zoom instead of fitBounds
-        // (Alaska/Hawaii throw off USA bounds, and world should be centered)
-        if (mapType === MapChartLocation.USA) {
-            // Center on continental US
-            map.setView([39.8283, -98.5795], 3);
+        // Scatter/heatmap/hexbin: fit to the data points regardless of mapType
+        if (scatterData && scatterData.length > 0) {
+            try {
+                const points = scatterData.map(
+                    (p) => [p.lat, p.lon] as L.LatLngTuple,
+                );
+                const bounds = L.latLngBounds(points);
+                if (bounds.isValid()) {
+                    map.fitBounds(bounds, { padding: [20, 20] });
+                    lastFittedRef.current = {
+                        mapType,
+                        geoJsonUrl,
+                        hasFitted: true,
+                    };
+                    return;
+                }
+            } catch (error) {
+                console.warn('Failed to fit map to scatter bounds:', error);
+            }
+        }
+
+        // Built-in maps: keep the initial extent from useLeafletMapConfig.
+        // Fitting to GeoJSON would zoom out too far (Alaska/Hawaii for USA,
+        // Antarctica for WORLD, and EUROPE uses the global countries file).
+        if (
+            mapType === MapChartLocation.USA ||
+            mapType === MapChartLocation.EUROPE ||
+            mapType === MapChartLocation.WORLD
+        ) {
             lastFittedRef.current = { mapType, geoJsonUrl, hasFitted: true };
             return;
         }
 
-        if (mapType === MapChartLocation.WORLD) {
-            // Center at 0,0 and zoom out to show full world
-            map.setView([0, 0], 1.2);
-            lastFittedRef.current = { mapType, geoJsonUrl, hasFitted: true };
-            return;
-        }
-
-        // For custom maps, fit to GeoJSON bounds
+        // Custom maps: fit to GeoJSON bounds
         if (geoJsonData && geoJsonData.features.length > 0) {
             try {
                 const geoJsonLayer = L.geoJSON(geoJsonData);
@@ -365,27 +477,6 @@ const MapBoundsFitter: FC<{
                 }
             } catch (error) {
                 console.warn('Failed to fit map to GeoJSON bounds:', error);
-            }
-            return;
-        }
-
-        // Fit to scatter data bounds (scatter/heatmap maps)
-        if (scatterData && scatterData.length > 0) {
-            try {
-                const points = scatterData.map(
-                    (p) => [p.lat, p.lon] as L.LatLngTuple,
-                );
-                const bounds = L.latLngBounds(points);
-                if (bounds.isValid()) {
-                    map.fitBounds(bounds, { padding: [20, 20] });
-                    lastFittedRef.current = {
-                        mapType,
-                        geoJsonUrl,
-                        hasFitted: true,
-                    };
-                }
-            } catch (error) {
-                console.warn('Failed to fit map to scatter bounds:', error);
             }
         }
         // Note: geoJsonData and scatterData are intentionally in deps to re-fit when data loads,
@@ -429,10 +520,94 @@ const SimpleMap: FC<SimpleMapProps> = memo(
             leafletMapRef,
             minimal,
             colorPalette,
+            savedChartUuid,
         } = useVisualizationContext();
         const mapConfig = useLeafletMapConfig({
             isInDashboard: props.isInDashboard,
         });
+        const tracking = useTracking({ failSilently: true });
+        const { data: account } = useAccount();
+        const projectUuid = useProjectUuid();
+        const { embedToken } = useEmbed();
+        const usageContext: MapUsageContext = embedToken
+            ? 'embed'
+            : minimal
+              ? 'minimal'
+              : props.isInDashboard
+                ? 'dashboard'
+                : 'explore';
+        const {
+            activeTile,
+            activeBackground,
+            hasFallenBack,
+            tileLayerEventHandlers,
+        } = useTileFallback(
+            mapConfig?.tile ?? { url: null, attribution: '' },
+            mapConfig?.tileBackground ?? MapTileBackground.OPENSTREETMAP,
+            useCallback(
+                (event) => {
+                    captureException(
+                        new Error(
+                            `Map tile provider fallback: ${event.from} → ${event.to}`,
+                        ),
+                        {
+                            tags: {
+                                component: 'SimpleMap',
+                                tileProviderFrom: event.from,
+                                tileProviderTo: event.to,
+                            },
+                            extra: {
+                                errorCount: event.errorCount,
+                                successCount: event.successCount,
+                            },
+                        },
+                    );
+                    tracking?.track({
+                        name: EventName.MAP_TILE_FALLBACK,
+                        properties: {
+                            userId: account?.user?.id ?? null,
+                            organizationId:
+                                account?.organization?.organizationUuid ?? null,
+                            projectId: projectUuid ?? null,
+                            chartId: savedChartUuid ?? null,
+                            context: usageContext,
+                            fromTileBackground: event.from,
+                            toTileBackground: event.to,
+                            errorCount: event.errorCount,
+                            successCount: event.successCount,
+                        },
+                    });
+                },
+                [tracking, account, projectUuid, savedChartUuid, usageContext],
+            ),
+        );
+        const {
+            tileLayerEventHandlers: telemetryTileEventHandlers,
+            recordInteraction,
+        } = useMapTileTelemetry({
+            chartId: savedChartUuid ?? null,
+            projectId: projectUuid ?? null,
+            organizationId: account?.organization?.organizationUuid ?? null,
+            userId: account?.user?.id ?? null,
+            context: usageContext,
+            tileBackground:
+                mapConfig?.tileBackground ?? MapTileBackground.OPENSTREETMAP,
+            activeTileBackground: activeBackground,
+            didFallback: hasFallenBack,
+        });
+        const combinedTileLayerEventHandlers = useMemo(
+            () => ({
+                tileerror: () => {
+                    tileLayerEventHandlers.tileerror();
+                    telemetryTileEventHandlers.tileerror();
+                },
+                tileload: () => {
+                    tileLayerEventHandlers.tileload();
+                    telemetryTileEventHandlers.tileload();
+                },
+            }),
+            [tileLayerEventHandlers, telemetryTileEventHandlers],
+        );
         const { shouldShowMenu } = useContextMenuPermissions({ minimal });
 
         // Context menu state
@@ -516,7 +691,9 @@ const SimpleMap: FC<SimpleMapProps> = memo(
 
             const loadGeoJson = async () => {
                 try {
-                    const response = await fetch(mapConfig.geoJsonUrl!);
+                    const response = await fetch(
+                        resolveRequestUrl(mapConfig.geoJsonUrl!),
+                    );
                     const data = await response.json();
 
                     // Convert TopoJSON to GeoJSON if needed
@@ -704,6 +881,16 @@ const SimpleMap: FC<SimpleMapProps> = memo(
         }, [mapConfig]);
 
         const isHeatmap = mapConfig?.locationType === MapChartType.HEATMAP;
+        const isHexbin = mapConfig?.locationType === MapChartType.HEXBIN;
+
+        const [hexbinTruncated, setHexbinTruncated] = useState<{
+            totalPoints: number;
+        } | null>(null);
+
+        // Reset when leaving hex layer
+        useEffect(() => {
+            if (!isHexbin) setHexbinTruncated(null);
+        }, [isHexbin]);
 
         // Memoize choropleth/area mode calculations
         const regionData = useMemo(
@@ -847,17 +1034,14 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                           locationValue: rawPropertyValue.toString(),
                       };
 
-                // eslint-disable-next-line testing-library/render-result-naming-convention
-                const tooltipHtml = renderToString(
-                    <MapTooltipContent
-                        tooltipFields={mapConfig?.tooltipFields || []}
-                        rowData={rowData}
-                        noData={noData}
-                    />,
-                );
+                const tooltipHtml = getMapTooltipHtml({
+                    tooltipFields: mapConfig?.tooltipFields || [],
+                    rowData,
+                    noData,
+                });
 
                 if (layer instanceof L.Path) {
-                    layer.bindTooltip(tooltipHtml);
+                    layer.bindTooltip(tooltipHtml, { sticky: true });
 
                     // Determine the correct base and hover opacity for this region
                     const baseOpacity = regionEntry
@@ -952,6 +1136,9 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                         maxBoundsViscosity={1.0}
                     >
                         <MapRefUpdater mapRef={leafletMapRef} />
+                        <MapInteractionTracker
+                            onInteraction={recordInteraction}
+                        />
                         {/* Only track extent changes in explorer, not on dashboards */}
                         {!props.isInDashboard && <MapExtentTracker />}
                         <MapBoundsFitter
@@ -961,13 +1148,42 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                             geoJsonUrl={null}
                             hasSavedExtent={mapConfig.hasSavedExtent}
                         />
-                        {mapConfig.tile.url && (
-                            <TileLayer
-                                attribution={mapConfig.tile.attribution}
-                                url={mapConfig.tile.url}
+                        {activeTile.url && (
+                            <MapTileLayer
+                                key={activeTile.url}
+                                tile={activeTile}
+                                eventHandlers={combinedTileLayerEventHandlers}
                             />
                         )}
-                        {isHeatmap ? (
+                        {isHexbin ? (
+                            <Suspense fallback={null}>
+                                <HexbinLayer
+                                    points={scatterData}
+                                    colorScale={mapConfig.colors.scale}
+                                    opacity={mapConfig.hexbinConfig.opacity}
+                                    valueFieldLabel={mapConfig.valueFieldLabel}
+                                    sizingMode={
+                                        mapConfig.hexbinConfig.sizingMode
+                                    }
+                                    fixedResolution={
+                                        mapConfig.hexbinConfig.fixedResolution
+                                    }
+                                    valueBasis={
+                                        mapConfig.hexbinConfig.valueBasis
+                                    }
+                                    aggregation={
+                                        mapConfig.hexbinConfig.aggregation
+                                    }
+                                    showEmptyBins={
+                                        mapConfig.hexbinConfig.showEmptyBins
+                                    }
+                                    emptyBinColor={
+                                        mapConfig.hexbinConfig.emptyBinColor
+                                    }
+                                    onTruncated={setHexbinTruncated}
+                                />
+                            </Suspense>
+                        ) : isHeatmap ? (
                             <HeatmapLayer
                                 points={heatmapPoints}
                                 options={{
@@ -1008,6 +1224,14 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                             })
                         )}
                     </MapContainer>
+                    {isHexbin && hexbinTruncated && (
+                        <Callout variant="warning" mt="xs">
+                            Showing hex bins for the first{' '}
+                            {MAX_HEXBIN_POINTS.toLocaleString()} points of{' '}
+                            {hexbinTruncated.totalPoints.toLocaleString()}.
+                            Reduce the result set for accurate binning.
+                        </Callout>
+                    )}
                     {mapConfig.showLegend &&
                         (mapConfig.valueRange ||
                             mapConfig.sizeRange ||
@@ -1116,6 +1340,9 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                         maxBoundsViscosity={1.0}
                     >
                         <MapRefUpdater mapRef={leafletMapRef} />
+                        <MapInteractionTracker
+                            onInteraction={recordInteraction}
+                        />
                         {/* Only track extent changes in explorer, not on dashboards */}
                         {!props.isInDashboard && <MapExtentTracker />}
                         <MapBoundsFitter
@@ -1125,10 +1352,11 @@ const SimpleMap: FC<SimpleMapProps> = memo(
                             geoJsonUrl={mapConfig.geoJsonUrl}
                             hasSavedExtent={mapConfig.hasSavedExtent}
                         />
-                        {mapConfig.tile.url && (
-                            <TileLayer
-                                attribution={mapConfig.tile.attribution}
-                                url={mapConfig.tile.url}
+                        {activeTile.url && (
+                            <MapTileLayer
+                                key={activeTile.url}
+                                tile={activeTile}
+                                eventHandlers={combinedTileLayerEventHandlers}
                             />
                         )}
                         {geoJsonData?.features &&

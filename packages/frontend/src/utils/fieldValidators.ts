@@ -1,6 +1,10 @@
-import { isValidFrequency } from '@lightdash/common';
+import {
+    AWS_IAM_ROLE_ARN_INVALID_MESSAGE,
+    isAwsIamRoleArn as matchesAwsIamRoleArn,
+    isValidFrequency,
+} from '@lightdash/common';
 
-type FieldValidator<T> = (
+export type FieldValidator<T> = (
     fieldName: string,
 ) => (value: T | undefined) => string | undefined;
 
@@ -18,6 +22,9 @@ export const everyValidator = (
     };
 };
 
+export const isRequired: FieldValidator<string> = (fieldName) => (value) =>
+    !value || value.trim() === '' ? `${fieldName} is required` : undefined;
+
 export const isUppercase: FieldValidator<string> = (fieldName) => (value) =>
     !value || value === value.toUpperCase()
         ? undefined
@@ -29,16 +36,21 @@ export const hasNoWhiteSpaces: FieldValidator<string> =
             ? undefined
             : `${fieldName} should not have white spaces`;
 
-export const isGitRepository: FieldValidator<string> =
-    (fieldName) => (value) =>
-        !value || value.match(/.+\/.+/) || value.match(/^[a-zA-Z0-9.%_-]+$/)
-            ? undefined
-            : `${fieldName} should match the pattern "org/project" or "project"`;
+export const isGitRepository: FieldValidator<string> = (fieldName) => (value) =>
+    !value || value.match(/.+\/.+/) || value.match(/^[a-zA-Z0-9.%_-]+$/)
+        ? undefined
+        : `${fieldName} should match the pattern "org/project" or "project"`;
 
 export const startWithSlash: FieldValidator<string> = (fieldName) => (value) =>
     !value || value.match(/^\/.*/)
         ? undefined
         : `${fieldName} should start with a "/"`;
+
+export const isAwsIamRoleArn: FieldValidator<string> =
+    (_fieldName) => (value) =>
+        !value || matchesAwsIamRoleArn(value)
+            ? undefined
+            : AWS_IAM_ROLE_ARN_INVALID_MESSAGE;
 
 export const startWithHTTPSProtocol: FieldValidator<string> =
     (fieldName) => (value) =>

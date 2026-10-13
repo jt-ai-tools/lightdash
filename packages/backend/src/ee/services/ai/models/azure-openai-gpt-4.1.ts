@@ -12,6 +12,7 @@ export const getAzureProvider = (
         baseURL: config.endpoint,
         apiVersion: config.apiVersion,
         useDeploymentBasedUrls: config.useDeploymentBasedUrls,
+        headers: config.customHeaders,
     });
 
 export const getAzureGpt41Model = (
@@ -34,7 +35,7 @@ export const getAzureGpt41Model = (
         providerOptions: {
             // @ts-expect-error - provider should be set to openai for azure
             openai: {
-                strictJsonSchema: true,
+                // strictJsonSchema: provider default is true
                 ...(reasoningEnabled && {
                     reasoningSummary: 'auto',
                     reasoningEffort,

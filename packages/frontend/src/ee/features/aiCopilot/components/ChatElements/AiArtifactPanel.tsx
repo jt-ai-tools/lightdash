@@ -1,32 +1,101 @@
-import type { AiAgentMessageAssistant } from '@lightdash/common';
-import { Box, Center, Loader, Stack, Text } from '@mantine-8/core';
-import { IconExclamationCircle } from '@tabler/icons-react';
-import { memo, useMemo, type FC } from 'react';
+import {
+    AiResultType,
+    FeatureFlags,
+    getGroupByDimensions,
+    getWebAiChartConfig,
+    isAiAgentSqlArtifactVizQuery,
+    isAiComposerChartArtifactConfig,
+    isAiSqlChartArtifactConfig,
+    isCustomChartTypeSlugChartConfig,
+    parseVizConfig,
+    type AiAgentChartTypeOption,
+    type AiAgentMessageAssistant,
+} from '@lightdash/common';
+import {
+    ActionIcon,
+    Box,
+    Center,
+    Divider,
+    Group,
+    Loader,
+    Stack,
+    Text,
+} from '@mantine/core';
+import { IconExclamationCircle, IconX } from '@tabler/icons-react';
+import { clsx } from 'clsx';
+import { memo, useMemo, useState, type FC } from 'react';
+import EmptyStateLoader from '../../../../../components/common/EmptyStateLoader';
+import InlineErrorState from '../../../../../components/common/InlineErrorState';
 import MantineIcon from '../../../../../components/common/MantineIcon';
+import TruncatedText from '../../../../../components/common/TruncatedText';
+import { getAiAccessRefusal } from '../../../../../features/aiAccess/errors';
+import useHealth from '../../../../../hooks/health/useHealth';
+import { useInfiniteQueryResults } from '../../../../../hooks/useQueryResults';
+import { useServerFeatureFlag } from '../../../../../hooks/useServerOrClientFeatureFlag';
+import useApp from '../../../../../providers/App/useApp';
+import useIsEmbedded from '../../../../providers/Embed/useIsEmbedded';
+import { getAiAgentArtifactResultsUrl } from '../../hooks/aiAgentRouting';
 import { useAiAgentArtifact } from '../../hooks/useAiAgentArtifacts';
-import { useAiAgentThread } from '../../hooks/useProjectAiAgents';
+import { useAiAgentPermission } from '../../hooks/useAiAgentPermission';
+import {
+    getAiArtifactChartSource,
+    useAiArtifactCompiledSql,
+} from '../../hooks/useAiArtifactChart';
+import {
+    useAiAgentArtifactVizQuery,
+    useAiAgentThread,
+} from '../../hooks/useProjectAiAgents';
+import { clearPreview } from '../../store/aiArtifactSlice';
+import { useAiAgentStoreDispatch } from '../../store/hooks';
+import { AgentVisualizationChartTypeSwitcher } from './AgentVisualizationChartTypeSwitcher';
+import { getAgentVisualizationChartTypes } from './AgentVisualizationChartTypeSwitcher.utils';
+import { AiAccessCallout } from './AiAccessCallout';
+import styles from './AiArtifactPanel.module.css';
+import { AiChartQuickOptions } from './AiChartQuickOptions';
 import { AiChartVisualization } from './AiChartVisualization';
+import { AiComposerArtifactPanel } from './AiComposerArtifactPanel';
 import { AiDashboardVisualization } from './AiDashboardVisualization';
+import {
+    AiSqlArtifactActions,
+    AiSqlArtifactVisualization,
+} from './AiSqlArtifactVisualization';
+import { AiVisualizationRenderer } from './AiVisualizationRenderer';
 import { ChatElementsUtils } from './utils';
 
-type AiArtifactPanelProps = {
-    artifact: {
-        projectUuid: string;
-        agentUuid: string;
-        artifactUuid: string;
-        versionUuid: string;
-        messageUuid: string;
-        threadUuid: string;
-    };
-    showCloseButton?: boolean;
+type ArtifactRef = {
+    projectUuid: string;
+    agentUuid: string;
+    artifactUuid: string;
+    versionUuid: string;
+    messageUuid: string;
+    threadUuid: string;
 };
 
-export const AiArtifactPanel: FC<AiArtifactPanelProps> = memo(
-    ({ artifact, showCloseButton = true }) => {
+type AiArtifactPanelProps = {
+    artifact: ArtifactRef;
+    showCloseButton?: boolean;
+    // `floating` (default) = chromeless floating card with pill toolbar.
+    // `inline`             = legacy inline rendering for admin views.
+    variant?: 'floating' | 'inline';
+};
+
+const AiArtifactPanelContent: FC<
+    AiArtifactPanelProps & { fastDecisions: boolean }
+> = memo(
+    ({
+        artifact,
+        showCloseButton = true,
+        variant = 'floating',
+        fastDecisions,
+    }) => {
+        const dispatch = useAiAgentStoreDispatch();
+        const { data: health } = useHealth();
+
         const {
             data: artifactData,
             isLoading: isArtifactLoading,
             error: artifactError,
+            refetch: refetchArtifact,
         } = useAiAgentArtifact({
             projectUuid: artifact.projectUuid,
             agentUuid: artifact.agentUuid,
@@ -34,24 +103,208 @@ export const AiArtifactPanel: FC<AiArtifactPanelProps> = memo(
             versionUuid: artifact.versionUuid,
         });
 
-        const { data: thread } = useAiAgentThread(
+        const {
+            data: thread,
+            isLoading: isThreadLoading,
+            error: threadError,
+            refetch: refetchThread,
+        } = useAiAgentThread(
             artifact.projectUuid,
             artifact.agentUuid,
             artifact.threadUuid,
         );
 
-        const message = useMemo(() => {
-            return thread?.messages.find(
-                (msg) =>
-                    msg.role === 'assistant' &&
-                    msg.uuid === artifact.messageUuid,
-            ) as AiAgentMessageAssistant | undefined;
-        }, [thread?.messages, artifact.messageUuid]);
+        const message = useMemo(
+            () =>
+                thread?.messages.find(
+                    (msg) =>
+                        msg.role === 'assistant' &&
+                        msg.uuid === artifact.messageUuid,
+                ) as AiAgentMessageAssistant | undefined,
+            [thread?.messages, artifact.messageUuid],
+        );
 
-        if (isArtifactLoading || !message) {
+        // Floating-variant only: lift chart-type selection to the panel so
+        // the floating pill at the bottom edge is the visible switcher.
+        const [selectedChartType, setSelectedChartType] =
+            useState<AiAgentChartTypeOption | null>(null);
+
+        const isFloatingChart =
+            variant === 'floating' &&
+            artifactData?.artifactType === 'chart' &&
+            !!artifactData.chartConfig;
+
+        const isSqlArtifact = isAiSqlChartArtifactConfig(
+            artifactData?.chartConfig,
+        );
+        const { user } = useApp();
+        const isEmbed = useIsEmbedded();
+        const identityFlag = useServerFeatureFlag(FeatureFlags.AgentIdentity);
+        const identityEnabled = identityFlag.data?.enabled === true;
+        const canManageAgent = useAiAgentPermission({
+            action: 'manage',
+            projectUuid: artifact.projectUuid,
+        });
+        // Mirrors the thread mutation rule: the thread owner or an agent manager, never an embed.
+        const canEditThread =
+            !isEmbed &&
+            !!thread &&
+            (thread.user.uuid === user.data?.userUuid || !!canManageAgent);
+        const artifactChartConfig = artifactData?.chartConfig;
+        const composerConfig = isAiComposerChartArtifactConfig(
+            artifactChartConfig,
+        )
+            ? artifactChartConfig
+            : undefined;
+        const { isMergeArtifact, semanticChartConfig, customChartType } =
+            getAiArtifactChartSource(artifactData?.chartConfig);
+
+        const vizConfig = useMemo(() => {
+            if (!isFloatingChart || !semanticChartConfig) return null;
+            return parseVizConfig(semanticChartConfig);
+        }, [isFloatingChart, semanticChartConfig]);
+
+        const queryExecutionHandle = useAiAgentArtifactVizQuery(
+            {
+                projectUuid: artifact.projectUuid,
+                agentUuid: artifact.agentUuid,
+                artifactUuid: artifact.artifactUuid,
+                versionUuid: artifact.versionUuid,
+            },
+            { enabled: (isFloatingChart && !!vizConfig) || isSqlArtifact },
+        );
+
+        const semanticVizQueryData =
+            queryExecutionHandle.data &&
+            !isAiAgentSqlArtifactVizQuery(queryExecutionHandle.data)
+                ? queryExecutionHandle.data
+                : undefined;
+        const sqlVizQueryData =
+            queryExecutionHandle.data &&
+            isAiAgentSqlArtifactVizQuery(queryExecutionHandle.data)
+                ? queryExecutionHandle.data
+                : undefined;
+        // Composer artifacts read their own per-node results.
+        const queryUuid =
+            !composerConfig &&
+            queryExecutionHandle.data &&
+            'query' in queryExecutionHandle.data
+                ? queryExecutionHandle.data.query.queryUuid
+                : undefined;
+
+        const queryResults = useInfiniteQueryResults(
+            artifact.projectUuid,
+            isEmbed || !identityFlag.isLoading ? queryUuid : undefined,
+            undefined,
+            identityEnabled &&
+                !isEmbed &&
+                queryUuid &&
+                artifactData?.artifactType === 'chart'
+                ? getAiAgentArtifactResultsUrl({
+                      projectUuid: artifact.projectUuid,
+                      agentUuid: artifact.agentUuid,
+                      artifactUuid: artifact.artifactUuid,
+                      versionUuid: artifact.versionUuid,
+                      queryUuid,
+                      cached: false,
+                  })
+                : null,
+        );
+
+        const compiledSqlQuery = useAiArtifactCompiledSql({
+            projectUuid: artifact.projectUuid,
+            isMergeArtifact,
+            vizQueryData: semanticVizQueryData,
+        });
+
+        // Same parse the renderer does — needed so the floating pill can
+        // show the correct default selection and know whether to render
+        // at all (only QUERY_RESULT artifacts support the switcher).
+        const parsedChartConfig = useMemo(() => {
+            if (!isFloatingChart) return null;
+            if (
+                !semanticVizQueryData ||
+                !semanticChartConfig ||
+                !semanticVizQueryData.query.metricQuery
+            ) {
+                return null;
+            }
+            return getWebAiChartConfig({
+                vizConfig: semanticChartConfig,
+                metricQuery: semanticVizQueryData.query.metricQuery,
+                maxQueryLimit: health?.query.maxLimit,
+                fieldsMap: semanticVizQueryData.query.fields,
+                overrideChartType: selectedChartType ?? undefined,
+            });
+        }, [
+            isFloatingChart,
+            semanticVizQueryData,
+            semanticChartConfig,
+            health?.query.maxLimit,
+            selectedChartType,
+        ]);
+
+        // Custom chart type answers are recognized by the artifact envelope
+        // source, not by the shape of the stored tool args.
+        const isCustomChartTypeAnswer = customChartType !== null;
+
+        const defaultChartType: AiAgentChartTypeOption =
+            parsedChartConfig?.type === AiResultType.QUERY_RESULT &&
+            !isCustomChartTypeSlugChartConfig(
+                parsedChartConfig.vizTool.chartConfig,
+            )
+                ? (parsedChartConfig.vizTool.chartConfig?.defaultVizType ??
+                  'table')
+                : 'table';
+
+        const effectiveChartType = selectedChartType ?? defaultChartType;
+
+        const groupByDimensions = parsedChartConfig
+            ? getGroupByDimensions(parsedChartConfig)
+            : undefined;
+
+        // No chart type switcher on custom chart type answers (PoC).
+        const shouldShowPill =
+            parsedChartConfig?.type === AiResultType.QUERY_RESULT &&
+            !isCustomChartTypeAnswer;
+
+        const accessRefusal =
+            getAiAccessRefusal(artifactError?.error) ??
+            getAiAccessRefusal(threadError?.error) ??
+            getAiAccessRefusal(queryExecutionHandle.error?.error) ??
+            getAiAccessRefusal(queryResults.error?.error);
+
+        if (accessRefusal) {
             return (
+                <Box className={styles.floatingPanel} p="md">
+                    <AiAccessCallout
+                        projectUuid={artifact.projectUuid}
+                        refusal={accessRefusal}
+                        variant="inline"
+                    />
+                </Box>
+            );
+        }
+
+        if (fastDecisions && (artifactError || threadError)) {
+            return (
+                <Box className={styles.floatingPanel} p="md">
+                    <InlineErrorState
+                        message="Could not load this chart."
+                        onRetry={() => {
+                            if (artifactError) void refetchArtifact();
+                            if (threadError) void refetchThread();
+                        }}
+                    />
+                </Box>
+            );
+        }
+        if (isArtifactLoading || (fastDecisions ? isThreadLoading : !message)) {
+            return fastDecisions ? (
+                <EmptyStateLoader title="Loading artifact…" />
+            ) : (
                 <Box {...ChatElementsUtils.centeredElementProps} p="md">
-                    <Center>
+                    <Center className={styles.loading}>
                         <Loader
                             type="dots"
                             color="gray"
@@ -61,15 +314,17 @@ export const AiArtifactPanel: FC<AiArtifactPanelProps> = memo(
                 </Box>
             );
         }
-
         if (
             artifactError ||
             !artifactData ||
+            !message ||
             (artifactData.artifactType === 'dashboard' &&
                 !artifactData.dashboardConfig) ||
             (artifactData.artifactType === 'chart' && !artifactData.chartConfig)
         ) {
-            return (
+            return fastDecisions ? (
+                <InlineErrorState message="This artifact is unavailable." />
+            ) : (
                 <Box {...ChatElementsUtils.centeredElementProps} p="md">
                     <Stack gap="xs" align="center" justify="center">
                         <MantineIcon
@@ -84,10 +339,13 @@ export const AiArtifactPanel: FC<AiArtifactPanelProps> = memo(
             );
         }
 
+        // Dashboards share the floating panel chrome with chart artifacts
+        // for visual parity, but skip the per-tile floating pill (each
+        // tile has its own inline switcher inside its Card).
         if (artifactData.artifactType === 'dashboard') {
             return (
-                <Box {...ChatElementsUtils.centeredElementProps} p="md">
-                    <Stack gap="md" h="100%">
+                <Box className={styles.floatingPanel}>
+                    <Box className={styles.dashboardContent}>
                         <AiDashboardVisualization
                             artifactData={artifactData}
                             projectUuid={artifact.projectUuid}
@@ -96,26 +354,255 @@ export const AiArtifactPanel: FC<AiArtifactPanelProps> = memo(
                             message={message}
                             showCloseButton={showCloseButton}
                         />
+                    </Box>
+                </Box>
+            );
+        }
+
+        if (composerConfig) {
+            return (
+                <AiComposerArtifactPanel
+                    key={artifact.versionUuid}
+                    projectUuid={artifact.projectUuid}
+                    agentUuid={artifact.agentUuid}
+                    artifactUuid={artifact.artifactUuid}
+                    versionUuid={artifact.versionUuid}
+                    canEdit={canEditThread}
+                    title={artifactData.title ?? 'Composer query results'}
+                    description={artifactData.description ?? null}
+                    config={composerConfig}
+                    onClose={
+                        showCloseButton ? () => dispatch(clearPreview()) : null
+                    }
+                />
+            );
+        }
+
+        // Inline variant (admin verified-content view): no floating chrome,
+        // no pill — legacy chrome owned by AiChartVisualization.
+        if (variant === 'inline' && !isSqlArtifact) {
+            return (
+                <Box {...ChatElementsUtils.centeredElementProps} p="md">
+                    <Stack gap="md" h="100%">
+                        <AiChartVisualization
+                            artifactData={artifactData}
+                            projectUuid={artifact.projectUuid}
+                            agentUuid={artifact.agentUuid}
+                            artifactUuid={artifact.artifactUuid}
+                            versionUuid={artifact.versionUuid}
+                            message={message}
+                            showCloseButton={showCloseButton}
+                        />
                     </Stack>
                 </Box>
             );
         }
 
-        // Handle chart artifacts (existing logic)
-        return (
-            <Box {...ChatElementsUtils.centeredElementProps} p="md">
-                <Stack gap="md" h="100%">
-                    <AiChartVisualization
-                        artifactData={artifactData}
-                        projectUuid={artifact.projectUuid}
-                        agentUuid={artifact.agentUuid}
-                        artifactUuid={artifact.artifactUuid}
-                        versionUuid={artifact.versionUuid}
-                        message={message}
-                        showCloseButton={showCloseButton}
+        // Floating chart artifact: chromeless head + chart + floating pill.
+        // Wait for the viz query data so the renderer mounts with valid
+        // inputs.
+        if (
+            fastDecisions &&
+            (queryExecutionHandle.error || queryResults.error)
+        ) {
+            return (
+                <Box className={styles.floatingPanel} p="md">
+                    <InlineErrorState
+                        message="Could not load the visualization."
+                        onRetry={() => {
+                            if (queryExecutionHandle.error)
+                                void queryExecutionHandle.refetch();
+                            else void queryResults.refetchRows();
+                        }}
                     />
+                </Box>
+            );
+        }
+        if (
+            queryExecutionHandle.isLoading ||
+            (!isSqlArtifact &&
+                queryResults.isFetchingRows &&
+                (!fastDecisions || queryResults.rows.length === 0)) ||
+            !queryExecutionHandle.data ||
+            (!fastDecisions && queryResults.error)
+        ) {
+            return (
+                <Box className={styles.floatingPanel}>
+                    {fastDecisions ? (
+                        <EmptyStateLoader title="Loading visualization…" />
+                    ) : (
+                        <Center className={styles.loading}>
+                            <Loader
+                                type="dots"
+                                color="gray"
+                                delayedMessage="Loading visualization..."
+                            />
+                        </Center>
+                    )}
+                </Box>
+            );
+        }
+
+        const title =
+            queryExecutionHandle.data.metadata.title ?? 'Untitled chart';
+        const description =
+            queryExecutionHandle.data.metadata.description ?? null;
+        const metricQuery = semanticVizQueryData?.query.metricQuery;
+
+        const floatingHead = (
+            <Box className={clsx(styles.head, styles.flushHead)}>
+                <Stack gap={0} flex={1} miw={0}>
+                    <TruncatedText fz="sm" fw={600} maxWidth="100%">
+                        {title}
+                    </TruncatedText>
+                    {description && (
+                        <TruncatedText fz="xs" c="dimmed" maxWidth="100%">
+                            {description}
+                        </TruncatedText>
+                    )}
                 </Stack>
+                <Group gap={2} className={styles.headRight}>
+                    {sqlVizQueryData ? (
+                        <AiSqlArtifactActions
+                            projectUuid={artifact.projectUuid}
+                            agentUuid={artifact.agentUuid}
+                            artifactUuid={artifact.artifactUuid}
+                            versionUuid={artifact.versionUuid}
+                            savedSqlUuid={artifactData.savedSqlUuid}
+                            sql={sqlVizQueryData.sql}
+                            limit={sqlVizQueryData.limit}
+                            queryUuid={sqlVizQueryData.query.queryUuid}
+                            totalResults={
+                                queryResults.totalResults ??
+                                queryResults.rows.length
+                            }
+                            title={title}
+                            description={description}
+                            columns={Object.values(queryResults.columns ?? {})}
+                        />
+                    ) : (
+                        <AiChartQuickOptions
+                            message={message}
+                            projectUuid={artifact.projectUuid}
+                            agentUuid={artifact.agentUuid}
+                            showDownloadResults
+                            artifactData={artifactData}
+                            saveChartOptions={{
+                                name: title,
+                                description: description,
+                                linkToMessage: true,
+                            }}
+                            compiledSql={compiledSqlQuery}
+                            merge={
+                                isMergeArtifact
+                                    ? {
+                                          query:
+                                              semanticVizQueryData?.mergeQuery ??
+                                              null,
+                                          parameters:
+                                              semanticVizQueryData?.query
+                                                  .usedParametersValues,
+                                      }
+                                    : null
+                            }
+                        />
+                    )}
+                    {showCloseButton && (
+                        <>
+                            <Divider
+                                orientation="vertical"
+                                color="ldGray.3"
+                                mx={4}
+                                my={4}
+                            />
+                            <ActionIcon
+                                size="sm"
+                                onClick={() => dispatch(clearPreview())}
+                                aria-label="Close"
+                            >
+                                <MantineIcon icon={IconX} />
+                            </ActionIcon>
+                        </>
+                    )}
+                </Group>
+            </Box>
+        );
+
+        if (sqlVizQueryData) {
+            return (
+                <Box className={styles.floatingPanel}>
+                    <Box
+                        className={clsx(
+                            styles.floatingContent,
+                            styles.flushContent,
+                        )}
+                    >
+                        <AiSqlArtifactVisualization
+                            projectUuid={artifact.projectUuid}
+                            results={queryResults}
+                            headerContent={floatingHead}
+                            flush
+                        />
+                    </Box>
+                </Box>
+            );
+        }
+
+        if (!semanticVizQueryData || !semanticChartConfig) {
+            return null;
+        }
+
+        return (
+            <Box className={styles.floatingPanel}>
+                <Box
+                    className={clsx(
+                        styles.floatingContent,
+                        styles.flushContent,
+                        shouldShowPill && styles.withPillClearance,
+                    )}
+                >
+                    <AiVisualizationRenderer
+                        vizQueryData={semanticVizQueryData}
+                        results={queryResults}
+                        chartConfig={semanticChartConfig}
+                        customChartType={customChartType}
+                        selectedChartType={selectedChartType}
+                        headerContent={floatingHead}
+                        loadExplore={!isMergeArtifact}
+                        flush
+                    />
+                </Box>
+                {shouldShowPill && metricQuery && (
+                    <Box className={styles.floatingPill}>
+                        <AgentVisualizationChartTypeSwitcher
+                            availableChartTypes={getAgentVisualizationChartTypes(
+                                metricQuery,
+                                (groupByDimensions?.length ?? 0) > 0,
+                            )}
+                            selectedChartType={effectiveChartType}
+                            onChartTypeChange={setSelectedChartType}
+                            variant="pill"
+                        />
+                    </Box>
+                )}
             </Box>
         );
     },
 );
+
+export const AiArtifactPanel: FC<AiArtifactPanelProps> = memo((props) => {
+    const fastDecisions =
+        useServerFeatureFlag(FeatureFlags.AiAgentFastDecisions).data
+            ?.enabled === true;
+    return (
+        <AiArtifactPanelContent
+            key={
+                fastDecisions
+                    ? `${props.artifact.projectUuid}:${props.artifact.agentUuid}:${props.artifact.artifactUuid}:${props.artifact.versionUuid}`
+                    : 'legacy'
+            }
+            {...props}
+            fastDecisions={fastDecisions}
+        />
+    );
+});

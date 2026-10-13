@@ -1,4 +1,10 @@
-import { getEmailSchema, type ApiError } from '@lightdash/common';
+import {
+    FeatureFlags,
+    getEmailSchema,
+    getUserNameSchema,
+    isValidTimezone,
+    type ApiError,
+} from '@lightdash/common';
 import {
     Anchor,
     Button,
@@ -7,9 +13,10 @@ import {
     Text,
     TextInput,
     Tooltip,
-} from '@mantine-8/core';
-import { useForm, zodResolver } from '@mantine/form';
+} from '@mantine/core';
+import { useForm } from '@mantine/form';
 import { IconAlertCircle, IconCircleCheck } from '@tabler/icons-react';
+import { zod4Resolver as zodResolver } from 'mantine-form-zod-resolver';
 import { useEffect, useState, type FC } from 'react';
 import { z } from 'zod';
 import useToaster from '../../../hooks/toaster/useToaster';
@@ -18,14 +25,24 @@ import {
     useOneTimePassword,
 } from '../../../hooks/useEmailVerification';
 import { useUserUpdateMutation } from '../../../hooks/user/useUserUpdateMutation';
+import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import { VerifyEmailModal } from '../../../pages/VerifyEmail';
 import useApp from '../../../providers/App/useApp';
 import MantineIcon from '../../common/MantineIcon';
+import TimeZonePicker from '../../common/TimeZonePicker';
+import AvatarSettings from './AvatarSettings';
 
 const validationSchema = z.object({
-    firstName: z.string().nonempty(),
-    lastName: z.string().nonempty(),
+    firstName: getUserNameSchema(),
+    lastName: getUserNameSchema(),
     email: getEmailSchema().or(z.undefined()),
+    timezone: z
+        .string()
+        .nullable()
+        .refine(
+            (value) => value === null || isValidTimezone(value),
+            'Invalid timezone',
+        ),
 });
 
 type FormValues = z.infer<typeof validationSchema>;
@@ -36,6 +53,11 @@ const ProfilePanel: FC = () => {
         health,
     } = useApp();
     const { showToastSuccess, showToastApiError } = useToaster();
+
+    const { data: timezoneSupportFlag } = useServerFeatureFlag(
+        FeatureFlags.EnableTimezoneSupport,
+    );
+    const timezoneSupportEnabled = timezoneSupportFlag?.enabled === true;
 
     const form = useForm<FormValues>({
         validate: zodResolver(validationSchema),
@@ -48,6 +70,7 @@ const ProfilePanel: FC = () => {
             firstName: userData.firstName,
             lastName: userData.lastName,
             email: userData.email,
+            timezone: userData.timezone ?? null,
         };
 
         if (form.initialized) {
@@ -108,6 +131,8 @@ const ProfilePanel: FC = () => {
     return (
         <form onSubmit={handleOnSubmit}>
             <Stack mt="md">
+                <AvatarSettings />
+
                 <TextInput
                     placeholder="First name"
                     label="First name"
@@ -152,7 +177,7 @@ const ProfilePanel: FC = () => {
                             <MantineIcon
                                 size="lg"
                                 icon={IconAlertCircle}
-                                color="ldGray.6"
+                                color="dimmed"
                             />
                         )
                     }
@@ -177,6 +202,21 @@ const ProfilePanel: FC = () => {
                         ) : null
                     }
                 />
+
+                {timezoneSupportEnabled && (
+                    <TimeZonePicker
+                        label="Default timezone"
+                        description="Used to render query results for charts pinned to the viewer timezone. Leave empty to fall back to the project timezone."
+                        variant="default"
+                        maw="100%"
+                        size="sm"
+                        searchable
+                        clearable
+                        placeholder="Project default"
+                        disabled={isLoading}
+                        {...form.getInputProps('timezone')}
+                    />
+                )}
 
                 <Flex justify="flex-end" gap="sm">
                     {form.isDirty() && !isUpdatingUser && (

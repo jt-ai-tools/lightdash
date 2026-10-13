@@ -1,8 +1,11 @@
 import {
     assertUnreachable,
+    DEFAULT_UI_STRINGS,
     FilterOperator,
     FilterType,
     NotImplementedError,
+    type UiStringKey,
+    type UiStringResolver,
 } from '@lightdash/common';
 
 export const getPlaceholderByFilterTypeAndOperator = ({
@@ -10,25 +13,31 @@ export const getPlaceholderByFilterTypeAndOperator = ({
     operator,
     disabled,
     singleValue,
+    getUiString,
 }: {
     type: FilterType;
     operator: FilterOperator;
     disabled?: boolean;
     singleValue?: boolean;
+    getUiString?: UiStringResolver;
 }) => {
-    if (disabled) return 'any value';
+    const resolve = (key: UiStringKey) =>
+        getUiString ? getUiString(key) : DEFAULT_UI_STRINGS[key];
+    if (disabled) return resolve('filters.placeholders.anyValue');
 
     switch (type) {
         case FilterType.NUMBER:
             switch (operator) {
                 case FilterOperator.EQUALS:
                 case FilterOperator.NOT_EQUALS:
-                    return singleValue ? 'Enter value' : 'Enter value(s)';
+                    return singleValue
+                        ? resolve('filters.placeholders.enterValue')
+                        : resolve('filters.placeholders.enterValues');
                 case FilterOperator.LESS_THAN:
                 case FilterOperator.GREATER_THAN:
                 case FilterOperator.LESS_THAN_OR_EQUAL:
                 case FilterOperator.GREATER_THAN_OR_EQUAL:
-                    return 'Enter value(s)';
+                    return resolve('filters.placeholders.enterValues');
                 case FilterOperator.NULL:
                 case FilterOperator.NOT_NULL:
                     return '';
@@ -48,6 +57,7 @@ export const getPlaceholderByFilterTypeAndOperator = ({
                 case FilterOperator.IN_THE_NEXT:
                 case FilterOperator.IN_THE_CURRENT:
                 case FilterOperator.NOT_IN_THE_CURRENT:
+                case FilterOperator.IN_PERIOD_TO_DATE:
                     // This can happen if a filter was added using an old table calculation without type, as we default to number
                     console.warn(
                         `Unexpected operator ${type} for number filter type. If you are using a table calculation, please update its result type to string.`,
@@ -60,13 +70,15 @@ export const getPlaceholderByFilterTypeAndOperator = ({
             switch (operator) {
                 case FilterOperator.EQUALS:
                 case FilterOperator.NOT_EQUALS:
-                    return 'Start typing to filter results';
+                    return resolve('filters.placeholders.startTyping');
                 case FilterOperator.STARTS_WITH:
                 case FilterOperator.ENDS_WITH:
-                    return 'Enter value(s)';
+                    return resolve('filters.placeholders.enterValues');
                 case FilterOperator.INCLUDE:
                 case FilterOperator.NOT_INCLUDE:
-                    return singleValue ? 'Enter value' : 'Enter value(s)';
+                    return singleValue
+                        ? resolve('filters.placeholders.enterValue')
+                        : resolve('filters.placeholders.enterValues');
                 case FilterOperator.NULL:
                 case FilterOperator.NOT_NULL:
                     return '';
@@ -81,6 +93,7 @@ export const getPlaceholderByFilterTypeAndOperator = ({
                 case FilterOperator.NOT_IN_THE_CURRENT:
                 case FilterOperator.IN_BETWEEN:
                 case FilterOperator.NOT_IN_BETWEEN:
+                case FilterOperator.IN_PERIOD_TO_DATE:
                     throw new NotImplementedError(
                         `Filter type ${type} with operator ${operator} is not implemented`,
                     );
@@ -91,11 +104,14 @@ export const getPlaceholderByFilterTypeAndOperator = ({
             switch (operator) {
                 case FilterOperator.EQUALS:
                 case FilterOperator.NOT_EQUALS:
+                    return singleValue
+                        ? resolve('filters.placeholders.selectDate')
+                        : resolve('filters.placeholders.selectDates');
                 case FilterOperator.LESS_THAN:
                 case FilterOperator.LESS_THAN_OR_EQUAL:
                 case FilterOperator.GREATER_THAN:
                 case FilterOperator.GREATER_THAN_OR_EQUAL:
-                    return 'Select a date';
+                    return resolve('filters.placeholders.selectDate');
                 case FilterOperator.IN_THE_PAST:
                 case FilterOperator.NOT_IN_THE_PAST:
                 case FilterOperator.IN_THE_NEXT:
@@ -108,6 +124,7 @@ export const getPlaceholderByFilterTypeAndOperator = ({
                 case FilterOperator.NOT_IN_THE_CURRENT:
                 case FilterOperator.NULL:
                 case FilterOperator.NOT_NULL:
+                case FilterOperator.IN_PERIOD_TO_DATE:
                     return '';
                 case FilterOperator.STARTS_WITH:
                 case FilterOperator.ENDS_WITH:
@@ -124,7 +141,7 @@ export const getPlaceholderByFilterTypeAndOperator = ({
             switch (operator) {
                 case FilterOperator.EQUALS:
                 case FilterOperator.NOT_EQUALS:
-                    return 'False';
+                    return resolve('filters.placeholders.selectValue');
                 case FilterOperator.NULL:
                 case FilterOperator.NOT_NULL:
                     return '';
@@ -143,6 +160,7 @@ export const getPlaceholderByFilterTypeAndOperator = ({
                 case FilterOperator.NOT_IN_THE_CURRENT:
                 case FilterOperator.IN_BETWEEN:
                 case FilterOperator.NOT_IN_BETWEEN:
+                case FilterOperator.IN_PERIOD_TO_DATE:
                     throw new NotImplementedError(
                         `Filter type ${type} with operator ${operator} is not implemented`,
                     );

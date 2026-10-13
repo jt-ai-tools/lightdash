@@ -1,12 +1,16 @@
 import {
     AnyType,
+    ApiChartSummaryListResponse,
     ApiCompiledQueryResults,
     ApiErrorPayload,
     ApiExploreResults,
     ApiExploresResults,
-    ApiSuccessEmpty,
+    ApiSetExploresResponse,
+    assertRegisteredAccount,
+    LightdashCliVersionHeader,
     MetricQuery,
-    PivotConfig,
+    type ApiFormulaValidationResults,
+    type ApiPreAggregateCheckResponse,
     type ParametersValuesMap,
     type PivotConfiguration,
 } from '@lightdash/common';
@@ -18,6 +22,7 @@ import {
     Path,
     Post,
     Put,
+    Query,
     Request,
     Response,
     Route,
@@ -25,7 +30,8 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
-import { deprecatedDownloadCsvRoute } from '../middlewares/deprecation';
+import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -53,15 +59,39 @@ export class ExploreController extends BaseController {
         @Path() projectUuid: string,
         @Request() req: express.Request,
         @Body() body: AnyType[], // tsoa doesn't seem to work with explores from CLI
-    ): Promise<ApiSuccessEmpty> {
+        @Query() complete?: boolean,
+        @Query() sourceUuid?: string,
+        @Query() targetDatabase?: string,
+        @Query() targetRegion?: string,
+    ): Promise<ApiSetExploresResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
-        await this.services
+        const results = await this.services
             .getProjectService()
-            .setExplores(req.user!, projectUuid, body);
+            .setExplores(
+                toSessionUser(req.account),
+                projectUuid,
+                body,
+                req.header(LightdashCliVersionHeader),
+                complete,
+                undefined,
+                {
+                    sourceUuid: sourceUuid ?? null,
+                    target:
+                        targetDatabase === undefined
+                            ? null
+                            : {
+                                  database: targetDatabase,
+                                  ...(targetRegion === undefined
+                                      ? {}
+                                      : { region: targetRegion }),
+                              },
+                },
+            );
 
         return {
             status: 'ok',
-            results: undefined,
+            results,
         };
     }
 
@@ -84,6 +114,8 @@ export class ExploreController extends BaseController {
                 req.account!,
                 projectUuid,
                 req.query.filtered === 'true',
+                true,
+                req.query.includePreAggregates === 'true',
             );
 
         return {
@@ -96,7 +128,11 @@ export class ExploreController extends BaseController {
      * Get a specific explore
      * @summary Get explore
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('ExploreController.GetExplore'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('{exploreId}')
     @OperationId('GetExplore')
@@ -109,7 +145,7 @@ export class ExploreController extends BaseController {
         this.setStatus(200);
         const results = await this.services
             .getProjectService()
-            .getExplore(req.account!, projectUuid, exploreId, undefined, false);
+            .getExploreResponse(req.account!, projectUuid, exploreId);
 
         return {
             status: 'ok',
@@ -121,7 +157,11 @@ export class ExploreController extends BaseController {
      * Compile a metric query for an explore
      * @summary Compile query
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('ExploreController.CompileQuery'),
+    ])
     @SuccessResponse('200', 'Success')
     @Post('{exploreId}/compileQuery')
     @OperationId('CompileQuery')
@@ -134,104 +174,133 @@ export class ExploreController extends BaseController {
         body: MetricQuery & {
             parameters?: ParametersValuesMap;
             pivotConfiguration?: PivotConfiguration;
+            usePreAggregateCache?: boolean;
         },
     ): Promise<{ status: 'ok'; results: ApiCompiledQueryResults }> {
         this.setStatus(200);
 
-        const { parameterReferences, query, pivotQuery } = await this.services
-            .getProjectService()
-            .compileQuery({
-                account: req.account!,
-                body,
-                projectUuid,
-                exploreName: exploreId,
-            });
-
         return {
             status: 'ok',
-            results: {
-                query,
-                parameterReferences,
-                ...(pivotQuery && { pivotQuery }),
-            },
+            results: await this.services
+                .getProjectService()
+                .compileQueryForResponse({
+                    account: req.account!,
+                    body,
+                    projectUuid,
+                    exploreName: exploreId,
+                    usePreAggregateCache: body.usePreAggregateCache,
+                }),
         };
     }
 
     /**
-     * Download CSV from an explore query
-     * @summary Download CSV from explore
+     * Check pre-aggregate availability for a metric query
+     * @summary Check pre-aggregate
      */
     @Middlewares([
         allowApiKeyAuthentication,
         isAuthenticated,
-        deprecatedDownloadCsvRoute,
+        requireOAuthScopeOperation('ExploreController.CheckPreAggregate'),
     ])
     @SuccessResponse('200', 'Success')
-    @Post('{exploreId}/downloadCsv')
-    @OperationId('DownloadCsvFromExplore')
-    async DownloadCsvFromExplore(
+    @Post('{exploreId}/preAggregateCheck')
+    @OperationId('CheckPreAggregate')
+    async CheckPreAggregate(
         @Path() exploreId: string,
         @Path() projectUuid: string,
         @Request() req: express.Request,
         @Body()
         body: MetricQuery & {
-            onlyRaw: boolean;
-            csvLimit: number | null | undefined;
-            showTableNames: boolean;
-            customLabels?: { [key: string]: string };
-            columnOrder: string[];
-            hiddenFields?: string[];
-            chartName?: string;
-            pivotConfig?: PivotConfig;
+            usePreAggregateCache?: boolean;
         },
-    ): Promise<{ status: 'ok'; results: { jobId: string } }> {
+    ): Promise<ApiPreAggregateCheckResponse> {
         this.setStatus(200);
-        const {
-            onlyRaw,
-            csvLimit,
-            showTableNames,
-            customLabels,
-            columnOrder,
-            hiddenFields,
-            pivotConfig,
-        } = body;
-        const metricQuery: MetricQuery = {
-            exploreName: body.exploreName,
-            dimensions: body.dimensions,
-            metrics: body.metrics,
-            filters: body.filters,
-            sorts: body.sorts,
-            limit: body.limit,
-            tableCalculations: body.tableCalculations,
-            additionalMetrics: body.additionalMetrics,
-            customDimensions: body.customDimensions,
-            metricOverrides: body.metricOverrides,
-            dimensionOverrides: body.dimensionOverrides,
-        };
 
-        const { jobId } = await req.services
-            .getCsvService()
-            .scheduleDownloadCsv(req.user!, {
-                userUuid: req.user?.userUuid!,
+        const { usePreAggregateCache, ...metricQuery } = body;
+
+        const result = await this.services
+            .getProjectService()
+            .checkPreAggregateMatch({
+                account: req.account!,
                 projectUuid,
-                exploreId,
+                exploreName: exploreId,
                 metricQuery,
-                onlyRaw,
-                csvLimit,
-                showTableNames,
-                customLabels,
-                chartName: body.chartName,
-                fromSavedChart: false,
-                columnOrder,
-                hiddenFields,
-                pivotConfig,
+                usePreAggregateCache: usePreAggregateCache ?? true,
             });
 
         return {
             status: 'ok',
-            results: {
-                jobId,
-            },
+            results: result,
+        };
+    }
+
+    /**
+     * Validate a spreadsheet formula against the explore's fields
+     * @summary Validate formula
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        requireOAuthScopeOperation('ExploreController.ValidateFormula'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('{exploreId}/validateFormula')
+    @OperationId('ValidateFormula')
+    async ValidateFormula(
+        @Path() exploreId: string,
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+        @Body()
+        body: {
+            formula: string;
+            metricQuery: MetricQuery;
+        },
+    ): Promise<{
+        status: 'ok';
+        results: ApiFormulaValidationResults;
+    }> {
+        this.setStatus(200);
+
+        const results = await this.services
+            .getProjectService()
+            .validateFormula({
+                account: req.account!,
+                projectUuid,
+                exploreName: exploreId,
+                formula: body.formula,
+                metricQuery: body.metricQuery,
+            });
+
+        return {
+            status: 'ok',
+            results,
+        };
+    }
+
+    /**
+     * List charts referencing a given explore
+     * @summary List charts by explore
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('{exploreId}/charts')
+    @OperationId('GetChartsByExploreName')
+    async getChartsByExploreName(
+        @Path() exploreId: string,
+        @Path() projectUuid: string,
+        @Request() req: express.Request,
+    ): Promise<ApiChartSummaryListResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getProjectService()
+                .getChartsByExploreName(
+                    toSessionUser(req.account),
+                    projectUuid,
+                    exploreId,
+                ),
         };
     }
 }

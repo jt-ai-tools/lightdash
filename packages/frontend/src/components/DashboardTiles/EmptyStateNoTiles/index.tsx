@@ -6,8 +6,9 @@ import {
     IconPlayerPlay,
 } from '@tabler/icons-react';
 import { type FC } from 'react';
-import { useParams } from 'react-router';
 import { useProjectSavedChartStatus } from '../../../hooks/useOnboardingStatus';
+import { useOptionalProjectRoute } from '../../../hooks/useProjectRoute';
+import { useProjectUuid } from '../../../hooks/useProjectUuid';
 import useCreateInAnySpaceAccess from '../../../hooks/user/useCreateInAnySpaceAccess';
 import { Can } from '../../../providers/Ability';
 import useApp from '../../../providers/App/useApp';
@@ -19,8 +20,13 @@ import SuboptimalState from '../../common/SuboptimalState/SuboptimalState';
 import AddTileButton from '../AddTileButton';
 
 interface SavedChartsAvailableProps {
-    onAddTiles: (tiles: Dashboard['tiles'][number][]) => void;
+    onAddTiles: (
+        tiles: Dashboard['tiles'][number][],
+        // Map of new tile UUID → source tile UUID, so dashboard filter `tileTargets` are copied from the source.
+        tileUuidMapping?: Record<string, string>,
+    ) => void;
     emptyContainerType?: 'dashboard' | 'tab';
+    onNewChart?: () => void;
     isEditMode: boolean;
     setAddingTab: (value: React.SetStateAction<boolean>) => void;
     activeTabUuid?: string;
@@ -30,12 +36,16 @@ interface SavedChartsAvailableProps {
 const EmptyStateNoTiles: FC<SavedChartsAvailableProps> = ({
     onAddTiles,
     emptyContainerType = 'dashboard',
+    onNewChart,
     isEditMode,
     setAddingTab,
     activeTabUuid,
     dashboardTabs,
 }) => {
-    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const projectUuid = useProjectUuid();
+    const projectRoute = useOptionalProjectRoute();
+    const projectUrlIdentifier =
+        projectRoute?.projectUrlIdentifier ?? projectUuid;
     const { user } = useApp();
     const { data: hasSavedCharts } = useProjectSavedChartStatus(projectUuid);
 
@@ -72,6 +82,7 @@ const EmptyStateNoTiles: FC<SavedChartsAvailableProps> = ({
                             userCanCreateDashboard && isEditMode ? (
                                 <AddTileButton
                                     onAddTiles={onAddTiles}
+                                    onNewChart={onNewChart}
                                     setAddingTab={setAddingTab}
                                     activeTabUuid={activeTabUuid}
                                     dashboardTabs={dashboardTabs}
@@ -97,7 +108,7 @@ const EmptyStateNoTiles: FC<SavedChartsAvailableProps> = ({
                                     leftSection={
                                         <MantineIcon icon={IconPlayerPlay} />
                                     }
-                                    href={`/projects/${projectUuid}/tables`}
+                                    href={`/projects/${projectUrlIdentifier}/tables`}
                                 >
                                     Run a query
                                 </MantineLinkButton>

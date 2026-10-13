@@ -2,131 +2,267 @@ import { subject } from '@casl/ability';
 import { FeatureFlags, type UserAttribute } from '@lightdash/common';
 import {
     ActionIcon,
+    Anchor,
     Box,
     Button,
     Group,
+    Menu,
     Stack,
-    Table,
     Text,
-    Title,
     Tooltip,
-} from '@mantine-8/core';
+    useMantineTheme,
+} from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import {
+    IconDots,
     IconEdit,
     IconInfoCircle,
     IconPlus,
     IconTrash,
 } from '@tabler/icons-react';
-import { useState, type FC } from 'react';
+import { useMemo, useState, type FC } from 'react';
 import { useOrganization } from '../../../hooks/organization/useOrganization';
-import { useTableStyles } from '../../../hooks/styles/useTableStyles';
 import { useServerFeatureFlag } from '../../../hooks/useServerOrClientFeatureFlag';
 import {
     useUserAttributes,
     useUserAttributesDeleteMutation,
 } from '../../../hooks/useUserAttributes';
 import useApp from '../../../providers/App/useApp';
-import ForbiddenPanel from '../../ForbiddenPanel';
-import LoadingState from '../../common/LoadingState';
+import {
+    ContentTable,
+    useContentTable,
+    type ContentTableColumnDef,
+} from '../../common/ContentTable';
 import MantineIcon from '../../common/MantineIcon';
 import MantineModal from '../../common/MantineModal';
-import { SettingsCard } from '../../common/Settings/SettingsCard';
+import {
+    SettingsPage,
+    SettingsPageActions,
+    SettingsPageDocumentationLink,
+} from '../../common/Settings/SettingsPage';
+import ForbiddenPanel from '../../ForbiddenPanel';
 import UserAttributeModal from './UserAttributeModal';
-
-const UserListItem: FC<{
-    orgUserAttribute: UserAttribute;
-    onEdit: () => void;
-    isGroupManagementEnabled?: boolean;
-}> = ({ orgUserAttribute, onEdit, isGroupManagementEnabled }) => {
-    const [isDeleteDialogOpen, deleteDialog] = useDisclosure(false);
-    const { mutate: deleteUserAttribute } = useUserAttributesDeleteMutation();
-
-    return (
-        <tr>
-            <td>
-                <Stack gap="xs">
-                    <Group gap="two">
-                        <Text>{orgUserAttribute.name}</Text>
-                        {orgUserAttribute.description && (
-                            <Tooltip
-                                multiline
-                                maw={300}
-                                withArrow
-                                label={orgUserAttribute.description}
-                            >
-                                <MantineIcon
-                                    icon={IconInfoCircle}
-                                    color="ldGray.6"
-                                />
-                            </Tooltip>
-                        )}
-                    </Group>
-                    <Group gap="sm">
-                        <Text fz="xs" c="ldGray.6">
-                            {orgUserAttribute.users.length} user
-                            {orgUserAttribute.users.length !== 1 ? 's' : ''}
-                        </Text>
-                        {isGroupManagementEnabled && (
-                            <Text fz="xs" c="ldGray.6">
-                                {orgUserAttribute.groups.length} group
-                                {orgUserAttribute.groups.length !== 1
-                                    ? 's'
-                                    : ''}
-                            </Text>
-                        )}
-                    </Group>
-                </Stack>
-            </td>
-            <td width="1%">
-                <Group wrap="nowrap" gap="xs">
-                    <ActionIcon
-                        color="blue.4"
-                        variant="outline"
-                        onClick={onEdit}
-                    >
-                        <MantineIcon icon={IconEdit} />
-                    </ActionIcon>
-
-                    <ActionIcon
-                        variant="outline"
-                        onClick={deleteDialog.open}
-                        color="red"
-                    >
-                        <MantineIcon icon={IconTrash} />
-                    </ActionIcon>
-
-                    <MantineModal
-                        opened={isDeleteDialogOpen}
-                        onClose={deleteDialog.close}
-                        title="Delete user attribute"
-                        variant="delete"
-                        resourceType="user attribute"
-                        resourceLabel={orgUserAttribute.name}
-                        onConfirm={() =>
-                            deleteUserAttribute(orgUserAttribute.uuid)
-                        }
-                    />
-                </Group>
-            </td>
-        </tr>
-    );
-};
+import { UserAttributesTopToolbar } from './UserAttributesTopToolbar';
 
 const UserAttributesPanel: FC = () => {
-    const { classes } = useTableStyles();
+    const theme = useMantineTheme();
     const { user } = useApp();
     const userGroupsFeatureFlagQuery = useServerFeatureFlag(
         FeatureFlags.UserGroupsEnabled,
     );
     const [showAddAttributeModal, addAttributeModal] = useDisclosure(false);
-
+    const [deleteAttribute, setDeleteAttribute] = useState<
+        UserAttribute | undefined
+    >();
     const [editAttribute, setEditAttribute] = useState<
         UserAttribute | undefined
     >();
+    const [searchQuery, setSearchQuery] = useState('');
 
     const { data: orgUserAttributes, isInitialLoading } = useUserAttributes();
     const { data: organization } = useOrganization();
+    const { mutate: deleteUserAttribute } = useUserAttributesDeleteMutation();
+
+    const isGroupManagementEnabled =
+        userGroupsFeatureFlagQuery.data?.enabled ?? false;
+
+    const columns: ContentTableColumnDef<UserAttribute>[] = useMemo(
+        () => [
+            {
+                accessorKey: 'name',
+                header: 'Attribute name',
+                enableSorting: false,
+                size: 380,
+                Cell: ({ row }) => {
+                    const attribute = row.original;
+                    return (
+                        <Stack gap="xs">
+                            <Group gap="two">
+                                <Text fw={500} fz="sm">
+                                    {attribute.name}
+                                </Text>
+                                {attribute.description && (
+                                    <Tooltip
+                                        maw={300}
+                                        label={attribute.description}
+                                    >
+                                        <Box>
+                                            <MantineIcon
+                                                icon={IconInfoCircle}
+                                                color="dimmed"
+                                            />
+                                        </Box>
+                                    </Tooltip>
+                                )}
+                            </Group>
+                            <Group gap="sm">
+                                <Text fz="xs" c="dimmed">
+                                    {attribute.users.length} user
+                                    {attribute.users.length !== 1 ? 's' : ''}
+                                </Text>
+                                {isGroupManagementEnabled && (
+                                    <Text fz="xs" c="dimmed">
+                                        {attribute.groups.length} group
+                                        {attribute.groups.length !== 1
+                                            ? 's'
+                                            : ''}
+                                    </Text>
+                                )}
+                            </Group>
+                        </Stack>
+                    );
+                },
+            },
+            {
+                id: 'actions',
+                header: '',
+                enableSorting: false,
+                size: 20,
+                maxSize: 20,
+                grow: false,
+                Cell: ({ row }) => {
+                    const attribute = row.original;
+                    return (
+                        <Box
+                            component="div"
+                            onClick={(e: React.MouseEvent<HTMLDivElement>) => {
+                                e.stopPropagation();
+                                e.preventDefault();
+                            }}
+                        >
+                            <Menu position="bottom-end">
+                                <Menu.Target>
+                                    <ActionIcon variant="transparent" size="sm">
+                                        <MantineIcon icon={IconDots} />
+                                    </ActionIcon>
+                                </Menu.Target>
+                                <Menu.Dropdown>
+                                    <Menu.Item
+                                        leftSection={
+                                            <MantineIcon icon={IconEdit} />
+                                        }
+                                        onClick={() =>
+                                            setEditAttribute(attribute)
+                                        }
+                                    >
+                                        Edit
+                                    </Menu.Item>
+                                    <Menu.Item
+                                        leftSection={
+                                            <MantineIcon icon={IconTrash} />
+                                        }
+                                        color="red"
+                                        onClick={() =>
+                                            setDeleteAttribute(attribute)
+                                        }
+                                    >
+                                        Delete
+                                    </Menu.Item>
+                                </Menu.Dropdown>
+                            </Menu>
+                        </Box>
+                    );
+                },
+            },
+        ],
+        [isGroupManagementEnabled],
+    );
+
+    const tableData = useMemo(() => {
+        const all = orgUserAttributes ?? [];
+        if (!searchQuery.trim()) return all;
+        const lower = searchQuery.toLowerCase();
+        return all.filter(
+            (attr) =>
+                attr.name.toLowerCase().includes(lower) ||
+                attr.description?.toLowerCase().includes(lower),
+        );
+    }, [orgUserAttributes, searchQuery]);
+
+    const table = useContentTable({
+        columns,
+        data: tableData,
+        enableColumnResizing: false,
+        enablePagination: false,
+        enableSorting: false,
+        enableTopToolbar: true,
+        enableBottomToolbar: false,
+        mantineTableContainerProps: {
+            style: { maxHeight: 'calc(100dvh - 420px)' },
+        },
+        mantineTableProps: {
+            highlightOnHover: true,
+            withColumnBorders: Boolean(tableData.length),
+        },
+        mantineTableHeadCellProps: (props) => {
+            const isLastColumn =
+                props.table.getAllColumns().indexOf(props.column) ===
+                props.table.getAllColumns().length - 1;
+
+            return {
+                bg: 'ldGray.0',
+                h: '3xl',
+                pos: 'relative',
+                style: {
+                    userSelect: 'none',
+                    padding: `${theme.spacing.xs} ${theme.spacing.xl}`,
+                    borderBottom: `1px solid ${theme.colors.ldGray[2]}`,
+                    borderRight: props.column.getIsResizing()
+                        ? `2px solid ${theme.colors.blue[3]}`
+                        : `1px solid ${
+                              isLastColumn
+                                  ? 'transparent'
+                                  : theme.colors.ldGray[2]
+                          }`,
+                    borderTop: 'none',
+                    borderLeft: 'none',
+                },
+            };
+        },
+        mantineTableBodyCellProps: () => {
+            return {
+                style: {
+                    padding: `${theme.spacing.md} ${theme.spacing.xl}`,
+                    borderRight: 'none',
+                    borderLeft: 'none',
+                    borderBottom: `1px solid ${theme.colors.ldGray[2]}`,
+                    borderTop: 'none',
+                },
+            };
+        },
+        renderTopToolbar: () => (
+            <UserAttributesTopToolbar
+                searchQuery={searchQuery}
+                onSearchChange={setSearchQuery}
+            />
+        ),
+        renderEmptyRowsFallback: () =>
+            searchQuery.trim() ? (
+                <Text fz="sm" c="dimmed" ta="center" py="xl">
+                    No attributes match your search.
+                </Text>
+            ) : (
+                <Text fz="sm" c="dimmed" ta="center" py="xl">
+                    There's no user attributes defined yet. <br /> To learn how
+                    to define user attributes, check out our{' '}
+                    <Anchor
+                        href="https://docs.lightdash.com/references/user-attributes"
+                        target="_blank"
+                        rel="noreferrer"
+                        fz="sm"
+                        fw="bold"
+                    >
+                        documentation
+                    </Anchor>
+                    .
+                </Text>
+            ),
+        state: {
+            isLoading: isInitialLoading,
+            density: 'md',
+        },
+    });
+
     if (
         user.data?.ability.cannot(
             'manage',
@@ -138,103 +274,36 @@ const UserAttributesPanel: FC = () => {
         return <ForbiddenPanel />;
     }
 
-    if (isInitialLoading) {
-        return <LoadingState title="Loading user attributes" />;
-    }
-
-    if (userGroupsFeatureFlagQuery.isError) {
-        console.error(userGroupsFeatureFlagQuery.error);
-        throw new Error('Error fetching user groups feature flag');
-    }
-
     if (!user.data) return null;
 
-    const isGroupManagementEnabled =
-        userGroupsFeatureFlagQuery.isSuccess &&
-        userGroupsFeatureFlagQuery.data.enabled;
-
     return (
-        <Stack>
-            <Group justify="space-between">
-                <Group gap="two">
-                    <Title order={5}>
-                        {isGroupManagementEnabled
-                            ? 'User and group attributes'
-                            : 'User attributes'}
-                    </Title>
-                    <Tooltip
-                        multiline
-                        w={400}
-                        withArrow
-                        label={
-                            <Box>
-                                User attributes are metadata defined by your
-                                organization. They can be used to control and
-                                cutomize the user experience through data access
-                                and personalization. Learn more about using user
-                                attributes by clicking on this icon.
-                            </Box>
-                        }
-                    >
-                        <ActionIcon
-                            component="a"
-                            href="https://docs.lightdash.com/references/user-attributes"
-                            target="_blank"
-                            rel="noreferrer"
-                        >
-                            <MantineIcon icon={IconInfoCircle} />
-                        </ActionIcon>
-                    </Tooltip>
-                </Group>
-                <>
+        <SettingsPage
+            title={
+                isGroupManagementEnabled
+                    ? 'User and group attributes'
+                    : 'User attributes'
+            }
+            description="Define organization metadata used for data access and personalization."
+            actions={
+                <SettingsPageActions>
+                    <SettingsPageDocumentationLink href="https://docs.lightdash.com/references/user-attributes" />
                     <Button
                         size="xs"
                         leftSection={<MantineIcon icon={IconPlus} />}
                         onClick={addAttributeModal.open}
                     >
-                        Add new attribute
+                        Add attribute
                     </Button>
-                    <UserAttributeModal
-                        opened={showAddAttributeModal}
-                        onClose={addAttributeModal.close}
-                        allUserAttributes={orgUserAttributes || []}
-                    />
-                </>
-            </Group>
+                </SettingsPageActions>
+            }
+        >
+            <ContentTable table={table} />
 
-            {isInitialLoading ? (
-                <LoadingState title="Loading user attributes" />
-            ) : orgUserAttributes?.length === 0 ? (
-                <SettingsCard shadow="none">
-                    You don't have any attributes defined
-                </SettingsCard>
-            ) : (
-                <SettingsCard shadow="none" p={0}>
-                    <Table className={classes.root}>
-                        <thead>
-                            <tr>
-                                <th>Attribute name</th>
-
-                                <th></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {orgUserAttributes?.map((orgUserAttribute) => (
-                                <UserListItem
-                                    key={orgUserAttribute.uuid}
-                                    orgUserAttribute={orgUserAttribute}
-                                    onEdit={() =>
-                                        setEditAttribute(orgUserAttribute)
-                                    }
-                                    isGroupManagementEnabled={
-                                        isGroupManagementEnabled
-                                    }
-                                />
-                            ))}
-                        </tbody>
-                    </Table>
-                </SettingsCard>
-            )}
+            <UserAttributeModal
+                opened={showAddAttributeModal}
+                onClose={addAttributeModal.close}
+                allUserAttributes={orgUserAttributes || []}
+            />
 
             {editAttribute !== undefined && (
                 <UserAttributeModal
@@ -244,7 +313,22 @@ const UserAttributesPanel: FC = () => {
                     allUserAttributes={orgUserAttributes || []}
                 />
             )}
-        </Stack>
+
+            {deleteAttribute !== undefined && (
+                <MantineModal
+                    opened={true}
+                    onClose={() => setDeleteAttribute(undefined)}
+                    title="Delete user attribute"
+                    variant="delete"
+                    resourceType="user attribute"
+                    resourceLabel={deleteAttribute.name}
+                    onConfirm={() => {
+                        deleteUserAttribute(deleteAttribute.uuid);
+                        setDeleteAttribute(undefined);
+                    }}
+                />
+            )}
+        </SettingsPage>
     );
 };
 

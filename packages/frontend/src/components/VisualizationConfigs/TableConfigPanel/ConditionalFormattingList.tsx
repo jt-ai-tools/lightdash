@@ -1,6 +1,7 @@
 import {
     createConditionalFormattingConfigWithSingleColor,
     getItemId,
+    isBooleanItem,
     isFilterableItem,
     isNumericItem,
     isStringDimension,
@@ -13,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { isTableVisualizationConfig } from '../../LightdashVisualization/types';
 import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import accordionClasses from '../common/Accordion.module.css';
 import { AddButton } from '../common/AddButton';
 import { Config } from '../common/Config';
 import { useControlledAccordion } from '../common/hooks/useControlledAccordion';
@@ -45,7 +47,9 @@ const ConditionalFormattingList = ({}) => {
             .filter((field) => activeFields.has(getItemId(field)))
             .filter(
                 (field) =>
-                    (isNumericItem(field) || isStringDimension(field)) &&
+                    (isNumericItem(field) ||
+                        isStringDimension(field) ||
+                        isBooleanItem(field)) &&
                     isFilterableItem(field),
             ) as FilterableItem[];
     }, [itemsMap, activeFields]);
@@ -134,17 +138,8 @@ const ConditionalFormattingList = ({}) => {
                     variant="contained"
                     value={openItems}
                     onChange={handleAccordionChange}
-                    styles={(theme) => ({
-                        control: {
-                            padding: theme.spacing.xs,
-                        },
-                        label: {
-                            padding: 0,
-                        },
-                        panel: {
-                            padding: 0,
-                        },
-                    })}
+                    className={accordionClasses.containedList}
+                    transparentActiveItem
                 >
                     {activeConfigs.map((conditionalFormatting, index) => (
                         <ConditionalFormattingItem

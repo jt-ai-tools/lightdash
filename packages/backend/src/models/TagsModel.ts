@@ -1,9 +1,9 @@
 import type { Tag } from '@lightdash/common';
 import { Knex } from 'knex';
 import {
+    convertTagRow,
     DbTag,
     TagsTableName,
-    convertTagRow,
     type DbTagIn,
     type DbTagUpdate,
 } from '../database/entities/tags';
@@ -29,9 +29,16 @@ export class TagsModel {
     }
 
     async update(tagUuid: string, tagUpdate: DbTagUpdate) {
+        const updateFields: DbTagUpdate = {
+            ...(tagUpdate.name !== undefined ? { name: tagUpdate.name } : {}),
+            ...(tagUpdate.color !== undefined
+                ? { color: tagUpdate.color }
+                : {}),
+        };
+
         await this.database(TagsTableName)
             .where('tag_uuid', tagUuid)
-            .update(tagUpdate);
+            .update(updateFields);
     }
 
     async get(tagUuid: string): Promise<Tag | undefined> {
@@ -57,6 +64,17 @@ export class TagsModel {
             .select('*');
 
         return tags.map(convertTagRow);
+    }
+
+    async getUuidsByYamlReferences(
+        projectUuid: string,
+        yamlReferences: string[],
+    ): Promise<string[]> {
+        const tags = await this.database(TagsTableName)
+            .where('project_uuid', projectUuid)
+            .whereIn('yaml_reference', yamlReferences)
+            .select('tag_uuid');
+        return tags.map((t) => t.tag_uuid);
     }
 
     async getYamlTags(projectUuid: string): Promise<DbTag[]> {

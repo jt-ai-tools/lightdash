@@ -1,6 +1,7 @@
 import {
     QueryHistoryStatus,
     type ApiExecuteAsyncDashboardChartQueryResults,
+    type DateZoom,
 } from '@lightdash/common';
 import { useCallback, useMemo } from 'react';
 import { lightdashApi } from '../../api';
@@ -13,6 +14,8 @@ export const useEmbedDashboardChartDownload = (
     tileUuid: string,
     projectUuid: string | undefined,
     originalQueryUuid: string,
+    canExportPivotedData: boolean,
+    dateZoom?: DateZoom,
 ) => {
     const dashboardFilters = useDashboardFiltersForTile(tileUuid);
     const chartSort = useDashboardContext((c) => c.chartSort);
@@ -21,15 +24,20 @@ export const useEmbedDashboardChartDownload = (
         () => chartSort[tileUuid] || [],
         [chartSort, tileUuid],
     );
-    const dateZoomGranularity = useDashboardContext(
-        (c) => c.dateZoomGranularity,
-    );
 
     const getDownloadQueryUuid = useCallback(
-        async (limit: number | null, limitType: Limit): Promise<string> => {
+        async (
+            limit: number | null,
+            limitType: Limit,
+            exportPivotedData: boolean = true,
+        ): Promise<string> => {
             if (!projectUuid) {
                 throw new Error('Missing required parameters');
             }
+
+            const originalQueryIsPivoted = canExportPivotedData;
+            const shouldPivotResults =
+                exportPivotedData && originalQueryIsPivoted;
 
             // When limiting to the table, use the original query uuid
             if (limitType === Limit.TABLE) {
@@ -45,12 +53,11 @@ export const useEmbedDashboardChartDownload = (
                         tileUuid,
                         dashboardFilters: dashboardFilters || {},
                         dashboardSorts: dashboardSorts || [],
-                        dateZoom: dateZoomGranularity
-                            ? { granularity: dateZoomGranularity }
-                            : undefined,
+                        dateZoom,
                         limit,
                         invalidateCache: false,
                         parameters,
+                        pivotResults: shouldPivotResults,
                     }),
                 });
 
@@ -59,7 +66,10 @@ export const useEmbedDashboardChartDownload = (
                 executeQueryResponse.queryUuid,
             );
 
-            if (results.status === QueryHistoryStatus.ERROR) {
+            if (
+                results.status === QueryHistoryStatus.ERROR ||
+                results.status === QueryHistoryStatus.EXPIRED
+            ) {
                 throw new Error(results.error || 'Error executing query');
             }
 
@@ -74,8 +84,9 @@ export const useEmbedDashboardChartDownload = (
             tileUuid,
             dashboardFilters,
             dashboardSorts,
-            dateZoomGranularity,
+            dateZoom,
             parameters,
+            canExportPivotedData,
             originalQueryUuid,
         ],
     );

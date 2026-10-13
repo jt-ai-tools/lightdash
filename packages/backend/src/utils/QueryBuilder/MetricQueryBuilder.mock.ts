@@ -8,10 +8,12 @@ import {
     CompiledTable,
     CreateWarehouseCredentials,
     CustomDimensionType,
+    defaultNullSafeEqualSql,
     DimensionType,
     Explore,
     FieldType,
     FilterOperator,
+    getBigqueryUnnestSql,
     IntrinsicUserAttributes,
     JoinModelRequiredFilterRule,
     JoinRelationship,
@@ -21,14 +23,20 @@ import {
     TimeIntervalUnit,
     WarehouseCatalog,
     WarehouseClient,
+    WarehouseDatabaseListing,
     WarehouseTables,
     WarehouseTypes,
 } from '@lightdash/common';
+import { withWarehouseCredentialVersion } from '../warehouseCredentialVersion';
 
 export const warehouseClientMock: WarehouseClient = {
-    credentials: {
-        type: WarehouseTypes.POSTGRES,
-    } as CreateWarehouseCredentials,
+    getSessionTimezone: async () => null,
+    credentials: withWarehouseCredentialVersion(
+        {
+            type: WarehouseTypes.POSTGRES,
+        } as CreateWarehouseCredentials,
+        'fixture-warehouse-version',
+    ),
     getCatalog: async () => ({
         default: {
             public: {
@@ -37,15 +45,6 @@ export const warehouseClientMock: WarehouseClient = {
                 },
             },
         },
-    }),
-    getAsyncQueryResults: async () => ({
-        queryId: null,
-        queryMetadata: null,
-        totalRows: 0,
-        durationMs: 0,
-        fields: {},
-        pageCount: 0,
-        rows: [],
     }),
     streamQuery(query, streamCallback) {
         void streamCallback({
@@ -65,6 +64,7 @@ export const warehouseClientMock: WarehouseClient = {
             queryMetadata: null,
             totalRows: 0,
             durationMs: 0,
+            phaseTimings: {},
         };
     },
     runQuery: () =>
@@ -88,12 +88,22 @@ export const warehouseClientMock: WarehouseClient = {
     },
     getFieldQuoteChar: () => '"',
     getFloatingType: () => 'FLOAT',
+    getNullSafeEqualSql: defaultNullSafeEqualSql,
+    getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
     getAdapterType: () => SupportedDbtAdapter.POSTGRES,
+    supportsCteMaterialization: () => true,
+    getUnnestSql: () => null,
     concatString: (...args) => `(${args.join(' || ')})`,
     getAllTables(
         schema?: string | undefined,
         tags?: Record<string, string> | undefined,
     ): Promise<WarehouseTables> {
+        throw new Error('Function not implemented.');
+    },
+    listDatabases(): Promise<WarehouseDatabaseListing> {
+        throw new Error('Function not implemented.');
+    },
+    getTablesForDatabase(): Promise<WarehouseTables> {
         throw new Error('Function not implemented.');
     },
     getFields(
@@ -125,6 +135,9 @@ export const warehouseClientMock: WarehouseClient = {
             .replace(/\/\*[\s\S]*?\*\//g, '');
     },
     castToTimestamp: (date) => `CAST('${date.toISOString()}' AS TIMESTAMP)`,
+    castToDate: (date) => `CAST('${date.toISOString().slice(0, 10)}' AS DATE)`,
+    castToNaiveTimestamp: (date) =>
+        `CAST('${date.toISOString()}' AS TIMESTAMP)`,
     getIntervalSql: (value, unit: TimeIntervalUnit) =>
         `INTERVAL '${value} ${unit}'`,
     getTimestampDiffSeconds: (startTimestampSql, endTimestampSql) =>
@@ -139,11 +152,15 @@ export const warehouseClientMock: WarehouseClient = {
 };
 
 export const bigqueryClientMock: WarehouseClient = {
+    getSessionTimezone: async () => null,
+    getUnnestSql: getBigqueryUnnestSql,
     credentials: {
         type: WarehouseTypes.BIGQUERY,
     } as CreateWarehouseCredentials,
     getFieldQuoteChar: () => '`',
     getFloatingType: () => 'FLOAT64',
+    getNullSafeEqualSql: defaultNullSafeEqualSql,
+    getNullSafeEqualJoinSql: defaultNullSafeEqualSql,
     getCatalog: async () => ({
         default: {
             public: {
@@ -152,15 +169,6 @@ export const bigqueryClientMock: WarehouseClient = {
                 },
             },
         },
-    }),
-    getAsyncQueryResults: async () => ({
-        queryId: null,
-        queryMetadata: null,
-        totalRows: 0,
-        durationMs: 0,
-        fields: {},
-        pageCount: 0,
-        rows: [],
     }),
     streamQuery(query, streamCallback) {
         void streamCallback({
@@ -174,6 +182,7 @@ export const bigqueryClientMock: WarehouseClient = {
         queryMetadata: null,
         totalRows: 0,
         durationMs: 0,
+        phaseTimings: {},
     }),
     runQuery: () =>
         Promise.resolve({
@@ -186,11 +195,18 @@ export const bigqueryClientMock: WarehouseClient = {
     getEscapeStringQuoteChar: () => '\\',
     getMetricSql: () => '',
     getAdapterType: () => SupportedDbtAdapter.BIGQUERY,
+    supportsCteMaterialization: () => true,
     concatString: (...args) => `CONCAT(${args.join(', ')})`,
     getAllTables(
         schema?: string | undefined,
         tags?: Record<string, string> | undefined,
     ): Promise<WarehouseTables> {
+        throw new Error('Function not implemented.');
+    },
+    listDatabases(): Promise<WarehouseDatabaseListing> {
+        throw new Error('Function not implemented.');
+    },
+    getTablesForDatabase(): Promise<WarehouseTables> {
         throw new Error('Function not implemented.');
     },
     getFields(
@@ -212,6 +228,9 @@ export const bigqueryClientMock: WarehouseClient = {
     },
     escapeString: (value) => value,
     castToTimestamp: (date) => `TIMESTAMP('${date.toISOString()}')`,
+    castToDate: (date) => `DATE '${date.toISOString().slice(0, 10)}'`,
+    castToNaiveTimestamp: (date) =>
+        `DATETIME '${date.toISOString().slice(0, 19).replace('T', ' ')}'`,
     getIntervalSql: (value, unit: TimeIntervalUnit) =>
         `INTERVAL ${value} ${unit}`,
     getTimestampDiffSeconds: (startTimestampSql, endTimestampSql) =>
@@ -683,7 +702,7 @@ export const METRIC_QUERY_JOIN_CHAIN_SQL = `SELECT "table5".dim1               A
                                                      LEFT OUTER JOIN "db"."schema"."table5" AS "table5"
                                                                      ON ("table5".col) = ("table4".col)
 
-                                            GROUP BY 1 LIMIT 5`;
+                                            GROUP BY 1 ORDER BY "table5_metric1" DESC LIMIT 5`;
 
 export const METRIC_QUERY_ALL_JOIN_TYPES_CHAIN_SQL = `SELECT "table5".dim1               AS "table5_dim1",
                                                              MAX("table5".number_column) AS "table5_metric1"
@@ -697,7 +716,7 @@ export const METRIC_QUERY_ALL_JOIN_TYPES_CHAIN_SQL = `SELECT "table5".dim1      
                                                                RIGHT OUTER JOIN "db"."schema"."table5" AS "table5"
                                                                                 ON ("table5".col) = ("table4".col)
 
-                                                      GROUP BY 1 LIMIT 5`;
+                                                      GROUP BY 1 ORDER BY "table5_metric1" DESC LIMIT 5`;
 
 export const METRIC_QUERY: CompiledMetricQuery = {
     exploreName: 'table1',
@@ -794,7 +813,7 @@ export const METRIC_QUERY_WITH_TABLE_REFERENCE_SQL = `SELECT "table1".dim1 + "ta
                                                                LEFT OUTER JOIN "db"."schema"."table2" AS "table2"
                                                                                ON ("table1".shared) = ("table2".shared)
 
-                                                      GROUP BY 1 LIMIT 10`;
+                                                      GROUP BY 1 ORDER BY "table1_with_reference" LIMIT 10`;
 
 export const METRIC_QUERY_WITH_FILTER: CompiledMetricQuery = {
     exploreName: 'table1',
@@ -1461,23 +1480,41 @@ export const EXPECTED_SQL_WITH_CUSTOM_DIMENSION_BIN_NUMBER = `WITH age_range_cte
                                                                                      age_range_cte.max_id)
                                                                          END
                                                                                                  AS \`age_range\`,
+                                                                     CASE
+                                                                         WHEN "table1".dim1 IS NULL THEN 3
+                                                                         WHEN "table1".dim1 >= age_range_cte.min_id +
+                                                                                               age_range_cte.bin_width *
+                                                                                               0 AND "table1".dim1 <
+                                                                                                     age_range_cte.min_id +
+                                                                                                     age_range_cte.bin_width *
+                                                                                                     1 THEN 0
+                                                                         WHEN "table1".dim1 >= age_range_cte.min_id +
+                                                                                               age_range_cte.bin_width *
+                                                                                               1 AND "table1".dim1 <
+                                                                                                     age_range_cte.min_id +
+                                                                                                     age_range_cte.bin_width *
+                                                                                                     2 THEN 1
+                                                                         ELSE 2
+                                                                         END
+                                                                                                 AS \`age_range_order\`,
                                                                      MAX("table1".number_column) AS \`table1_metric1\`
                                                               FROM "db"."schema"."table1" AS \`table1\`
 
                                                                        CROSS JOIN age_range_cte
 
-                                                              GROUP BY 1,2
+                                                              GROUP BY 1,2,3
                                                               ORDER BY \`table1_metric1\` DESC LIMIT 10`;
 
 export const EXPECTED_SQL_WITH_CUSTOM_DIMENSION_BIN_WIDTH = `SELECT "table1".dim1               AS \`table1_dim1\`,
                                                                     CONCAT(FLOOR("table1".dim1 / 10) * 10, ' - ',
                                                                            (FLOOR("table1".dim1 / 10) + 1) * 10 -
                                                                            1)                   AS \`age_range\`,
+                                                                    FLOOR("table1".dim1 / 10) * 10 AS \`age_range_order\`,
                                                                     MAX("table1".number_column) AS \`table1_metric1\`
                                                              FROM "db"."schema"."table1" AS \`table1\`
 
 
-                                                             GROUP BY 1,2
+                                                             GROUP BY 1,2,3
                                                              ORDER BY \`table1_metric1\` DESC LIMIT 10`;
 
 export const EXPECTED_SQL_WITH_CUSTOM_DIMENSION_AND_TABLE_CALCULATION = `WITH age_range_cte
@@ -1530,12 +1567,36 @@ export const EXPECTED_SQL_WITH_CUSTOM_DIMENSION_AND_TABLE_CALCULATION = `WITH ag
                                                                                                          age_range_cte.max_id)
                                                                                                  END
                                                                                                                          AS \`age_range\`,
+                                                                                             CASE
+                                                                                                 WHEN "table1".dim1 IS NULL
+                                                                                                     THEN 3
+                                                                                                 WHEN "table1".dim1 >=
+                                                                                                      age_range_cte.min_id +
+                                                                                                      age_range_cte.bin_width *
+                                                                                                      0 AND
+                                                                                                      "table1".dim1 <
+                                                                                                      age_range_cte.min_id +
+                                                                                                      age_range_cte.bin_width *
+                                                                                                      1
+                                                                                                     THEN 0
+                                                                                                 WHEN "table1".dim1 >=
+                                                                                                      age_range_cte.min_id +
+                                                                                                      age_range_cte.bin_width *
+                                                                                                      1 AND
+                                                                                                      "table1".dim1 <
+                                                                                                      age_range_cte.min_id +
+                                                                                                      age_range_cte.bin_width *
+                                                                                                      2
+                                                                                                     THEN 1
+                                                                                                 ELSE 2
+                                                                                                 END
+                                                                                                                         AS \`age_range_order\`,
                                                                                              MAX("table1".number_column) AS \`table1_metric1\`
                                                                                       FROM "db"."schema"."table1" AS \`table1\`
 
                                                                                                CROSS JOIN age_range_cte
 
-                                                                                      GROUP BY 1,2
+                                                                                      GROUP BY 1,2,3
                                                                                       )
                                                                          SELECT *,
                                                                                 table1_dim1 + 1 AS \`calc3\`
@@ -1606,11 +1667,12 @@ export const EXPECTED_SQL_WITH_CUSTOM_DIMENSION_BIN_WIDTH_ON_POSTGRES = `SELECT 
                                                                                  10 || ' - ' ||
                                                                                  (FLOOR("table1".dim1 / 10) + 1) * 10 -
                                                                                  1)                         AS "age_range",
+                                                                                FLOOR("table1".dim1 / 10) * 10 AS "age_range_order",
                                                                                 MAX("table1".number_column) AS "table1_metric1"
                                                                          FROM "db"."schema"."table1" AS "table1"
 
 
-                                                                         GROUP BY 1,2
+                                                                         GROUP BY 1,2,3
                                                                          ORDER BY "table1_metric1" DESC LIMIT 10`;
 
 export const INTRINSIC_USER_ATTRIBUTES: IntrinsicUserAttributes = {
@@ -2075,6 +2137,248 @@ export const METRIC_QUERY_CROSS_TABLE: CompiledMetricQuery = {
     compiledCustomDimensions: [],
 };
 
+// Non-aggregate metric whose SQL references a dimension on a joined table
+export const EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE: Explore = {
+    ...EXPLORE_WITH_CROSS_TABLE_METRICS,
+    tables: {
+        ...EXPLORE_WITH_CROSS_TABLE_METRICS.tables,
+        customers: {
+            ...EXPLORE_WITH_CROSS_TABLE_METRICS.tables.customers,
+            dimensions: {
+                ...EXPLORE_WITH_CROSS_TABLE_METRICS.tables.customers.dimensions,
+                customer_tier: {
+                    type: DimensionType.STRING,
+                    name: 'customer_tier',
+                    label: 'Customer Tier',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.customer_tier',
+                    compiledSql: '"customers".customer_tier',
+                    tablesReferences: ['customers'],
+                    hidden: false,
+                },
+            },
+        },
+        orders: {
+            ...EXPLORE_WITH_CROSS_TABLE_METRICS.tables.orders,
+            metrics: {
+                ...EXPLORE_WITH_CROSS_TABLE_METRICS.tables.orders.metrics,
+                premium_order_rate: {
+                    type: MetricType.NUMBER,
+                    name: 'premium_order_rate',
+                    label: 'Premium Order Rate',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.METRIC,
+                    sql: "${orders.total_order_amount} / NULLIF(COUNT(CASE WHEN ${customers.customer_tier} = 'Premium' THEN 1 END), 0)",
+                    compiledSql:
+                        'SUM("orders".amount) / NULLIF(COUNT(CASE WHEN "customers".customer_tier = \'Premium\' THEN 1 END), 0)',
+                    tablesReferences: ['orders', 'customers'],
+                    hidden: false,
+                },
+            },
+        },
+    },
+};
+
+export const METRIC_QUERY_CROSS_TABLE_DIMENSION_REFERENCE: CompiledMetricQuery =
+    {
+        ...METRIC_QUERY_CROSS_TABLE,
+        metrics: ['orders_premium_order_rate'],
+    };
+
+// Same shape, but the cross-table reference points at a field that does not exist
+export const EXPLORE_WITH_CROSS_TABLE_UNKNOWN_REFERENCE: Explore = {
+    ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE,
+    tables: {
+        ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables,
+        orders: {
+            ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables.orders,
+            metrics: {
+                ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables.orders
+                    .metrics,
+                premium_order_rate: {
+                    ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables
+                        .orders.metrics.premium_order_rate,
+                    sql: '${orders.total_order_amount} / ${customers.does_not_exist}',
+                },
+            },
+        },
+    },
+};
+
+// Non-aggregate metric mixing ${TABLE}.column with a dimension on a joined table
+export const EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE: Explore = {
+    ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE,
+    tables: {
+        ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables,
+        orders: {
+            ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables.orders,
+            metrics: {
+                ...EXPLORE_WITH_CROSS_TABLE_DIMENSION_REFERENCE.tables.orders
+                    .metrics,
+                premium_order_amount: {
+                    type: MetricType.NUMBER,
+                    name: 'premium_order_amount',
+                    label: 'Premium Order Amount',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.METRIC,
+                    sql: "SUM(CASE WHEN ${customers.customer_tier} = 'Premium' THEN ${TABLE}.amount END)",
+                    compiledSql:
+                        'SUM(CASE WHEN "customers".customer_tier = \'Premium\' THEN "orders".amount END)',
+                    tablesReferences: ['orders', 'customers'],
+                    hidden: false,
+                },
+                raw_revenue_per_customer: {
+                    type: MetricType.NUMBER,
+                    name: 'raw_revenue_per_customer',
+                    label: 'Raw Revenue Per Customer',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.METRIC,
+                    sql: 'SUM(${TABLE}.amount) / NULLIF(${customers.total_customers}, 0)',
+                    compiledSql:
+                        'SUM("orders".amount) / NULLIF(COUNT("customers".customer_id), 0)',
+                    tablesReferences: ['orders', 'customers'],
+                    hidden: false,
+                },
+            },
+        },
+    },
+};
+
+const crossTableNumberMetric = (
+    name: string,
+    sql: string,
+    compiledSql: string,
+): CompiledMetric => ({
+    type: MetricType.NUMBER,
+    name,
+    label: name,
+    table: 'orders',
+    tableLabel: 'orders',
+    fieldType: FieldType.METRIC,
+    sql,
+    compiledSql,
+    tablesReferences: ['orders', 'customers'],
+    hidden: false,
+});
+
+// ${TABLE} metrics that land in the distinct and nested aggregate flows
+export const EXPLORE_WITH_TABLE_REFERENCE_OVER_CTES: Explore = {
+    ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE,
+    tables: {
+        ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE.tables,
+        customers: {
+            ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE.tables.customers,
+            metrics: {
+                ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE.tables.customers
+                    .metrics,
+                distinct_credit: {
+                    type: MetricType.SUM_DISTINCT,
+                    name: 'distinct_credit',
+                    label: 'Distinct Credit',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: '${TABLE}.credit',
+                    compiledSql: 'SUM("customers".credit)',
+                    compiledValueSql: '"customers".credit',
+                    compiledDistinctKeys: ['"customers".customer_id'],
+                    tablesReferences: ['customers'],
+                    hidden: false,
+                },
+                amount_per_customer: {
+                    type: MetricType.NUMBER,
+                    name: 'amount_per_customer',
+                    label: 'Amount Per Customer',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: '${orders.total_order_amount} / NULLIF(${customers.total_customers}, 0)',
+                    compiledSql:
+                        'SUM("orders".amount) / NULLIF(COUNT("customers".customer_id), 0)',
+                    tablesReferences: ['customers', 'orders'],
+                    hidden: false,
+                },
+                customers_with_orders: {
+                    type: MetricType.NUMBER,
+                    name: 'customers_with_orders',
+                    label: 'Customers With Orders',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: 'COUNT(CASE WHEN ${orders.order_id} IS NOT NULL THEN 1 END)',
+                    compiledSql:
+                        'COUNT(CASE WHEN "orders".order_id IS NOT NULL THEN 1 END)',
+                    tablesReferences: ['customers', 'orders'],
+                    hidden: false,
+                },
+                credit_per_order_amount: {
+                    type: MetricType.NUMBER,
+                    name: 'credit_per_order_amount',
+                    label: 'Credit Per Order Amount',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: 'SUM(${TABLE}.credit) / NULLIF(${orders.total_order_amount}, 0)',
+                    compiledSql:
+                        'SUM("customers".credit) / NULLIF(SUM("orders".amount), 0)',
+                    tablesReferences: ['customers', 'orders'],
+                    hidden: false,
+                },
+            },
+        },
+        orders: {
+            ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE.tables.orders,
+            metrics: {
+                ...EXPLORE_WITH_CROSS_TABLE_TABLE_REFERENCE.tables.orders
+                    .metrics,
+                amount_per_distinct_credit: crossTableNumberMetric(
+                    'amount_per_distinct_credit',
+                    'SUM(${TABLE}.amount) / NULLIF(${customers.distinct_credit}, 0)',
+                    'SUM("orders".amount) / NULLIF(SUM("customers".credit), 0)',
+                ),
+                order_id_times_distinct_credit: crossTableNumberMetric(
+                    'order_id_times_distinct_credit',
+                    '${TABLE}.order_id * ${customers.distinct_credit}',
+                    '"orders".order_id * SUM("customers".credit)',
+                ),
+                order_id_times_distinct_credit_percent: crossTableNumberMetric(
+                    'order_id_times_distinct_credit_percent',
+                    '${orders.order_id_times_distinct_credit} * 100',
+                    '("orders".order_id * SUM("customers".credit)) * 100',
+                ),
+                customers_on_large_orders: crossTableNumberMetric(
+                    'customers_on_large_orders',
+                    'SUM(CASE WHEN ${TABLE}.amount > 100 THEN ${customers.total_customers} END)',
+                    'SUM(CASE WHEN "orders".amount > 100 THEN COUNT("customers".customer_id) END)',
+                ),
+                revenue_per_table_field: crossTableNumberMetric(
+                    'revenue_per_table_field',
+                    '${orders.total_order_amount} / ${customers.TABLE}',
+                    'SUM("orders".amount) / COUNT("customers".customer_id)',
+                ),
+            },
+        },
+    },
+};
+
+// Same explore without fan-out, so only the nested aggregate flow builds CTEs
+export const EXPLORE_WITH_TABLE_REFERENCE_WITHOUT_FANOUT: Explore = {
+    ...EXPLORE_WITH_TABLE_REFERENCE_OVER_CTES,
+    joinedTables: EXPLORE_WITH_TABLE_REFERENCE_OVER_CTES.joinedTables.map(
+        (join) => ({ ...join, relationship: JoinRelationship.ONE_TO_ONE }),
+    ),
+};
+
+export const METRIC_QUERY_CROSS_TABLE_TABLE_REFERENCE: CompiledMetricQuery = {
+    ...METRIC_QUERY_CROSS_TABLE,
+    metrics: ['orders_premium_order_amount'],
+};
+
 // Expected SQL for cross-table metric references with CTEs
 export const EXPECTED_SQL_WITH_CROSS_TABLE_METRICS = `WITH cte_keys_customers AS (
     SELECT DISTINCT
@@ -2290,6 +2594,451 @@ export const METRIC_QUERY_WITH_CUSTOM_USER_ATTRIBUTE_FILTER_VALUE_SQL = `SELECT 
                                              GROUP BY 1
                                              ORDER BY "table1_dim1" DESC LIMIT 10`;
 
+// --- sum_distinct fixtures ---
+
+export const EXPLORE_WITH_SUM_DISTINCT: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'orders',
+    label: 'orders',
+    baseTable: 'orders',
+    tags: [],
+    joinedTables: [],
+    tables: {
+        orders: {
+            name: 'orders',
+            label: 'orders',
+            database: 'db',
+            schema: 'schema',
+            sqlTable: '"db"."schema"."orders"',
+            primaryKey: ['order_id'],
+            dimensions: {
+                order_id: {
+                    type: DimensionType.STRING,
+                    name: 'order_id',
+                    label: 'Order ID',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.order_id',
+                    compiledSql: '"orders".order_id',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                payment_method: {
+                    type: DimensionType.STRING,
+                    name: 'payment_method',
+                    label: 'Payment Method',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.payment_method',
+                    compiledSql: '"orders".payment_method',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                status: {
+                    type: DimensionType.STRING,
+                    name: 'status',
+                    label: 'Status',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.status',
+                    compiledSql: '"orders".status',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                line_item_id: {
+                    type: DimensionType.STRING,
+                    name: 'line_item_id',
+                    label: 'Line Item ID',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.line_item_id',
+                    compiledSql: '"orders".line_item_id',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                total_revenue: {
+                    type: MetricType.SUM_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    name: 'total_revenue',
+                    label: 'Total Revenue',
+                    sql: '${TABLE}.amount',
+                    compiledSql: 'SUM("orders".amount)',
+                    compiledValueSql: '"orders".amount',
+                    compiledDistinctKeys: ['"orders".line_item_id'],
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                // Multi-key distinct: dedupes by (order_id, payment_method)
+                total_payment_by_method_per_order: {
+                    type: MetricType.SUM_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    name: 'total_payment_by_method_per_order',
+                    label: 'Total payment by method per order',
+                    sql: '${TABLE}.amount',
+                    compiledSql: 'SUM("orders".amount)',
+                    compiledValueSql: '"orders".amount',
+                    compiledDistinctKeys: [
+                        '"orders".order_id',
+                        '"orders".payment_method',
+                    ],
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+            lineageGraph: {},
+        },
+    },
+};
+
+export const METRIC_QUERY_SUM_DISTINCT_WITH_DIMS: CompiledMetricQuery = {
+    exploreName: 'orders',
+    dimensions: ['orders_payment_method', 'orders_status'],
+    metrics: ['orders_total_revenue'],
+    filters: {},
+    sorts: [{ fieldId: 'orders_total_revenue', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// Selected dimension matches the metric's distinct_key — exercises the INNER JOIN path
+// where the dedup CTE keeps one row per distinct-key value.
+export const METRIC_QUERY_SUM_DISTINCT_WITH_JOINABLE_DIM: CompiledMetricQuery =
+    {
+        exploreName: 'orders',
+        dimensions: ['orders_line_item_id'],
+        metrics: ['orders_total_revenue'],
+        filters: {},
+        sorts: [{ fieldId: 'orders_total_revenue', descending: true }],
+        limit: 10,
+        tableCalculations: [],
+        compiledTableCalculations: [],
+        compiledAdditionalMetrics: [],
+        compiledCustomDimensions: [],
+    };
+
+// Multi-key distinct where both distinct_keys are selected as dimensions — reproduces
+// the case reported on feature/spk-450 where every output row was incorrectly the same.
+export const METRIC_QUERY_SUM_DISTINCT_MULTI_KEY_FULLY_JOINABLE: CompiledMetricQuery =
+    {
+        exploreName: 'orders',
+        dimensions: ['orders_order_id', 'orders_payment_method'],
+        metrics: ['orders_total_payment_by_method_per_order'],
+        filters: {},
+        sorts: [
+            {
+                fieldId: 'orders_total_payment_by_method_per_order',
+                descending: true,
+            },
+        ],
+        limit: 10,
+        tableCalculations: [],
+        compiledTableCalculations: [],
+        compiledAdditionalMetrics: [],
+        compiledCustomDimensions: [],
+    };
+
+// Multi-key distinct where only one of two distinct_keys is selected — outer CTE must
+// aggregate across the unselected key, INNER JOIN on the selected one.
+export const METRIC_QUERY_SUM_DISTINCT_MULTI_KEY_PARTIAL_JOIN: CompiledMetricQuery =
+    {
+        exploreName: 'orders',
+        dimensions: ['orders_order_id'],
+        metrics: ['orders_total_payment_by_method_per_order'],
+        filters: {},
+        sorts: [
+            {
+                fieldId: 'orders_total_payment_by_method_per_order',
+                descending: true,
+            },
+        ],
+        limit: 10,
+        tableCalculations: [],
+        compiledTableCalculations: [],
+        compiledAdditionalMetrics: [],
+        compiledCustomDimensions: [],
+    };
+
+export const METRIC_QUERY_SUM_DISTINCT_NO_DIMS: CompiledMetricQuery = {
+    exploreName: 'orders',
+    dimensions: [],
+    metrics: ['orders_total_revenue'],
+    filters: {},
+    sorts: [{ fieldId: 'orders_total_revenue', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// --- average_distinct fixtures ---
+
+export const EXPLORE_WITH_AVERAGE_DISTINCT: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'orders',
+    label: 'orders',
+    baseTable: 'orders',
+    tags: [],
+    joinedTables: [],
+    tables: {
+        orders: {
+            name: 'orders',
+            label: 'orders',
+            database: 'db',
+            schema: 'schema',
+            sqlTable: '"db"."schema"."orders"',
+            primaryKey: ['order_id'],
+            dimensions: {
+                order_id: {
+                    type: DimensionType.STRING,
+                    name: 'order_id',
+                    label: 'Order ID',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.order_id',
+                    compiledSql: '"orders".order_id',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                payment_method: {
+                    type: DimensionType.STRING,
+                    name: 'payment_method',
+                    label: 'Payment Method',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.payment_method',
+                    compiledSql: '"orders".payment_method',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                avg_shipping_cost: {
+                    type: MetricType.AVERAGE_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    name: 'avg_shipping_cost',
+                    label: 'Avg Shipping Cost',
+                    sql: '${TABLE}.shipping_cost',
+                    compiledSql: 'AVG("orders".shipping_cost)',
+                    compiledValueSql: '"orders".shipping_cost',
+                    compiledDistinctKeys: ['"orders".line_item_id'],
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+            lineageGraph: {},
+        },
+    },
+};
+
+export const METRIC_QUERY_AVERAGE_DISTINCT_WITH_DIMS: CompiledMetricQuery = {
+    exploreName: 'orders',
+    dimensions: ['orders_payment_method'],
+    metrics: ['orders_avg_shipping_cost'],
+    filters: {},
+    sorts: [{ fieldId: 'orders_avg_shipping_cost', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+export const METRIC_QUERY_AVERAGE_DISTINCT_NO_DIMS: CompiledMetricQuery = {
+    exploreName: 'orders',
+    dimensions: [],
+    metrics: ['orders_avg_shipping_cost'],
+    filters: {},
+    sorts: [{ fieldId: 'orders_avg_shipping_cost', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// PROD-7893: type:number wrappers over sum_distinct metrics, plus a transitive rate.
+export const EXPLORE_WITH_SUM_DISTINCT_WRAPPER: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'transfers',
+    label: 'transfers',
+    baseTable: 'transfers',
+    tags: [],
+    joinedTables: [],
+    tables: {
+        transfers: {
+            name: 'transfers',
+            label: 'transfers',
+            database: 'db',
+            schema: 'schema',
+            sqlTable: '"db"."schema"."transfers"',
+            primaryKey: ['client_id'],
+            dimensions: {
+                client_id: {
+                    type: DimensionType.STRING,
+                    name: 'client_id',
+                    label: 'Client ID',
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.client_id',
+                    compiledSql: '"transfers".client_id',
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+                date: {
+                    type: DimensionType.DATE,
+                    name: 'date',
+                    label: 'Date',
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.date',
+                    compiledSql: '"transfers".date',
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                total_corridor_transfers: {
+                    type: MetricType.SUM_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    name: 'total_corridor_transfers',
+                    label: 'Total corridor transfers',
+                    sql: '${TABLE}.total_daily_corridor_transfers',
+                    compiledSql:
+                        'SUM("transfers".total_daily_corridor_transfers)',
+                    compiledValueSql:
+                        '"transfers".total_daily_corridor_transfers',
+                    compiledDistinctKeys: [
+                        '"transfers".client_id',
+                        '"transfers".date',
+                    ],
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+                total_residual_transfers: {
+                    type: MetricType.SUM_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    name: 'total_residual_transfers',
+                    label: 'Total residual transfers',
+                    sql: '${TABLE}.total_daily_residual_transfers',
+                    compiledSql:
+                        'SUM("transfers".total_daily_residual_transfers)',
+                    compiledValueSql:
+                        '"transfers".total_daily_residual_transfers',
+                    compiledDistinctKeys: ['"transfers".client_id'],
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+                total_inbound_contacts: {
+                    type: MetricType.COUNT_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    name: 'total_inbound_contacts',
+                    label: 'Total inbound contacts',
+                    sql: '${TABLE}.contact_id',
+                    compiledSql: 'COUNT(DISTINCT "transfers".contact_id)',
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+                total_transfers: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    name: 'total_transfers',
+                    label: 'Total transfers',
+                    sql: '${total_corridor_transfers} + ${total_residual_transfers}',
+                    compiledSql:
+                        '(SUM("transfers".total_daily_corridor_transfers)) + (SUM("transfers".total_daily_residual_transfers))',
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+                transfer_inbound_contact_rate: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'transfers',
+                    tableLabel: 'transfers',
+                    name: 'transfer_inbound_contact_rate',
+                    label: 'Transfer inbound contact rate',
+                    sql: '${total_inbound_contacts} / nullif(${total_transfers}, 0)',
+                    compiledSql:
+                        '(COUNT(DISTINCT "transfers".contact_id)) / nullif(((SUM("transfers".total_daily_corridor_transfers)) + (SUM("transfers".total_daily_residual_transfers))), 0)',
+                    tablesReferences: ['transfers'],
+                    hidden: false,
+                },
+            },
+            lineageGraph: {},
+        },
+    },
+};
+
+export const METRIC_QUERY_SUM_DISTINCT_WRAPPER_DIRECT: CompiledMetricQuery = {
+    exploreName: 'transfers',
+    dimensions: ['transfers_date'],
+    metrics: ['transfers_total_transfers'],
+    filters: {},
+    sorts: [{ fieldId: 'transfers_date', descending: false }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+export const METRIC_QUERY_SUM_DISTINCT_WRAPPER_TRANSITIVE: CompiledMetricQuery =
+    {
+        exploreName: 'transfers',
+        dimensions: ['transfers_date'],
+        metrics: ['transfers_transfer_inbound_contact_rate'],
+        filters: {},
+        sorts: [{ fieldId: 'transfers_date', descending: false }],
+        limit: 10,
+        tableCalculations: [],
+        compiledTableCalculations: [],
+        compiledAdditionalMetrics: [],
+        compiledCustomDimensions: [],
+    };
+
+export const METRIC_QUERY_SUM_DISTINCT_WRAPPER_MIXED: CompiledMetricQuery = {
+    exploreName: 'transfers',
+    dimensions: ['transfers_date'],
+    metrics: [
+        'transfers_total_transfers',
+        'transfers_transfer_inbound_contact_rate',
+    ],
+    filters: {},
+    sorts: [{ fieldId: 'transfers_date', descending: false }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
 // Expected: SELECT uses DATE_TRUNC (zoomed), but WHERE uses raw column
 export const METRIC_QUERY_WITH_DATE_ZOOM_FILTER_SQL = `SELECT
   DATE_TRUNC('month', "orders".created_at) AS "orders_created_at",
@@ -2302,3 +3051,1116 @@ WHERE ((
 GROUP BY 1
 ORDER BY "orders_created_at"
 LIMIT 10`;
+
+// ---- Nested aggregate test fixtures ----
+// Explore with a type:number metric that wraps an aggregate metric reference
+// This creates the nested aggregate pattern: SUM(MAX(...))
+export const EXPLORE_WITH_NESTED_AGG: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'my_table',
+    label: 'my_table',
+    baseTable: 'my_table',
+    tags: [],
+    joinedTables: [],
+    tables: {
+        my_table: {
+            name: 'my_table',
+            label: 'my_table',
+            database: 'db',
+            schema: 'schema',
+            sqlTable: '"db"."schema"."my_table"',
+            primaryKey: ['id'],
+            dimensions: {
+                category: {
+                    type: DimensionType.STRING,
+                    name: 'category',
+                    label: 'category',
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.category',
+                    compiledSql: '"my_table".category',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                max_value: {
+                    type: MetricType.MAX,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'max_value',
+                    label: 'max_value',
+                    sql: '${TABLE}.value',
+                    compiledSql: 'MAX("my_table".value)',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                count_records: {
+                    type: MetricType.COUNT,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'count_records',
+                    label: 'count_records',
+                    sql: '${TABLE}.id',
+                    compiledSql: 'COUNT("my_table".id)',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // type:number with aggregation wrapping an aggregate metric reference
+                // This compiles to SUM(MAX(...)) which is invalid SQL
+                sum_of_max: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'sum_of_max',
+                    label: 'sum_of_max',
+                    sql: 'sum(${max_value})',
+                    compiledSql: 'SUM(MAX("my_table".value))',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // More complex: aggregation wrapping metric ref + division by another metric
+                avg_of_max: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'avg_of_max',
+                    label: 'avg_of_max',
+                    sql: 'sum(${max_value}) / NULLIF(${count_records}, 0)',
+                    compiledSql:
+                        'SUM(MAX("my_table".value)) / NULLIF(COUNT("my_table".id), 0)',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // COUNT(DISTINCT) wrapping aggregate metric (PROD-5657: 1 chart)
+                count_distinct_of_max: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'count_distinct_of_max',
+                    label: 'count_distinct_of_max',
+                    sql: 'count(distinct ${max_value})',
+                    compiledSql: 'COUNT(DISTINCT MAX("my_table".value))',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // Conditional SUM wrapping aggregate metric (Looker migration pattern)
+                conditional_sum_of_max: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'conditional_sum_of_max',
+                    label: 'conditional_sum_of_max',
+                    sql: 'sum(case when ${max_value} > 100 then ${max_value} else 0 end)',
+                    compiledSql:
+                        'SUM(CASE WHEN MAX("my_table".value) > 100 THEN MAX("my_table".value) ELSE 0 END)',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // Warehouse-specific aggregation (Snowflake MAX_BY) wrapping metric references
+                // This compiles to MAX_BY(MAX(...), MAX(...)) which is a nested aggregate
+                max_by_of_agg: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'max_by_of_agg',
+                    label: 'max_by_of_agg',
+                    sql: 'max_by(${max_value}, ${count_records})',
+                    compiledSql:
+                        'MAX_BY(MAX("my_table".value), COUNT("my_table".id))',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // MAX_BY wrapping two non-aggregate (type:number) metric refs.
+                // Both inner deps compile to raw column references.
+                // Reproduces customer pattern: MAX_BY(${active_customers}, ${updated_on})
+                // where both helpers are type:number.
+                max_by_of_raw: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'max_by_of_raw',
+                    label: 'max_by_of_raw',
+                    sql: 'max_by(${raw_value}, ${raw_updated_on})',
+                    compiledSql:
+                        'MAX_BY("my_table".value, "my_table".updated_on)',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // Helper non-aggregate metric (raw column reference)
+                raw_updated_on: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'raw_updated_on',
+                    label: 'raw_updated_on',
+                    sql: '${TABLE}.updated_on',
+                    compiledSql: '"my_table".updated_on',
+                    tablesReferences: ['my_table'],
+                    hidden: true,
+                },
+                // Raw column aggregation combined with metric reference
+                // sql: sum(raw_col) / ${count_records}
+                // The sum() wraps a raw column (not a ${ } ref), so this is
+                // NOT a nested aggregate — it compiles to SUM(col) / COUNT(col)
+                // which is valid SQL (sibling aggregates, not nested).
+                raw_agg_with_ref: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'raw_agg_with_ref',
+                    label: 'raw_agg_with_ref',
+                    sql: 'sum(${TABLE}.value) / NULLIF(${count_records}, 0)',
+                    compiledSql:
+                        'SUM("my_table".value) / NULLIF(COUNT("my_table".id), 0)',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // Window function wrapping aggregate metric + ${TABLE} reference
+                // Reproduces GH-21089: ${TABLE} resolves to base table alias
+                // inside nested_agg_results CTE where only nested_agg is in scope
+                window_sum_of_max: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'window_sum_of_max',
+                    label: 'window_sum_of_max',
+                    sql: 'SUM(${max_value}) OVER (PARTITION BY ${TABLE}.category)',
+                    compiledSql:
+                        'SUM(MAX("my_table".value)) OVER (PARTITION BY "my_table".category)',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // Transitive nested aggregate: type:number referencing another type:number
+                // which itself wraps an aggregate metric.
+                // sum_case_of_max.sql = SUM(CASE WHEN ${max_value} > 100 THEN 1 ELSE 0 END)
+                //   → compiles to SUM(CASE WHEN MAX("my_table".value) > 100 THEN 1 ELSE 0 END)
+                // Then ratio_of_sum_case.sql = ${sum_case_of_max} / NULLIF(${count_records}, 0)
+                //   → compiles to SUM(CASE WHEN MAX(...) > 100 ...) / NULLIF(COUNT(...), 0)
+                // The nesting is two levels deep: ratio → sum_case → max
+                sum_case_of_max: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'sum_case_of_max',
+                    label: 'sum_case_of_max',
+                    sql: 'SUM(CASE WHEN ${max_value} > 100 THEN 1 ELSE 0 END)',
+                    compiledSql:
+                        'SUM(CASE WHEN MAX("my_table".value) > 100 THEN 1 ELSE 0 END)',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                ratio_of_sum_case: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'ratio_of_sum_case',
+                    label: 'ratio_of_sum_case',
+                    sql: '${sum_case_of_max} / NULLIF(${count_records}, 0)',
+                    compiledSql:
+                        'SUM(CASE WHEN MAX("my_table".value) > 100 THEN 1 ELSE 0 END) / NULLIF(COUNT("my_table".id), 0)',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // Raw (non-aggregate) helper metric — just a column reference.
+                // Used by mixed_raw_agg_repro to test the mix of raw + aggregate deps.
+                raw_value: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'raw_value',
+                    label: 'raw_value',
+                    sql: '${TABLE}.value',
+                    compiledSql: '"my_table".value',
+                    tablesReferences: ['my_table'],
+                    hidden: true,
+                },
+                // Outer metric mixing raw + aggregate inner deps (GH-21501).
+                // Emulates MAX_BY: pick the raw value ordered by the max metric.
+                // Compiles to ARRAY_AGG(raw_col ORDER BY MAX(col)) which is a
+                // nested aggregate that needs CTE routing.
+                mixed_raw_agg_repro: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'mixed_raw_agg_repro',
+                    label: 'mixed_raw_agg_repro',
+                    sql: '(ARRAY_AGG(${raw_value} ORDER BY ${max_value} DESC))[1]',
+                    compiledSql:
+                        '(ARRAY_AGG("my_table".value ORDER BY MAX("my_table".value) DESC))[1]',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+                // Product of aggregates - NO outer aggregation, valid SQL without CTE
+                product_of_aggregates: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'my_table',
+                    tableLabel: 'my_table',
+                    name: 'product_of_aggregates',
+                    label: 'product_of_aggregates',
+                    sql: '${max_value} * ${count_records}',
+                    compiledSql: 'MAX("my_table".value) * COUNT("my_table".id)',
+                    tablesReferences: ['my_table'],
+                    hidden: false,
+                },
+            },
+            lineageGraph: {},
+        },
+    },
+};
+
+export const METRIC_QUERY_NESTED_AGG_WITH_DIMS: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: ['my_table_category'],
+    metrics: ['my_table_sum_of_max'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_sum_of_max', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+export const METRIC_QUERY_NESTED_AGG_NO_DIMS: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: [],
+    metrics: ['my_table_sum_of_max'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_sum_of_max', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+export const METRIC_QUERY_NESTED_AGG_COMPLEX: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: ['my_table_category'],
+    metrics: ['my_table_avg_of_max'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_avg_of_max', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+export const METRIC_QUERY_NESTED_AGG_COUNT_DISTINCT: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: ['my_table_category'],
+    metrics: ['my_table_count_distinct_of_max'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_count_distinct_of_max', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+export const METRIC_QUERY_NESTED_AGG_CONDITIONAL: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: ['my_table_category'],
+    metrics: ['my_table_conditional_sum_of_max'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_conditional_sum_of_max', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+export const METRIC_QUERY_NESTED_AGG_PRODUCT: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: ['my_table_category'],
+    metrics: ['my_table_product_of_aggregates'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_product_of_aggregates', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// Raw column aggregation + metric reference: sum(raw_col) / ${aggregate_metric}
+// This is NOT a nested aggregate — both aggregations are at the same level.
+// The sum() wraps a raw column (not a metric ref), so it should NOT be
+// routed through the nested_agg CTE.
+export const METRIC_QUERY_NESTED_AGG_RAW_COL: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: ['my_table_category'],
+    metrics: ['my_table_raw_agg_with_ref', 'my_table_sum_of_max'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_raw_agg_with_ref', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// Mixed: nested agg metric + non-nested metric together (reproduces GROUP BY issue)
+export const METRIC_QUERY_NESTED_AGG_MIXED: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: [],
+    metrics: ['my_table_sum_of_max', 'my_table_product_of_aggregates'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_sum_of_max', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// Window function metric with ${TABLE} reference wrapping aggregate metric
+// Reproduces GH-21089: ${TABLE} resolves to base table inside nested_agg_results CTE
+export const METRIC_QUERY_NESTED_AGG_WINDOW_TABLE_REF: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: ['my_table_category'],
+    metrics: ['my_table_window_sum_of_max'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_window_sum_of_max', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// Transitive nested aggregate: type:number → type:number (with agg) → type:max
+// The outer metric (ratio_of_sum_case) has no SQL aggregation itself,
+// but its compiledSql contains SUM(CASE WHEN MAX(...)) via transitive inlining.
+// Only ratio_of_sum_case is selected — sum_case_of_max is NOT directly selected.
+export const METRIC_QUERY_NESTED_AGG_TRANSITIVE: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: ['my_table_category'],
+    metrics: ['my_table_ratio_of_sum_case'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_ratio_of_sum_case', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// Transitive nested aggregate mixed with other nested metrics.
+// Reproduces bug where ratio_of_sum_case fails when combined with
+// other nested metrics like conditional_sum_of_max.
+export const METRIC_QUERY_NESTED_AGG_TRANSITIVE_MIXED: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: [],
+    metrics: ['my_table_ratio_of_sum_case', 'my_table_conditional_sum_of_max'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_ratio_of_sum_case', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// Mixed raw + aggregate inner deps (GH-21501):
+// Outer metric: ARRAY_AGG(${raw_value} ORDER BY ${max_value} DESC)[1]
+// raw_value is type:number (raw column), max_value is type:max (aggregate).
+// CTE 1 should only pre-compute aggregate deps; CTE 3 (nested_agg_mixed)
+// should join base table + CTE 1 so raw columns are accessible.
+export const METRIC_QUERY_NESTED_AGG_MIXED_RAW: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: ['my_table_category'],
+    metrics: ['my_table_mixed_raw_agg_repro'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_mixed_raw_agg_repro', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// Mixed raw + aggregate alongside a pure aggregate metric in the same query.
+// Tests that CTE 2 (nested_agg_results) handles pure-agg metrics and
+// CTE 3 (nested_agg_mixed) handles mixed metrics without interfering.
+export const METRIC_QUERY_NESTED_AGG_MIXED_RAW_WITH_PURE: CompiledMetricQuery =
+    {
+        exploreName: 'my_table',
+        dimensions: ['my_table_category'],
+        metrics: ['my_table_mixed_raw_agg_repro', 'my_table_sum_of_max'],
+        filters: {},
+        sorts: [{ fieldId: 'my_table_mixed_raw_agg_repro', descending: true }],
+        limit: 10,
+        tableCalculations: [],
+        compiledTableCalculations: [],
+        compiledAdditionalMetrics: [],
+        compiledCustomDimensions: [],
+    };
+
+// Mixed raw + aggregate with no dimensions — tests CROSS JOIN path.
+export const METRIC_QUERY_NESTED_AGG_MIXED_RAW_NO_DIMS: CompiledMetricQuery = {
+    exploreName: 'my_table',
+    dimensions: [],
+    metrics: ['my_table_mixed_raw_agg_repro'],
+    filters: {},
+    sorts: [{ fieldId: 'my_table_mixed_raw_agg_repro', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// PROD-7503: base table has a hidden helper metric named `met_active_customers`
+// (type:number — raw column ref). A joined table has an aggregate metric with
+// the SAME name (type:average). The base table also has:
+//   - an outer mixed metric `met_active_customers_agg` whose SQL uses the short
+//     form `${met_active_customers}` to reference the base table's raw helper.
+//   - an outer pure-agg metric `met_active_customers_goal` whose SQL uses the
+//     qualified form `${joined_tbl.met_active_customers}` to reference the
+//     joined table's aggregate.
+// Selecting both triggers the nested_agg_mixed CTE with an aggregate inner dep
+// from the joined table whose name collides with the base helper's name.
+export const EXPLORE_NESTED_AGG_NAME_COLLISION: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'base_tbl',
+    label: 'base_tbl',
+    baseTable: 'base_tbl',
+    tags: [],
+    tables: {
+        base_tbl: {
+            name: 'base_tbl',
+            label: 'base_tbl',
+            database: 'db',
+            schema: 'schema',
+            sqlTable: '"db"."schema"."base_tbl"',
+            primaryKey: ['id'],
+            lineageGraph: {},
+            dimensions: {
+                category: {
+                    type: DimensionType.STRING,
+                    name: 'category',
+                    label: 'category',
+                    table: 'base_tbl',
+                    tableLabel: 'base_tbl',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.category',
+                    compiledSql: '"base_tbl".category',
+                    tablesReferences: ['base_tbl'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                // Hidden helper: raw column ref. Same NAME as the joined
+                // table's aggregate metric — this is the collision.
+                met_active_customers: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'base_tbl',
+                    tableLabel: 'base_tbl',
+                    name: 'met_active_customers',
+                    label: 'met_active_customers',
+                    sql: '${TABLE}.active_customers',
+                    compiledSql: '"base_tbl".active_customers',
+                    tablesReferences: ['base_tbl'],
+                    hidden: true,
+                },
+                // Hidden helper: raw column ref (ordering column for MAX_BY).
+                met_updated_on: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'base_tbl',
+                    tableLabel: 'base_tbl',
+                    name: 'met_updated_on',
+                    label: 'met_updated_on',
+                    sql: '${TABLE}.updated_on',
+                    compiledSql: '"base_tbl".updated_on',
+                    tablesReferences: ['base_tbl'],
+                    hidden: true,
+                },
+                // Outer mixed metric: both inner deps are raw column helpers on
+                // base_tbl. The ${met_active_customers} short-form ref must
+                // resolve to base_tbl's helper, NOT the joined table's
+                // aggregate of the same name.
+                met_active_customers_agg: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'base_tbl',
+                    tableLabel: 'base_tbl',
+                    name: 'met_active_customers_agg',
+                    label: 'met_active_customers_agg',
+                    sql: 'MAX_BY(${met_active_customers}, ${met_updated_on})',
+                    compiledSql:
+                        'MAX_BY("base_tbl".active_customers, "base_tbl".updated_on)',
+                    tablesReferences: ['base_tbl'],
+                    hidden: false,
+                },
+                // Outer pure-agg metric: qualified ref to the joined table's
+                // aggregate. Forces joined_tbl.met_active_customers into
+                // aggregateInnerDeps for the nested_agg CTE.
+                met_active_customers_goal: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'base_tbl',
+                    tableLabel: 'base_tbl',
+                    name: 'met_active_customers_goal',
+                    label: 'met_active_customers_goal',
+                    sql: '${joined_tbl.met_active_customers}',
+                    compiledSql: 'AVG("joined_tbl".active_customers)',
+                    tablesReferences: ['base_tbl', 'joined_tbl'],
+                    hidden: false,
+                },
+            },
+        },
+        joined_tbl: {
+            name: 'joined_tbl',
+            label: 'joined_tbl',
+            database: 'db',
+            schema: 'schema',
+            sqlTable: '"db"."schema"."joined_tbl"',
+            primaryKey: ['base_id'],
+            lineageGraph: {},
+            dimensions: {
+                joined_dim: {
+                    type: DimensionType.STRING,
+                    name: 'joined_dim',
+                    label: 'joined_dim',
+                    table: 'joined_tbl',
+                    tableLabel: 'joined_tbl',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.joined_dim',
+                    compiledSql: '"joined_tbl".joined_dim',
+                    tablesReferences: ['joined_tbl'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                // Aggregate metric with the SAME name as base_tbl's helper.
+                met_active_customers: {
+                    type: MetricType.AVERAGE,
+                    fieldType: FieldType.METRIC,
+                    table: 'joined_tbl',
+                    tableLabel: 'joined_tbl',
+                    name: 'met_active_customers',
+                    label: 'met_active_customers',
+                    sql: '${TABLE}.active_customers',
+                    compiledSql: 'AVG("joined_tbl".active_customers)',
+                    tablesReferences: ['joined_tbl'],
+                    hidden: false,
+                },
+            },
+        },
+    },
+    joinedTables: [
+        {
+            table: 'joined_tbl',
+            sqlOn: '${base_tbl.id} = ${joined_tbl.base_id}',
+            compiledSqlOn: '("base_tbl".id) = ("joined_tbl".base_id)',
+            type: 'left',
+            relationship: JoinRelationship.ONE_TO_ONE,
+            tablesReferences: ['base_tbl', 'joined_tbl'],
+        },
+    ],
+};
+
+export const METRIC_QUERY_NESTED_AGG_NAME_COLLISION: CompiledMetricQuery = {
+    exploreName: 'base_tbl',
+    dimensions: ['base_tbl_category'],
+    metrics: [
+        'base_tbl_met_active_customers_agg',
+        'base_tbl_met_active_customers_goal',
+    ],
+    filters: {},
+    sorts: [{ fieldId: 'base_tbl_met_active_customers_agg', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// --- cross-model type:number referencing sum_distinct fixtures ---
+
+export const EXPLORE_WITH_CROSS_MODEL_SUM_DISTINCT: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'customers',
+    label: 'customers',
+    baseTable: 'customers',
+    tags: [],
+    tables: {
+        customers: {
+            name: 'customers',
+            label: 'customers',
+            database: 'mydb',
+            schema: 'public',
+            sqlTable: 'customers',
+            primaryKey: ['customer_id'],
+            lineageGraph: {},
+            dimensions: {
+                customer_id: {
+                    type: DimensionType.STRING,
+                    name: 'customer_id',
+                    label: 'Customer ID',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.customer_id',
+                    compiledSql: '"customers".customer_id',
+                    tablesReferences: ['customers'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                adjusted_revenue: {
+                    type: MetricType.NUMBER,
+                    name: 'adjusted_revenue',
+                    label: 'Adjusted Revenue',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: '${orders.total_revenue} * 1.1',
+                    // BUG: compileMetricReference inlines the sum_distinct
+                    // fallback SQL instead of preserving distinct metadata
+                    compiledSql: '(SUM("orders".amount)) * 1.1',
+                    tablesReferences: ['customers', 'orders'],
+                    hidden: false,
+                },
+            },
+        },
+        orders: {
+            name: 'orders',
+            label: 'orders',
+            database: 'mydb',
+            schema: 'public',
+            sqlTable: 'orders',
+            primaryKey: ['order_id'],
+            lineageGraph: {},
+            dimensions: {
+                order_id: {
+                    type: DimensionType.STRING,
+                    name: 'order_id',
+                    label: 'Order ID',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.order_id',
+                    compiledSql: '"orders".order_id',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                line_item_id: {
+                    type: DimensionType.STRING,
+                    name: 'line_item_id',
+                    label: 'Line Item ID',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.line_item_id',
+                    compiledSql: '"orders".line_item_id',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                total_revenue: {
+                    type: MetricType.SUM_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    name: 'total_revenue',
+                    label: 'Total Revenue',
+                    sql: '${TABLE}.amount',
+                    compiledSql: 'SUM("orders".amount)',
+                    compiledValueSql: '"orders".amount',
+                    compiledDistinctKeys: ['"orders".line_item_id'],
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+        },
+    },
+    joinedTables: [
+        {
+            table: 'orders',
+            sqlOn: '${customers.customer_id} = ${orders.customer_id}',
+            compiledSqlOn: '("customers".customer_id) = ("orders".customer_id)',
+            type: 'left',
+            relationship: JoinRelationship.ONE_TO_MANY,
+            tablesReferences: ['customers', 'orders'],
+        },
+    ],
+};
+
+export const METRIC_QUERY_CROSS_MODEL_SUM_DISTINCT: CompiledMetricQuery = {
+    exploreName: 'customers',
+    dimensions: ['customers_customer_id'],
+    metrics: ['customers_adjusted_revenue'],
+    filters: {},
+    sorts: [{ fieldId: 'customers_adjusted_revenue', descending: true }],
+    limit: 10,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};
+
+// Same-model: type:number referencing sum_distinct + regular aggregate
+// Tests that references like ${order_count} resolve to dd_base."orders_order_count"
+// instead of being recompiled as raw SQL (which breaks in the outer SELECT context).
+export const EXPLORE_WITH_SAME_MODEL_NUMBER_AND_SUM_DISTINCT: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'orders',
+    label: 'orders',
+    baseTable: 'orders',
+    tags: [],
+    joinedTables: [],
+    tables: {
+        orders: {
+            name: 'orders',
+            label: 'orders',
+            database: 'db',
+            schema: 'schema',
+            sqlTable: '"db"."schema"."orders"',
+            primaryKey: ['order_id'],
+            lineageGraph: {},
+            dimensions: {
+                order_id: {
+                    type: DimensionType.STRING,
+                    name: 'order_id',
+                    label: 'Order ID',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.order_id',
+                    compiledSql: '"orders".order_id',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                line_item_id: {
+                    type: DimensionType.STRING,
+                    name: 'line_item_id',
+                    label: 'Line Item ID',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.line_item_id',
+                    compiledSql: '"orders".line_item_id',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                status: {
+                    type: DimensionType.STRING,
+                    name: 'status',
+                    label: 'Status',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.status',
+                    compiledSql: '"orders".status',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                total_revenue: {
+                    type: MetricType.SUM_DISTINCT,
+                    fieldType: FieldType.METRIC,
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    name: 'total_revenue',
+                    label: 'Total Revenue',
+                    sql: '${TABLE}.amount',
+                    compiledSql: 'SUM("orders".amount)',
+                    compiledValueSql: '"orders".amount',
+                    compiledDistinctKeys: ['"orders".line_item_id'],
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                order_count: {
+                    type: MetricType.COUNT,
+                    fieldType: FieldType.METRIC,
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    name: 'order_count',
+                    label: 'Order Count',
+                    sql: '${TABLE}.order_id',
+                    compiledSql: 'COUNT("orders".order_id)',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                avg_deduped_revenue: {
+                    type: MetricType.NUMBER,
+                    fieldType: FieldType.METRIC,
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    name: 'avg_deduped_revenue',
+                    label: 'Avg Deduped Revenue',
+                    sql: '${total_revenue} / NULLIF(${order_count}, 0)',
+                    compiledSql:
+                        '(SUM("orders".amount)) / NULLIF(COUNT("orders".order_id), 0)',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+        },
+    },
+};
+
+export const METRIC_QUERY_SAME_MODEL_NUMBER_WITH_SUM_DISTINCT: CompiledMetricQuery =
+    {
+        exploreName: 'orders',
+        dimensions: ['orders_status'],
+        metrics: ['orders_avg_deduped_revenue'],
+        filters: {},
+        sorts: [{ fieldId: 'orders_avg_deduped_revenue', descending: true }],
+        limit: 10,
+        tableCalculations: [],
+        compiledTableCalculations: [],
+        compiledAdditionalMetrics: [],
+        compiledCustomDimensions: [],
+    };
+
+export const METRIC_QUERY_CROSS_MODEL_SUM_DISTINCT_NO_DIMS: CompiledMetricQuery =
+    {
+        exploreName: 'customers',
+        dimensions: [],
+        metrics: ['customers_adjusted_revenue'],
+        filters: {},
+        sorts: [{ fieldId: 'customers_adjusted_revenue', descending: true }],
+        limit: 10,
+        tableCalculations: [],
+        compiledTableCalculations: [],
+        compiledAdditionalMetrics: [],
+        compiledCustomDimensions: [],
+    };
+
+// Repro for SPK-333: a type:number metric referencing a sum_distinct metric
+// is selected alongside a simple sum metric on a joined (one-to-many) table
+// that triggers fanout protection. The non-aggregate metric's ${sum_distinct}
+// reference must resolve to the dd CTE alias; inlining the fallback SUM breaks
+// because the raw table is not in scope of the dd_base outer SELECT.
+export const EXPLORE_WITH_FANOUT_AND_DD_REFERENCE: Explore = {
+    targetDatabase: SupportedDbtAdapter.POSTGRES,
+    name: 'customers',
+    label: 'customers',
+    baseTable: 'customers',
+    tags: [],
+    tables: {
+        customers: {
+            name: 'customers',
+            label: 'customers',
+            database: 'mydb',
+            schema: 'public',
+            sqlTable: 'customers',
+            primaryKey: ['customer_id'],
+            lineageGraph: {},
+            dimensions: {
+                customer_id: {
+                    type: DimensionType.STRING,
+                    name: 'customer_id',
+                    label: 'Customer ID',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.customer_id',
+                    compiledSql: '"customers".customer_id',
+                    tablesReferences: ['customers'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                unique_customer_count: {
+                    type: MetricType.COUNT_DISTINCT,
+                    name: 'unique_customer_count',
+                    label: 'Unique Customer Count',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: '${TABLE}.customer_id',
+                    compiledSql: 'COUNT(DISTINCT "customers".customer_id)',
+                    tablesReferences: ['customers'],
+                    hidden: false,
+                },
+                total_order_amount_deduped: {
+                    type: MetricType.SUM_DISTINCT,
+                    name: 'total_order_amount_deduped',
+                    label: 'Total Order Amount (Deduped)',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: '${orders.amount}',
+                    distinctKeys: ['orders.order_id'],
+                    compiledSql: 'SUM("orders".amount)',
+                    compiledValueSql: '("orders".amount)',
+                    compiledDistinctKeys: ['("orders".order_id)'],
+                    tablesReferences: ['customers', 'orders'],
+                    hidden: false,
+                },
+                average_customer_lifetime_value: {
+                    type: MetricType.NUMBER,
+                    name: 'average_customer_lifetime_value',
+                    label: 'Average Customer Lifetime Value',
+                    table: 'customers',
+                    tableLabel: 'customers',
+                    fieldType: FieldType.METRIC,
+                    sql: '${total_order_amount_deduped} / NULLIF(${unique_customer_count}, 0)',
+                    // compileMetricSql inlines the fallback SUM for the
+                    // sum_distinct ref; the query builder must rewrite this
+                    // to point at the dd CTE instead of emitting it raw.
+                    compiledSql:
+                        '(SUM("orders".amount)) / NULLIF(COUNT(DISTINCT "customers".customer_id), 0)',
+                    tablesReferences: ['customers', 'orders'],
+                    hidden: false,
+                },
+            },
+        },
+        orders: {
+            name: 'orders',
+            label: 'orders',
+            database: 'mydb',
+            schema: 'public',
+            sqlTable: 'orders',
+            primaryKey: ['order_id'],
+            lineageGraph: {},
+            dimensions: {
+                order_id: {
+                    type: DimensionType.STRING,
+                    name: 'order_id',
+                    label: 'Order ID',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.order_id',
+                    compiledSql: '"orders".order_id',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+                amount: {
+                    type: DimensionType.NUMBER,
+                    name: 'amount',
+                    label: 'Amount',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.amount',
+                    compiledSql: '"orders".amount',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                total_order_amount: {
+                    type: MetricType.SUM,
+                    name: 'total_order_amount',
+                    label: 'Total Order Amount',
+                    table: 'orders',
+                    tableLabel: 'orders',
+                    fieldType: FieldType.METRIC,
+                    sql: '${TABLE}.amount',
+                    compiledSql: 'SUM("orders".amount)',
+                    tablesReferences: ['orders'],
+                    hidden: false,
+                },
+            },
+        },
+        payments: {
+            name: 'payments',
+            label: 'payments',
+            database: 'mydb',
+            schema: 'public',
+            sqlTable: 'payments',
+            primaryKey: ['payment_id'],
+            lineageGraph: {},
+            dimensions: {
+                payment_id: {
+                    type: DimensionType.STRING,
+                    name: 'payment_id',
+                    label: 'Payment ID',
+                    table: 'payments',
+                    tableLabel: 'payments',
+                    fieldType: FieldType.DIMENSION,
+                    sql: '${TABLE}.payment_id',
+                    compiledSql: '"payments".payment_id',
+                    tablesReferences: ['payments'],
+                    hidden: false,
+                },
+            },
+            metrics: {
+                payment_count: {
+                    type: MetricType.COUNT,
+                    name: 'payment_count',
+                    label: 'Payment Count',
+                    table: 'payments',
+                    tableLabel: 'payments',
+                    fieldType: FieldType.METRIC,
+                    sql: '${TABLE}.payment_id',
+                    compiledSql: 'COUNT("payments".payment_id)',
+                    tablesReferences: ['payments'],
+                    hidden: false,
+                },
+            },
+        },
+    },
+    joinedTables: [
+        {
+            table: 'orders',
+            sqlOn: '${customers.customer_id} = ${orders.customer_id}',
+            compiledSqlOn: '("customers".customer_id) = ("orders".customer_id)',
+            type: 'left',
+            relationship: JoinRelationship.ONE_TO_MANY,
+            tablesReferences: ['customers', 'orders'],
+        },
+        {
+            table: 'payments',
+            sqlOn: '${orders.order_id} = ${payments.order_id}',
+            compiledSqlOn: '("orders".order_id) = ("payments".order_id)',
+            type: 'left',
+            relationship: JoinRelationship.ONE_TO_MANY,
+            tablesReferences: ['orders', 'payments'],
+        },
+    ],
+};
+
+export const METRIC_QUERY_FANOUT_AND_DD_REFERENCE: CompiledMetricQuery = {
+    exploreName: 'customers',
+    dimensions: [],
+    metrics: [
+        'customers_average_customer_lifetime_value',
+        'customers_total_order_amount_deduped',
+        'orders_total_order_amount',
+        'payments_payment_count',
+    ],
+    filters: {},
+    sorts: [
+        {
+            fieldId: 'customers_average_customer_lifetime_value',
+            descending: true,
+        },
+    ],
+    limit: 500,
+    tableCalculations: [],
+    compiledTableCalculations: [],
+    compiledAdditionalMetrics: [],
+    compiledCustomDimensions: [],
+};

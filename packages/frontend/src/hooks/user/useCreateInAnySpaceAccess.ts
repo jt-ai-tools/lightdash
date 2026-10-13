@@ -5,7 +5,7 @@ import { useSpaceSummaries } from '../useSpaces';
 
 const useCreateInAnySpaceAccess = (
     projectUuid: string | undefined,
-    subjectName: 'Dashboard' | 'SavedChart',
+    subjectName: 'Dashboard' | 'SavedChart' | 'Document',
     options?: { enabled?: boolean },
 ): boolean => {
     const { user } = useApp();
@@ -30,7 +30,9 @@ const useCreateInAnySpaceAccess = (
             subject(subjectName, {
                 organizationUuid: user.data.organizationUuid,
                 projectUuid,
-                access: spaces.data.map((space) => space.userAccess),
+                access: spaces.data
+                    .map((space) => space.userAccess)
+                    .filter((a) => a !== undefined),
             }),
         )
     );

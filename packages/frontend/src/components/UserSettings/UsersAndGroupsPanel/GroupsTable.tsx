@@ -1,37 +1,17 @@
 import { isGroupWithMembers, type GroupWithMembers } from '@lightdash/common';
-import {
-    Badge,
-    Box,
-    Group,
-    Stack,
-    Text,
-    useMantineTheme,
-} from '@mantine-8/core';
+import { Badge, Box, Group, Stack, Text, useMantineTheme } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
-import {
-    IconArrowDown,
-    IconArrowsSort,
-    IconArrowUp,
-    IconTextCaption,
-    IconUsers,
-} from '@tabler/icons-react';
-import {
-    MantineReactTable,
-    useMantineReactTable,
-    type MRT_ColumnDef,
-    type MRT_Virtualizer,
-} from 'mantine-react-table';
-import {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-    type FC,
-    type UIEvent,
-} from 'react';
+import { IconTextCaption, IconUsers } from '@tabler/icons-react';
+import { useEffect, useMemo, useRef, useState, type FC } from 'react';
+import { useInfiniteScroll } from '../../../hooks/useInfiniteScroll';
 import { useInfiniteOrganizationGroups } from '../../../hooks/useOrganizationGroups';
 import useApp from '../../../providers/App/useApp';
+import {
+    ContentTable,
+    useContentTable,
+    type ContentTableColumnDef,
+    type ContentTableVirtualizer,
+} from '../../common/ContentTable';
 import MantineIcon from '../../common/MantineIcon';
 import GroupsActionMenu from './GroupsActionMenu';
 import { GroupsTopToolbar } from './GroupsTopToolbar';
@@ -40,16 +20,16 @@ const fetchSize = 50;
 const GROUP_MEMBERS_PER_PAGE = 2000;
 
 interface GroupsTableProps {
-    onAddClick: () => void;
     onEditGroup: (group: GroupWithMembers) => void;
 }
 
-const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
+const GroupsTable: FC<GroupsTableProps> = ({ onEditGroup }) => {
     const theme = useMantineTheme();
     const { user: activeUser } = useApp();
-    const tableContainerRef = useRef<HTMLDivElement>(null);
     const rowVirtualizerInstanceRef =
-        useRef<MRT_Virtualizer<HTMLDivElement, HTMLTableRowElement>>(null);
+        useRef<ContentTableVirtualizer<HTMLDivElement, HTMLTableRowElement>>(
+            null,
+        );
 
     const [search, setSearch] = useState('');
 
@@ -61,7 +41,7 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
     const [debouncedSearchValue] = useDebouncedValue(debouncedSearch, 300);
 
     // Use infinite query for pagination
-    const { data, fetchNextPage, isError, isFetching, isLoading } =
+    const { data, fetchNextPage, hasNextPage, isError, isFetching, isLoading } =
         useInfiniteOrganizationGroups({
             searchInput: debouncedSearchValue.search,
             includeMembers: GROUP_MEMBERS_PER_PAGE,
@@ -79,47 +59,26 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
     const totalDBRowCount = data?.pages?.[0]?.pagination?.totalResults ?? 0;
     const totalFetched = flatData.length;
 
-    // Temporary workaround to resolve a memoization issue with react-mantine-table
-    const [tableData, setTableData] = useState<GroupWithMembers[]>([]);
-    useEffect(() => {
-        setTableData(flatData);
-    }, [flatData]);
-
-    // Callback to fetch more data when scrolling
-    const fetchMoreOnBottomReached = useCallback(
-        (containerRefElement?: HTMLDivElement | null) => {
-            if (containerRefElement) {
-                const { scrollHeight, scrollTop, clientHeight } =
-                    containerRefElement;
-                // Fetch more when within 400px of bottom
-                if (
-                    scrollHeight - scrollTop - clientHeight < 400 &&
-                    !isFetching &&
-                    totalFetched < totalDBRowCount
-                ) {
-                    void fetchNextPage();
-                }
-            }
-        },
-        [fetchNextPage, isFetching, totalFetched, totalDBRowCount],
-    );
+    const {
+        containerRef: tableContainerRef,
+        onScroll,
+        scrollToTop,
+    } = useInfiniteScroll({
+        fetchNextPage,
+        isFetching,
+        hasMore: totalFetched < totalDBRowCount,
+        threshold: 400,
+    });
 
     // Scroll to top when search changes
     useEffect(() => {
-        if (tableContainerRef.current) {
-            tableContainerRef.current.scrollTop = 0;
-        }
-    }, [debouncedSearchValue]);
-
-    // Check on mount if table needs initial fetch
-    useEffect(() => {
-        fetchMoreOnBottomReached(tableContainerRef.current);
-    }, [fetchMoreOnBottomReached]);
+        scrollToTop();
+    }, [debouncedSearchValue, scrollToTop]);
 
     const canManageGroups =
         activeUser.data?.ability?.can('manage', 'Group') ?? false;
 
-    const columns: MRT_ColumnDef<GroupWithMembers>[] = useMemo(
+    const columns: ContentTableColumnDef<GroupWithMembers>[] = useMemo(
         () => [
             {
                 accessorKey: 'name',
@@ -128,7 +87,7 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
                 size: 260,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconTextCaption} color="ldGray.6" />
+                        <MantineIcon icon={IconTextCaption} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -140,7 +99,7 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
                                 {group.name}
                             </Text>
                             {group.members.length > 0 && (
-                                <Text fz="xs" c="ldGray.6">
+                                <Text fz="xs" c="dimmed">
                                     {`${group.members.length} member${
                                         group.members.length !== 1 ? 's' : ''
                                     }`}
@@ -157,7 +116,7 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
                 size: 400,
                 Header: ({ column }) => (
                     <Group gap="two">
-                        <MantineIcon icon={IconUsers} color="ldGray.6" />
+                        <MantineIcon icon={IconUsers} color="dimmed" />
                         {column.columnDef.header}
                     </Group>
                 ),
@@ -181,7 +140,6 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
                                     variant="filled"
                                     color="ldGray.2"
                                     radius="xs"
-                                    style={{ textTransform: 'none' }}
                                     px="xxs"
                                 >
                                     <Text fz="xs" fw={400} c="ldGray.8">
@@ -191,7 +149,7 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
                             ))}
                         </Group>
                     ) : (
-                        <Text fz="sm" c="ldGray.6" fs="italic">
+                        <Text fz="sm" c="dimmed" fs="italic">
                             No members
                         </Text>
                     );
@@ -204,7 +162,7 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
                 size: 50,
                 Cell: ({ row }) => {
                     const group = row.original;
-                    const disabled = !canManageGroups || tableData.length < 1;
+                    const disabled = !canManageGroups || flatData.length < 1;
 
                     return (
                         <Box
@@ -224,50 +182,25 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
                 },
             },
         ],
-        [canManageGroups, tableData.length, onEditGroup, theme],
+        [canManageGroups, flatData.length, onEditGroup, theme],
     );
 
-    const table = useMantineReactTable({
+    const table = useContentTable({
         columns,
-        data: tableData,
+        data: flatData,
         enableColumnResizing: false,
-        enableRowNumbers: false,
         enablePagination: false,
-        enableFilters: false,
-        enableFullScreenToggle: false,
-        enableDensityToggle: false,
-        enableColumnActions: false,
-        enableColumnFilters: false,
-        enableHiding: false,
-        enableGlobalFilterModes: false,
         enableSorting: false,
         enableRowVirtualization: true,
         enableTopToolbar: true,
-        enableBottomToolbar: false,
-        mantinePaperProps: {
-            shadow: undefined,
-            style: {
-                border: `1px solid ${theme.colors.ldGray[2]}`,
-                borderRadius: theme.spacing.sm,
-                boxShadow: theme.shadows.subtle,
-                display: 'flex',
-                flexDirection: 'column',
-            },
-        },
-        mantineTableHeadRowProps: {
-            style: {
-                boxShadow: 'none',
-            },
-        },
         mantineTableContainerProps: {
             ref: tableContainerRef,
             style: { maxHeight: 'calc(100dvh - 420px)' },
-            onScroll: (event: UIEvent<HTMLDivElement>) =>
-                fetchMoreOnBottomReached(event.target as HTMLDivElement),
+            onScroll,
         },
         mantineTableProps: {
             highlightOnHover: true,
-            withColumnBorders: Boolean(tableData.length),
+            withColumnBorders: Boolean(flatData.length),
         },
         mantineTableHeadCellProps: (props) => {
             const isLastColumn =
@@ -306,28 +239,40 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
             };
         },
         renderTopToolbar: () => (
-            <GroupsTopToolbar
-                search={search}
-                setSearch={setSearch}
-                isFetching={isFetching || isLoading}
-                currentResultsCount={totalFetched}
-                canManage={canManageGroups}
-                onAddClick={onAddClick}
-            />
+            <GroupsTopToolbar search={search} setSearch={setSearch} />
         ),
-        icons: {
-            IconArrowsSort: () => (
-                <MantineIcon icon={IconArrowsSort} size="md" color="ldGray.5" />
-            ),
-            IconSortAscending: () => (
-                <MantineIcon icon={IconArrowUp} size="md" color="blue.6" />
-            ),
-            IconSortDescending: () => (
-                <MantineIcon icon={IconArrowDown} size="md" color="blue.6" />
-            ),
-        },
+        renderBottomToolbar: () => (
+            <Box
+                p={`${theme.spacing.sm} ${theme.spacing.xl} ${theme.spacing.md} ${theme.spacing.xl}`}
+                fz="xs"
+                fw={500}
+                c="ldGray.8"
+                style={{
+                    borderTop: `1px solid ${theme.colors.ldGray[3]}`,
+                }}
+            >
+                {isFetching ? (
+                    <Text c="ldGray.8" fz="xs">
+                        Loading more...
+                    </Text>
+                ) : (
+                    <Group gap="two">
+                        <Text fz="xs" c="ldGray.8">
+                            {hasNextPage
+                                ? 'Scroll for more groups'
+                                : 'All groups loaded'}
+                        </Text>
+                        <Text fz="xs" fw={400} c="dimmed">
+                            {hasNextPage
+                                ? `(${totalFetched} of ${totalDBRowCount} loaded)`
+                                : `(${totalFetched})`}
+                        </Text>
+                    </Group>
+                )}
+            </Box>
+        ),
         rowVirtualizerInstanceRef,
-        rowVirtualizerProps: { overscan: 10 },
+        rowVirtualizerProps: { estimateSize: () => 64, overscan: 10 },
         state: {
             isLoading,
             showAlertBanner: isError,
@@ -336,7 +281,7 @@ const GroupsTable: FC<GroupsTableProps> = ({ onAddClick, onEditGroup }) => {
         },
     });
 
-    return <MantineReactTable table={table} />;
+    return <ContentTable table={table} />;
 };
 
 export default GroupsTable;

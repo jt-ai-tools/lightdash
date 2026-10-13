@@ -18,7 +18,6 @@ import {
 import { Knex } from 'knex';
 import { v4 as uuidv4 } from 'uuid';
 import { lightdashConfig } from '../../../config/lightdashConfig';
-import { ChangesetModel } from '../../../models/ChangesetModel';
 import { DashboardModel } from '../../../models/DashboardModel/DashboardModel';
 import { ProjectModel } from '../../../models/ProjectModel/ProjectModel';
 import { SavedChartModel } from '../../../models/SavedChartModel';
@@ -61,7 +60,6 @@ async function getOrCreateSpaceByName(
     const space = await spaceModel.createSpace(
         {
             name: spaceName,
-            isPrivate: false,
             inheritParentPermissions: true,
             parentSpaceUuid,
         },
@@ -613,12 +611,10 @@ export async function seed(knex: Knex): Promise<void> {
     });
 
     const encryptionUtil = new EncryptionUtil({ lightdashConfig });
-    const changesetModel = new ChangesetModel({ database: knex });
     const projectModel = new ProjectModel({
         database: knex,
         lightdashConfig,
         encryptionUtil,
-        changesetModel,
     });
 
     const [user] = await knex('users').where(

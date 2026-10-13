@@ -1,11 +1,4 @@
-import {
-    Anchor,
-    Box,
-    CloseButton,
-    Group,
-    Text,
-    Tooltip,
-} from '@mantine-8/core';
+import { Anchor, Box, CloseButton, Group, Text, Tooltip } from '@mantine/core';
 import {
     IconExternalLink,
     IconInfoCircle,
@@ -16,6 +9,7 @@ import useDrivePicker from 'react-google-drive-picker';
 import { GSheetsIcon } from '../../../components/common/GSheetsIcon';
 import MantineIcon from '../../../components/common/MantineIcon';
 import { PolymorphicGroupButton } from '../../../components/common/PolymorphicGroupButton';
+import TruncatedText from '../../../components/common/TruncatedText';
 import { useGdriveAccessToken } from '../../../hooks/gdrive/useGdrive';
 import useHealth from '../../../hooks/health/useHealth';
 import classes from './SelectGoogleSheetButton.module.css';
@@ -84,26 +78,24 @@ export const SelectGoogleSheetButton: FC = () => {
                 className={`${classes.sheetSelector} ${classes.sheetSelectorFilled}`}
             >
                 <Group gap="sm" wrap="nowrap" justify="space-between" w="100%">
-                    <Group gap="xs" wrap="nowrap">
+                    <Group gap="xs" wrap="nowrap" miw={0}>
                         <MantineIcon icon={GSheetsIcon} size={16} />
-                        <Text size="sm" fw={500}>
+                        <TruncatedText maxWidth="auto">
                             {googleDriveName}
-                        </Text>
+                        </TruncatedText>
                         <Tooltip
-                            withinPortal
                             label={googleDriveId}
-                            multiline
                             style={{ wordBreak: 'break-word' }}
                         >
                             <MantineIcon
-                                color="ldGray.6"
+                                color="dimmed"
                                 icon={IconInfoCircle}
                                 size={'md'}
                             />
                         </Tooltip>
                     </Group>
                     <Group gap={6} wrap="nowrap">
-                        <Tooltip withinPortal label="Open in Google Sheets">
+                        <Tooltip label="Open in Google Sheets">
                             <Anchor
                                 href={googleDriveUrl}
                                 target="_blank"
@@ -117,11 +109,11 @@ export const SelectGoogleSheetButton: FC = () => {
                                 />
                             </Anchor>
                         </Tooltip>
-                        <Tooltip withinPortal label="Remove">
+                        <Tooltip label="Remove">
                             <CloseButton
                                 size="sm"
                                 variant="subtle"
-                                c="ldGray.6"
+                                c="dimmed"
                                 onClick={() => {
                                     form.setFieldValue('options.gdriveId', '');
                                     form.setFieldValue(
@@ -144,8 +136,6 @@ export const SelectGoogleSheetButton: FC = () => {
 
     return (
         <Tooltip
-            withinPortal
-            multiline
             w={300}
             label="Please ensure you have a Google Sheet already created in your Drive to set as the destination for your results"
         >

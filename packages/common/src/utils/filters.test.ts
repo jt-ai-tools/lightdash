@@ -1,32 +1,54 @@
+import { DashboardTileTypes } from '../types/dashboard';
+import { type Explore } from '../types/explore';
+import { DimensionType, FieldType, MetricType } from '../types/field';
 import {
+    FilterGroupOperator,
     FilterOperator,
+    UnitOfTime,
     type AndFilterGroup,
     type DashboardFilterRule,
+    type DashboardFilters,
     type FilterGroup,
     type FilterRule,
     type Filters,
     type MetricFilterRule,
     type OrFilterGroup,
 } from '../types/filter';
+import { type MetricQuery } from '../types/metricQuery';
+import { TimeFrames } from '../types/timeFrames';
 import {
     addDashboardFiltersToMetricQuery,
     addFilterRule,
+    applyDashboardFiltersForTile,
+    createDashboardFilterRuleFromField,
+    createFilterRuleFromField,
     createFilterRuleFromModelRequiredFilterRule,
+    excludeTilesFromTabScopedFilters,
+    getDashboardFilterableFieldKey,
+    getDashboardFilterField,
     getDashboardFilterRulesForTileAndReferences,
+    getFilterExpression,
+    getFilterRuleFromFieldWithDefaultValue,
+    getFilterRulesFromGroup,
+    getUnmetFilterRequirements,
+    isEmptyDashboardFilterRule,
     isFilterRuleInQuery,
     overrideChartFilter,
     reduceRequiredDimensionFiltersToFilterRules,
     resetRequiredFilterRules,
+    stripOverridesForLockedFiltersOnTab,
     trackWhichTimeBasedMetricFiltersToOverride,
 } from './filters';
 import {
     chartAndFilterGroup,
     chartOrFilterGroup,
     customSqlDimension,
+    dashboardFilters,
+    dashboardFiltersWithMetrics,
     dashboardFilterWithSameTargetAndOperator,
     dashboardFilterWithSameTargetButDifferentOperator,
-    dashboardFilters,
     dimension,
+    emptyDashboardFilters,
     expectedChartWithOverrideDashboardFilters,
     expectedChartWithOverrideDashboardORFilters,
     expectedFiltersWithCustomSqlDimension,
@@ -35,15 +57,102 @@ import {
     filterRule,
     joinedModelRequiredFilterRule,
     metricQueryWithAndFilters,
+    metricQueryWithExistingMetricFilters,
     metricQueryWithOrFilters,
     mockExplore,
     mockExploreWithJoinedTable,
     modelRequiredFilterRule,
 } from './filters.mock';
 
-jest.mock('uuid', () => ({
-    v4: jest.fn(() => 'uuid'),
+vi.mock('uuid', () => ({
+    v4: vi.fn(() => 'uuid'),
 }));
+
+describe('getFilterExpression', () => {
+    const rule = (id: string): FilterRule => ({
+        id,
+        target: { fieldId: id },
+        operator: FilterOperator.NOT_NULL,
+    });
+
+    test('preserves nested groups and combines filter types with AND', () => {
+        const firstRule = rule('first');
+        const secondRule = rule('second');
+        const thirdRule = rule('third');
+        const metricRule = rule('metric');
+        const filters: Filters = {
+            dimensions: {
+                id: 'dimensions',
+                and: [
+                    firstRule,
+                    {
+                        id: 'nested',
+                        or: [secondRule, thirdRule],
+                    },
+                ],
+            },
+            metrics: {
+                id: 'metrics',
+                and: [metricRule],
+            },
+        };
+
+        expect(getFilterExpression(filters)).toEqual({
+            operator: FilterGroupOperator.and,
+            items: [
+                firstRule,
+                {
+                    operator: FilterGroupOperator.or,
+                    items: [secondRule, thirdRule],
+                },
+                metricRule,
+            ],
+        });
+    });
+
+    test('omits excluded rules and empty groups', () => {
+        const includedRule = rule('included');
+        const filters: Filters = {
+            dimensions: {
+                id: 'dimensions',
+                and: [
+                    includedRule,
+                    {
+                        id: 'nested',
+                        or: [rule('excluded')],
+                    },
+                ],
+            },
+        };
+
+        expect(
+            getFilterExpression(filters, (candidateRule) =>
+                candidateRule.id.startsWith('included'),
+            ),
+        ).toEqual({
+            operator: FilterGroupOperator.and,
+            items: [includedRule],
+        });
+    });
+
+    test('treats a persisted group without an items array as empty', () => {
+        // Stored chart JSON can carry a group with no `and`/`or` array
+        const persistedGroup = (json: string): FilterGroup => JSON.parse(json);
+        const metricRule = rule('metric');
+        const filters: Filters = {
+            dimensions: persistedGroup('{"id":"dimensions"}'),
+            metrics: {
+                id: 'metrics',
+                and: [metricRule, persistedGroup('{"id":"nested","or":null}')],
+            },
+        };
+
+        expect(getFilterExpression(filters)).toEqual({
+            operator: FilterGroupOperator.and,
+            items: [metricRule],
+        });
+    });
+});
 
 describe('addDashboardFiltersToMetricQuery', () => {
     test('should override the chart AND filter group with dashboard filters', async () => {
@@ -60,7 +169,294 @@ describe('addDashboardFiltersToMetricQuery', () => {
         );
         expect(result).toEqual(expectedChartWithOverrideDashboardORFilters);
     });
+
+    test('should merge dashboard metric filters into the metric query', () => {
+        const result = addDashboardFiltersToMetricQuery(
+            metricQueryWithAndFilters,
+            dashboardFiltersWithMetrics,
+        );
+        expect(result.filters.metrics).toBeDefined();
+        expect((result.filters.metrics as AndFilterGroup).and).toHaveLength(1);
+        expect((result.filters.metrics as AndFilterGroup).and[0]).toMatchObject(
+            {
+                target: { fieldId: 'a_metric1' },
+                operator: FilterOperator.GREATER_THAN,
+                values: [100],
+            },
+        );
+    });
+
+    test('should override existing chart metric filter with same target from dashboard', () => {
+        const result = addDashboardFiltersToMetricQuery(
+            metricQueryWithExistingMetricFilters,
+            dashboardFiltersWithMetrics,
+        );
+        expect(result.filters.metrics).toBeDefined();
+        const metricFilters = (result.filters.metrics as AndFilterGroup).and;
+        // Dashboard metric filter overrides the existing chart metric filter with same fieldId
+        expect(metricFilters).toContainEqual(
+            expect.objectContaining({
+                target: { fieldId: 'a_metric1' },
+                operator: FilterOperator.GREATER_THAN,
+                values: [100],
+            }),
+        );
+    });
+
+    const nullOnlyDashboardRule = (fieldId: string): DashboardFilterRule => ({
+        id: '4',
+        label: undefined,
+        target: {
+            fieldId,
+            tableName: 'test',
+        },
+        operator: FilterOperator.EQUALS,
+        values: [],
+        includeNull: true,
+    });
+
+    test('should keep includeNull when a null-only dashboard filter overrides a chart filter on the same field', () => {
+        const result = addDashboardFiltersToMetricQuery(
+            metricQueryWithAndFilters,
+            {
+                dimensions: [nullOnlyDashboardRule('a_dim1')],
+                metrics: [],
+                tableCalculations: [],
+            },
+        );
+        expect(
+            (result.filters.dimensions as AndFilterGroup).and,
+        ).toContainEqual(
+            expect.objectContaining({
+                target: { fieldId: 'a_dim1' },
+                operator: FilterOperator.EQUALS,
+                includeNull: true,
+            }),
+        );
+    });
+
+    test('should keep includeNull when a null-only dashboard filter is appended to the chart filters', () => {
+        const result = addDashboardFiltersToMetricQuery(
+            metricQueryWithAndFilters,
+            {
+                dimensions: [nullOnlyDashboardRule('a_dim2')],
+                metrics: [],
+                tableCalculations: [],
+            },
+        );
+        expect(
+            (result.filters.dimensions as AndFilterGroup).and,
+        ).toContainEqual(
+            expect.objectContaining({
+                target: { fieldId: 'a_dim2' },
+                operator: FilterOperator.EQUALS,
+                includeNull: true,
+            }),
+        );
+    });
+
+    test('should enable a disabled chart filter when an active dashboard filter overrides it', () => {
+        const chartWithDisabledFilter: MetricQuery = {
+            ...metricQueryWithAndFilters,
+            filters: {
+                dimensions: {
+                    id: 'root',
+                    and: [
+                        {
+                            id: '1',
+                            target: { fieldId: 'a_dim1' },
+                            operator: FilterOperator.EQUALS,
+                            values: [0],
+                            disabled: true,
+                        },
+                    ],
+                },
+            },
+        };
+        const result = addDashboardFiltersToMetricQuery(
+            chartWithDisabledFilter,
+            {
+                dimensions: [nullOnlyDashboardRule('a_dim1')],
+                metrics: [],
+                tableCalculations: [],
+            },
+        );
+        const overridden = (
+            result.filters.dimensions as AndFilterGroup
+        ).and.find(
+            (item) => 'target' in item && item.target.fieldId === 'a_dim1',
+        ) as FilterRule | undefined;
+        expect(overridden).toBeDefined();
+        expect(overridden?.includeNull).toBe(true);
+        expect(overridden?.disabled).toBeFalsy();
+    });
+
+    test('should override a matching rule inside a nested group instead of appending a contradictory rule', () => {
+        const chartWithNestedFilter: MetricQuery = {
+            ...metricQueryWithAndFilters,
+            filters: {
+                dimensions: {
+                    id: 'root',
+                    and: [
+                        {
+                            id: 'nested',
+                            and: [
+                                {
+                                    id: '1',
+                                    target: { fieldId: 'a_dim1' },
+                                    operator: FilterOperator.EQUALS,
+                                    values: [0],
+                                },
+                            ],
+                        },
+                    ],
+                },
+            },
+        };
+        const result = addDashboardFiltersToMetricQuery(chartWithNestedFilter, {
+            dimensions: [nullOnlyDashboardRule('a_dim1')],
+            metrics: [],
+            tableCalculations: [],
+        });
+        const dim1Rules = getFilterRulesFromGroup(
+            result.filters.dimensions,
+        ).filter((rule) => rule.target.fieldId === 'a_dim1');
+        expect(dim1Rules).toHaveLength(1);
+        expect(dim1Rules[0]).toMatchObject({
+            operator: FilterOperator.EQUALS,
+            values: [],
+            includeNull: true,
+        });
+    });
+
+    test('should not inherit a chart filter includeNull when the overriding dashboard filter has none', () => {
+        const chartWithNullFilter: MetricQuery = {
+            ...metricQueryWithAndFilters,
+            filters: {
+                dimensions: {
+                    id: 'root',
+                    and: [
+                        {
+                            id: '1',
+                            target: { fieldId: 'a_dim1' },
+                            operator: FilterOperator.EQUALS,
+                            values: [],
+                            includeNull: true,
+                        },
+                    ],
+                },
+            },
+        };
+        const result = addDashboardFiltersToMetricQuery(
+            chartWithNullFilter,
+            dashboardFilters,
+        );
+        const overridden = (
+            result.filters.dimensions as AndFilterGroup
+        ).and.find(
+            (item) => 'target' in item && item.target.fieldId === 'a_dim1',
+        ) as FilterRule | undefined;
+        expect(overridden).toBeDefined();
+        expect(overridden?.includeNull).toBeUndefined();
+    });
+
+    test('should return metric query unchanged when dashboard has no filters', () => {
+        const result = addDashboardFiltersToMetricQuery(
+            metricQueryWithAndFilters,
+            emptyDashboardFilters,
+        );
+        expect(result.filters.dimensions).toBeDefined();
+        expect((result.filters.metrics as AndFilterGroup).and).toHaveLength(0);
+        expect(
+            (result.filters.tableCalculations as AndFilterGroup).and,
+        ).toHaveLength(0);
+    });
+
+    test('should not affect dimension filters when adding metric filters', () => {
+        const result = addDashboardFiltersToMetricQuery(
+            metricQueryWithAndFilters,
+            dashboardFiltersWithMetrics,
+        );
+        expect(
+            (result.filters.dimensions as AndFilterGroup).and,
+        ).toContainEqual(
+            expect.objectContaining({
+                target: { fieldId: 'a_dim1' },
+                operator: FilterOperator.EQUALS,
+                values: ['1', '2', '3'],
+            }),
+        );
+    });
+
+    test('should NOT override a chart filter with an empty dashboard filter on the same field', () => {
+        const emptyDashboardFilter: DashboardFilters = {
+            dimensions: [
+                {
+                    id: 'empty-filter',
+                    label: undefined,
+                    target: { fieldId: 'a_dim1', tableName: 'test' },
+                    operator: FilterOperator.EQUALS,
+                    values: [],
+                    disabled: false,
+                },
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = addDashboardFiltersToMetricQuery(
+            metricQueryWithAndFilters,
+            emptyDashboardFilter,
+        );
+        const dimensionRules = (result.filters.dimensions as AndFilterGroup)
+            .and;
+        // The chart's own a_dim1 filter survives untouched — the empty
+        // dashboard filter must not clobber its values with [].
+        expect(dimensionRules).toContainEqual(
+            expect.objectContaining({
+                id: '1',
+                target: { fieldId: 'a_dim1' },
+                operator: FilterOperator.EQUALS,
+                values: [0],
+            }),
+        );
+        // ...and the empty filter adds no clause of its own.
+        expect(dimensionRules).toHaveLength(1);
+    });
+
+    test('keeps a value-less IN_THE_CURRENT dashboard filter — it compiles from settings, not values', () => {
+        const relativeDateFilter: DashboardFilters = {
+            dimensions: [
+                {
+                    id: 'in-the-current',
+                    label: undefined,
+                    target: { fieldId: 'a_date_dim', tableName: 'test' },
+                    operator: FilterOperator.IN_THE_CURRENT,
+                    values: [],
+                    settings: { unitOfTime: UnitOfTime.months },
+                    disabled: false,
+                },
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = addDashboardFiltersToMetricQuery(
+            metricQueryWithAndFilters,
+            relativeDateFilter,
+        );
+        const dimensionRules = (result.filters.dimensions as AndFilterGroup)
+            .and;
+        // The active relative-date filter survives the empty-filter guard and is
+        // applied to the query.
+        expect(dimensionRules).toContainEqual(
+            expect.objectContaining({
+                operator: FilterOperator.IN_THE_CURRENT,
+                target: { fieldId: 'a_date_dim' },
+                settings: { unitOfTime: UnitOfTime.months },
+            }),
+        );
+    });
 });
+
 describe('overrideChartFilter', () => {
     test('should override the chart and group filter', async () => {
         const result = overrideChartFilter(
@@ -154,6 +550,164 @@ describe('addFilterRule', () => {
     });
 });
 
+describe('createFilterRuleFromField — time-interval DATE dims', () => {
+    const monthDim = (baseType: DimensionType.TIMESTAMP | DimensionType.DATE) =>
+        ({
+            ...dimension('created_at_month', 'orders'),
+            type: DimensionType.DATE,
+            timeInterval: TimeFrames.MONTH,
+            timeIntervalBaseDimensionName: 'created_at',
+            timeIntervalBaseDimensionType: baseType,
+        }) as const;
+
+    // GLITCH-452: a day-or-coarser trunc of a TIMESTAMP base now compiles to a
+    // real DATE, so the drill receives a bare calendar value ("2024-11-01"), not
+    // the old UTC instant. Calendar values are never timezone-shifted — even when
+    // a project tz is supplied — so the drill filter matches the displayed month.
+    const calendarNov = '2024-11-01';
+    // DATE-base interval emits a calendar value anchored at UTC midnight.
+    const dateBaseNov = '2024-11-01T00:00:00Z';
+
+    test('TIMESTAMP-base (cast to DATE): calendar value is not shifted under a positive offset', () => {
+        const rule = createFilterRuleFromField(
+            monthDim(DimensionType.TIMESTAMP),
+            calendarNov,
+            'Europe/Paris',
+        );
+        expect(rule.values).toEqual(['2024-11']);
+    });
+
+    test('TIMESTAMP-base (cast to DATE): calendar value is not shifted under a negative offset', () => {
+        const rule = createFilterRuleFromField(
+            monthDim(DimensionType.TIMESTAMP),
+            calendarNov,
+            'America/New_York',
+        );
+        expect(rule.values).toEqual(['2024-11']);
+    });
+
+    test('TIMESTAMP-base: legacy UTC-instant value (flag off) is read at UTC, never shifted', () => {
+        // Before the cast, a TIMESTAMP-base trunc emitted a UTC instant. With the
+        // correction layer removed it is read at UTC — matching the unshifted
+        // flag-off grid — regardless of any project tz supplied.
+        const rule = createFilterRuleFromField(
+            monthDim(DimensionType.TIMESTAMP),
+            '2024-10-31T23:00:00Z',
+            'Europe/Paris',
+        );
+        expect(rule.values).toEqual(['2024-10']);
+    });
+
+    test('DATE-base: negative offset must NOT shift the calendar date back', () => {
+        const rule = createFilterRuleFromField(
+            monthDim(DimensionType.DATE),
+            dateBaseNov,
+            'America/New_York',
+        );
+        // Shifting "Nov 1 UTC" into NY would land on Oct 31 — must not happen.
+        expect(rule.values).toEqual(['2024-11']);
+    });
+
+    test('DATE-base: positive offset also stays on the calendar date', () => {
+        const rule = createFilterRuleFromField(
+            monthDim(DimensionType.DATE),
+            dateBaseNov,
+            'Asia/Tokyo',
+        );
+        expect(rule.values).toEqual(['2024-11']);
+    });
+
+    test('plain DATE column (no timeInterval): negative offset must NOT shift', () => {
+        const plainDateDim = {
+            ...dimension('order_date', 'orders'),
+            type: DimensionType.DATE,
+        } as const;
+        const rule = createFilterRuleFromField(
+            plainDateDim,
+            '2024-11-01',
+            'America/New_York',
+        );
+        // Plain DATE columns are calendar values — shifting into NY would
+        // land on Oct 31 and silently corrupt the filter.
+        expect(rule.values).toEqual(['2024-11-01']);
+    });
+
+    test('plain DATE column (no timeInterval): positive offset must NOT shift', () => {
+        const plainDateDim = {
+            ...dimension('order_date', 'orders'),
+            type: DimensionType.DATE,
+        } as const;
+        const rule = createFilterRuleFromField(
+            plainDateDim,
+            '2024-11-01',
+            'Asia/Tokyo',
+        );
+        expect(rule.values).toEqual(['2024-11-01']);
+    });
+});
+
+describe('getFilterRuleFromFieldWithDefaultValue — multiple date values', () => {
+    const dayDim = {
+        ...dimension('order_date', 'orders'),
+        type: DimensionType.DATE,
+        timeInterval: TimeFrames.DAY,
+    } as const;
+    const timestampDim = {
+        ...dimension('created_at', 'orders'),
+        type: DimensionType.TIMESTAMP,
+    } as const;
+
+    const buildRule = (
+        operator: FilterOperator,
+        field: typeof dayDim | typeof timestampDim,
+        values: unknown[],
+    ) => {
+        const rule: FilterRule = {
+            id: 'id',
+            operator,
+            target: { fieldId: 'order_date' },
+        };
+        return getFilterRuleFromFieldWithDefaultValue(field, rule, values);
+    };
+
+    test.each([FilterOperator.EQUALS, FilterOperator.NOT_EQUALS])(
+        'keeps every date value for %s',
+        (operator) => {
+            expect(
+                buildRule(operator, dayDim, [
+                    '2024-11-01',
+                    '2024-11-07',
+                    '2024-12-24',
+                ]).values,
+            ).toEqual(['2024-11-01', '2024-11-07', '2024-12-24']);
+        },
+    );
+
+    test('keeps every timestamp value for equals', () => {
+        expect(
+            buildRule(FilterOperator.EQUALS, timestampDim, [
+                '2024-11-01T10:00:00Z',
+                '2024-11-07T10:00:00Z',
+            ]).values,
+        ).toHaveLength(2);
+    });
+
+    test('single-value operators still take only the first value', () => {
+        expect(
+            buildRule(FilterOperator.GREATER_THAN, dayDim, [
+                '2024-11-01',
+                '2024-11-07',
+            ]).values,
+        ).toEqual(['2024-11-01']);
+    });
+
+    test('existing single-value equals filters are unchanged', () => {
+        expect(
+            buildRule(FilterOperator.EQUALS, dayDim, ['2024-11-01']).values,
+        ).toEqual(['2024-11-01']);
+    });
+});
+
 describe('createFilterRuleFromModelRequiredFilterRule', () => {
     test('should create a correct FilterRule', () => {
         const result = createFilterRuleFromModelRequiredFilterRule(
@@ -163,6 +717,50 @@ describe('createFilterRuleFromModelRequiredFilterRule', () => {
         expect(result).toEqual(
             expectedRequiredResult('dimension', 'tableName'),
         );
+    });
+
+    test('should carry current period bounds into settings', () => {
+        const result = createFilterRuleFromModelRequiredFilterRule(
+            {
+                ...modelRequiredFilterRule('order_date'),
+                operator: FilterOperator.IN_THE_CURRENT,
+                values: [1],
+                settings: {
+                    unitOfTime: UnitOfTime.months,
+                    toDate: true,
+                    excludeToday: true,
+                },
+            },
+            'tableName',
+        );
+        expect(result.settings).toStrictEqual({
+            unitOfTime: UnitOfTime.months,
+            toDate: true,
+            excludeToday: true,
+        });
+    });
+
+    test('should not write absent bounds as undefined keys', () => {
+        const result = createFilterRuleFromModelRequiredFilterRule(
+            {
+                ...modelRequiredFilterRule('order_date'),
+                operator: FilterOperator.IN_THE_CURRENT,
+                values: [1],
+                settings: { unitOfTime: UnitOfTime.months, toDate: true },
+            },
+            'tableName',
+        );
+        expect(result.settings).toStrictEqual({
+            unitOfTime: UnitOfTime.months,
+            toDate: true,
+        });
+        expect(result.settings).not.toHaveProperty('excludeToday');
+        expect(
+            createFilterRuleFromModelRequiredFilterRule(
+                modelRequiredFilterRule('order_date'),
+                'tableName',
+            ).settings,
+        ).toStrictEqual({ unitOfTime: 'years' });
     });
 });
 
@@ -181,6 +779,7 @@ describe('isFilterRuleInQuery', () => {
                 dimension('dim', 'table'),
                 filterRule,
                 filterGroupWithFilterRule,
+                mockExplore,
             ),
         ).toEqual(true);
         expect(
@@ -188,8 +787,271 @@ describe('isFilterRuleInQuery', () => {
                 dimension('dim', 'table'),
                 filterRule,
                 filterGroupWithoutFilterRule,
+                mockExplore,
             ),
         ).toEqual(false);
+    });
+
+    test('should not treat string-derived time dimensions as satisfying required date filters', () => {
+        const exploreWithStringDerivedTimeDimension = {
+            ...mockExplore,
+            tables: {
+                ...mockExplore.tables,
+                orders: {
+                    ...mockExplore.tables.orders,
+                    dimensions: {
+                        ...mockExplore.tables.orders.dimensions,
+                        order_date: {
+                            name: 'order_date',
+                            label: 'Order Date',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date',
+                            tablesReferences: [],
+                            sql: 'order_date',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.DATE,
+                            isIntervalBase: true,
+                        },
+                        order_date_fiscal_quarter: {
+                            name: 'order_date_fiscal_quarter',
+                            label: 'Order Date Fiscal Quarter',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date_fiscal_quarter',
+                            tablesReferences: [],
+                            sql: 'order_date_fiscal_quarter',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.STRING,
+                            timeIntervalBaseDimensionName: 'order_date',
+                            customTimeInterval: 'fiscal_quarter',
+                        },
+                    },
+                },
+            },
+        } as typeof mockExplore;
+        const requiredFilter = expectedRequiredResult('order_date', 'orders');
+        const filtersWithOnlyStringDerivedDimension: FilterGroup = {
+            id: 'mockGroupId',
+            and: [
+                {
+                    id: 'string-derived-filter',
+                    target: { fieldId: 'orders_order_date_fiscal_quarter' },
+                    operator: FilterOperator.EQUALS,
+                    values: ['FY2024-Q1'],
+                },
+            ],
+        };
+
+        expect(
+            isFilterRuleInQuery(
+                exploreWithStringDerivedTimeDimension.tables.orders.dimensions
+                    .order_date,
+                requiredFilter,
+                filtersWithOnlyStringDerivedDimension,
+                exploreWithStringDerivedTimeDimension,
+            ),
+        ).toEqual(false);
+    });
+
+    test('should treat date-derived time dimensions as satisfying required date filters', () => {
+        const exploreWithDateDerivedTimeDimension = {
+            ...mockExplore,
+            tables: {
+                ...mockExplore.tables,
+                orders: {
+                    ...mockExplore.tables.orders,
+                    dimensions: {
+                        ...mockExplore.tables.orders.dimensions,
+                        order_date: {
+                            name: 'order_date',
+                            label: 'Order Date',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date',
+                            tablesReferences: [],
+                            sql: 'order_date',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.DATE,
+                            isIntervalBase: true,
+                        },
+                        order_date_biweekly: {
+                            name: 'order_date_biweekly',
+                            label: 'Order Date Biweekly',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date_biweekly',
+                            tablesReferences: [],
+                            sql: 'order_date_biweekly',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.DATE,
+                            timeIntervalBaseDimensionName: 'order_date',
+                            customTimeInterval: 'biweekly',
+                        },
+                    },
+                },
+            },
+        } as typeof mockExplore;
+        const requiredFilter = expectedRequiredResult('order_date', 'orders');
+        const filtersWithOnlyDateDerivedDimension: FilterGroup = {
+            id: 'mockGroupId',
+            and: [
+                {
+                    id: 'date-derived-filter',
+                    target: { fieldId: 'orders_order_date_biweekly' },
+                    operator: FilterOperator.IN_THE_PAST,
+                    values: [14],
+                    settings: {
+                        unitOfTime: 'days',
+                    },
+                },
+            ],
+        };
+
+        expect(
+            isFilterRuleInQuery(
+                exploreWithDateDerivedTimeDimension.tables.orders.dimensions
+                    .order_date,
+                requiredFilter,
+                filtersWithOnlyDateDerivedDimension,
+                exploreWithDateDerivedTimeDimension,
+            ),
+        ).toEqual(true);
+    });
+
+    test('should require an exact match when the required filter targets a custom derived time dimension', () => {
+        const exploreWithSiblingStringDerivedTimeDimensions = {
+            ...mockExplore,
+            tables: {
+                ...mockExplore.tables,
+                orders: {
+                    ...mockExplore.tables.orders,
+                    dimensions: {
+                        ...mockExplore.tables.orders.dimensions,
+                        order_date: {
+                            name: 'order_date',
+                            label: 'Order Date',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date',
+                            tablesReferences: [],
+                            sql: 'order_date',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.DATE,
+                            isIntervalBase: true,
+                        },
+                        order_date_fiscal_year: {
+                            name: 'order_date_fiscal_year',
+                            label: 'Order Date Fiscal Year',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date_fiscal_year',
+                            tablesReferences: [],
+                            sql: 'order_date_fiscal_year',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.STRING,
+                            timeIntervalBaseDimensionName: 'order_date',
+                            customTimeInterval: 'fiscal_year',
+                        },
+                        order_date_fiscal_quarter: {
+                            name: 'order_date_fiscal_quarter',
+                            label: 'Order Date Fiscal Quarter',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date_fiscal_quarter',
+                            tablesReferences: [],
+                            sql: 'order_date_fiscal_quarter',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.STRING,
+                            timeIntervalBaseDimensionName: 'order_date',
+                            customTimeInterval: 'fiscal_quarter',
+                        },
+                    },
+                },
+            },
+        } as typeof mockExplore;
+        const requiredFilter = expectedRequiredResult(
+            'order_date_fiscal_year',
+            'orders',
+        );
+        const filtersWithSiblingDerivedDimensionOnly: FilterGroup = {
+            id: 'mockGroupId',
+            and: [
+                {
+                    id: 'sibling-derived-filter',
+                    target: { fieldId: 'orders_order_date_fiscal_quarter' },
+                    operator: FilterOperator.EQUALS,
+                    values: ['FY2024-Q1'],
+                },
+            ],
+        };
+
+        expect(
+            isFilterRuleInQuery(
+                exploreWithSiblingStringDerivedTimeDimensions.tables.orders
+                    .dimensions.order_date_fiscal_year,
+                requiredFilter,
+                filtersWithSiblingDerivedDimensionOnly,
+                exploreWithSiblingStringDerivedTimeDimensions,
+            ),
+        ).toEqual(false);
+    });
+
+    test('should allow sibling standard time dimensions when the required filter targets a standard derived time dimension', () => {
+        const exploreWithStandardDerivedTimeDimensions = {
+            ...mockExplore,
+            tables: {
+                ...mockExplore.tables,
+                orders: {
+                    ...mockExplore.tables.orders,
+                    dimensions: {
+                        ...mockExplore.tables.orders.dimensions,
+                        order_date_week: {
+                            ...mockExplore.tables.orders.dimensions
+                                .order_date_week,
+                            timeInterval: TimeFrames.WEEK,
+                        },
+                        order_date_month: {
+                            ...mockExplore.tables.orders.dimensions
+                                .order_date_month,
+                            timeInterval: TimeFrames.MONTH,
+                        },
+                    },
+                },
+            },
+        } as typeof mockExplore;
+        const requiredFilter = expectedRequiredResult(
+            'order_date_week',
+            'orders',
+        );
+        const filtersWithSiblingStandardDimension: FilterGroup = {
+            id: 'mockGroupId',
+            and: [
+                {
+                    id: 'sibling-standard-filter',
+                    target: { fieldId: 'orders_order_date_month' },
+                    operator: FilterOperator.EQUALS,
+                    values: ['2024-09-01'],
+                },
+            ],
+        };
+
+        expect(
+            isFilterRuleInQuery(
+                exploreWithStandardDerivedTimeDimensions.tables.orders
+                    .dimensions.order_date_week,
+                requiredFilter,
+                filtersWithSiblingStandardDimension,
+                exploreWithStandardDerivedTimeDimensions,
+            ),
+        ).toEqual(true);
     });
 });
 
@@ -220,6 +1082,196 @@ describe('reduceRequiredDimensionFiltersToFilterRules', () => {
         ];
 
         expect(result).toEqual(expectedFilterRuleResult);
+    });
+
+    test('should keep required date filters when only string-derived time filters are present', () => {
+        const exploreWithStringDerivedTimeDimension = {
+            ...mockExplore,
+            tables: {
+                ...mockExplore.tables,
+                orders: {
+                    ...mockExplore.tables.orders,
+                    dimensions: {
+                        ...mockExplore.tables.orders.dimensions,
+                        order_date: {
+                            name: 'order_date',
+                            label: 'Order Date',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date',
+                            tablesReferences: [],
+                            sql: 'order_date',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.DATE,
+                            isIntervalBase: true,
+                        },
+                        order_date_fiscal_quarter: {
+                            name: 'order_date_fiscal_quarter',
+                            label: 'Order Date Fiscal Quarter',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date_fiscal_quarter',
+                            tablesReferences: [],
+                            sql: 'order_date_fiscal_quarter',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.STRING,
+                            timeIntervalBaseDimensionName: 'order_date',
+                            customTimeInterval: 'fiscal_quarter',
+                        },
+                    },
+                },
+            },
+        } as typeof mockExplore;
+        const filtersWithOnlyStringDerivedDimension: Filters = {
+            dimensions: {
+                id: 'mockGroupId',
+                and: [
+                    {
+                        id: 'string-derived-filter',
+                        target: { fieldId: 'orders_order_date_fiscal_quarter' },
+                        operator: FilterOperator.EQUALS,
+                        values: ['FY2024-Q1'],
+                    },
+                ],
+            },
+        };
+
+        const result = reduceRequiredDimensionFiltersToFilterRules(
+            [modelRequiredFilterRule('order_date')],
+            filtersWithOnlyStringDerivedDimension.dimensions,
+            exploreWithStringDerivedTimeDimension,
+        );
+
+        expect(result).toEqual([
+            expectedRequiredResult('order_date', 'orders'),
+        ]);
+    });
+
+    test('should keep required derived time filters when only a sibling derived time filter is present', () => {
+        const exploreWithSiblingStringDerivedTimeDimensions = {
+            ...mockExplore,
+            tables: {
+                ...mockExplore.tables,
+                orders: {
+                    ...mockExplore.tables.orders,
+                    dimensions: {
+                        ...mockExplore.tables.orders.dimensions,
+                        order_date: {
+                            name: 'order_date',
+                            label: 'Order Date',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date',
+                            tablesReferences: [],
+                            sql: 'order_date',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.DATE,
+                            isIntervalBase: true,
+                        },
+                        order_date_fiscal_year: {
+                            name: 'order_date_fiscal_year',
+                            label: 'Order Date Fiscal Year',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date_fiscal_year',
+                            tablesReferences: [],
+                            sql: 'order_date_fiscal_year',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.STRING,
+                            timeIntervalBaseDimensionName: 'order_date',
+                            customTimeInterval: 'fiscal_year',
+                        },
+                        order_date_fiscal_quarter: {
+                            name: 'order_date_fiscal_quarter',
+                            label: 'Order Date Fiscal Quarter',
+                            table: 'orders',
+                            tableLabel: 'Orders',
+                            compiledSql: 'order_date_fiscal_quarter',
+                            tablesReferences: [],
+                            sql: 'order_date_fiscal_quarter',
+                            hidden: false,
+                            fieldType: FieldType.DIMENSION,
+                            type: DimensionType.STRING,
+                            timeIntervalBaseDimensionName: 'order_date',
+                            customTimeInterval: 'fiscal_quarter',
+                        },
+                    },
+                },
+            },
+        } as typeof mockExplore;
+        const filtersWithSiblingDerivedDimensionOnly: Filters = {
+            dimensions: {
+                id: 'mockGroupId',
+                and: [
+                    {
+                        id: 'sibling-derived-filter',
+                        target: { fieldId: 'orders_order_date_fiscal_quarter' },
+                        operator: FilterOperator.EQUALS,
+                        values: ['FY2024-Q1'],
+                    },
+                ],
+            },
+        };
+
+        const result = reduceRequiredDimensionFiltersToFilterRules(
+            [modelRequiredFilterRule('order_date_fiscal_year')],
+            filtersWithSiblingDerivedDimensionOnly.dimensions,
+            exploreWithSiblingStringDerivedTimeDimensions,
+        );
+
+        expect(result).toEqual([
+            expectedRequiredResult('order_date_fiscal_year', 'orders'),
+        ]);
+    });
+
+    test('should not add a required standard derived time filter when a sibling standard time filter is present', () => {
+        const exploreWithStandardDerivedTimeDimensions = {
+            ...mockExplore,
+            tables: {
+                ...mockExplore.tables,
+                orders: {
+                    ...mockExplore.tables.orders,
+                    dimensions: {
+                        ...mockExplore.tables.orders.dimensions,
+                        order_date_week: {
+                            ...mockExplore.tables.orders.dimensions
+                                .order_date_week,
+                            timeInterval: TimeFrames.WEEK,
+                        },
+                        order_date_month: {
+                            ...mockExplore.tables.orders.dimensions
+                                .order_date_month,
+                            timeInterval: TimeFrames.MONTH,
+                        },
+                    },
+                },
+            },
+        } as typeof mockExplore;
+        const filtersWithSiblingStandardDimension: Filters = {
+            dimensions: {
+                id: 'mockGroupId',
+                and: [
+                    {
+                        id: 'sibling-standard-filter',
+                        target: { fieldId: 'orders_order_date_month' },
+                        operator: FilterOperator.EQUALS,
+                        values: ['2024-09-01'],
+                    },
+                ],
+            },
+        };
+
+        const result = reduceRequiredDimensionFiltersToFilterRules(
+            [modelRequiredFilterRule('order_date_week')],
+            filtersWithSiblingStandardDimension.dimensions,
+            exploreWithStandardDerivedTimeDimensions,
+        );
+
+        expect(result).toEqual([]);
     });
 });
 
@@ -280,6 +1332,115 @@ describe('trackWhichTimeBasedMetricFiltersToOverride', () => {
         expect(result.overrideData?.fieldsToChange).toEqual(
             expect.arrayContaining(['order_date_month', 'order_date_week']),
         );
+    });
+
+    test('should track chart filter on interval base dimension when dashboard filter targets an interval dimension', () => {
+        const metricQueryDimensionFilters: AndFilterGroup = {
+            id: 'dim-filter-group',
+            and: [
+                {
+                    id: 'base-filter',
+                    target: { fieldId: 'order_date' },
+                    operator: FilterOperator.EQUALS,
+                    values: ['2024-06-26'],
+                },
+            ],
+        };
+
+        const dashboardFilter: DashboardFilterRule = {
+            id: 'month-filter',
+            label: 'Month Filter',
+            target: {
+                fieldId: 'order_date_month',
+                tableName: 'orders',
+            },
+            operator: FilterOperator.EQUALS,
+            values: ['2025-01'],
+        };
+
+        const result = trackWhichTimeBasedMetricFiltersToOverride(
+            metricQueryDimensionFilters,
+            dashboardFilter,
+            mockExplore,
+        );
+
+        expect(result.overrideData?.fieldsToChange).toEqual(['order_date']);
+    });
+
+    test('should track chart filters on base and interval dimensions when dashboard filter targets an interval dimension', () => {
+        const metricQueryDimensionFilters: AndFilterGroup = {
+            id: 'dim-filter-group',
+            and: [
+                {
+                    id: 'base-filter',
+                    target: { fieldId: 'order_date' },
+                    operator: FilterOperator.EQUALS,
+                    values: ['2024-03-01'],
+                },
+                {
+                    id: 'week-filter',
+                    target: { fieldId: 'order_date_week' },
+                    operator: FilterOperator.EQUALS,
+                    values: ['2024-03-25'],
+                },
+            ],
+        };
+
+        const dashboardFilter: DashboardFilterRule = {
+            id: 'year-filter',
+            label: 'Year Filter',
+            target: {
+                fieldId: 'order_date_year',
+                tableName: 'orders',
+            },
+            operator: FilterOperator.EQUALS,
+            values: ['2024'],
+        };
+
+        const result = trackWhichTimeBasedMetricFiltersToOverride(
+            metricQueryDimensionFilters,
+            dashboardFilter,
+            mockExplore,
+        );
+
+        expect(result.overrideData?.fieldsToChange).toEqual(
+            expect.arrayContaining(['order_date', 'order_date_week']),
+        );
+    });
+
+    test('should track chart filter on interval dimension when dashboard filter targets the interval base dimension', () => {
+        const metricQueryDimensionFilters: AndFilterGroup = {
+            id: 'dim-filter-group',
+            and: [
+                {
+                    id: 'month-filter',
+                    target: { fieldId: 'order_date_month' },
+                    operator: FilterOperator.EQUALS,
+                    values: ['2024-03'],
+                },
+            ],
+        };
+
+        const dashboardFilter: DashboardFilterRule = {
+            id: 'base-filter',
+            label: 'Order Date Filter',
+            target: {
+                fieldId: 'order_date',
+                tableName: 'orders',
+            },
+            operator: FilterOperator.EQUALS,
+            values: ['2024-03-01'],
+        };
+
+        const result = trackWhichTimeBasedMetricFiltersToOverride(
+            metricQueryDimensionFilters,
+            dashboardFilter,
+            mockExplore,
+        );
+
+        expect(result.overrideData?.fieldsToChange).toEqual([
+            'order_date_month',
+        ]);
     });
 
     test('should not track fields when dashboard filter targets non-base dimension', () => {
@@ -506,5 +1667,1308 @@ describe('getDashboardFilterRulesForTileAndReferences', () => {
 
         // Verify filter-3 is not included (isSqlColumn is true but fieldId doesn't match)
         expect(result).toHaveLength(0);
+    });
+});
+
+describe('applyDashboardFiltersForTile', () => {
+    const baseMetricQuery: MetricQuery = {
+        exploreName: 'test',
+        dimensions: [],
+        metrics: [],
+        filters: {},
+        sorts: [],
+        limit: 500,
+        tableCalculations: [],
+    };
+
+    const statusRule: DashboardFilterRule = {
+        id: 'f-status',
+        target: { fieldId: 'orders_status', tableName: 'orders' },
+        operator: FilterOperator.EQUALS,
+        values: [true],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    const offExploreRule: DashboardFilterRule = {
+        id: 'f-off',
+        target: { fieldId: 'other_browser', tableName: 'other' },
+        operator: FilterOperator.EQUALS,
+        values: ['chrome'],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    const exploreWithHiddenStatus: Explore = {
+        ...mockExplore,
+        tables: {
+            ...mockExplore.tables,
+            orders: {
+                ...mockExplore.tables.orders,
+                dimensions: {
+                    ...mockExplore.tables.orders.dimensions,
+                    status: {
+                        ...mockExplore.tables.orders.dimensions.status,
+                        hidden: true,
+                    },
+                },
+            },
+        },
+    };
+
+    const exploreWithHiddenMetric: Explore = {
+        ...mockExplore,
+        tables: {
+            ...mockExplore.tables,
+            orders: {
+                ...mockExplore.tables.orders,
+                metrics: {
+                    total_orders: {
+                        name: 'total_orders',
+                        label: 'Total orders',
+                        table: 'orders',
+                        tableLabel: 'Orders',
+                        compiledSql: 'COUNT(*)',
+                        sql: 'COUNT(*)',
+                        hidden: true,
+                        tablesReferences: ['orders'],
+                        fieldType: FieldType.METRIC,
+                        type: MetricType.COUNT,
+                    },
+                },
+            },
+        },
+    };
+
+    test('drops rules whose fieldId is not in the explore', () => {
+        const { metricQuery, appliedDashboardFilters } =
+            applyDashboardFiltersForTile({
+                tileUuid: 't-1',
+                metricQuery: baseMetricQuery,
+                dashboardFilters: {
+                    dimensions: [offExploreRule],
+                    metrics: [],
+                    tableCalculations: [],
+                },
+                explore: mockExplore,
+            });
+
+        expect(appliedDashboardFilters.dimensions).toEqual([]);
+        expect(
+            (metricQuery.filters.dimensions as AndFilterGroup | undefined)
+                ?.and ?? [],
+        ).toEqual([]);
+    });
+
+    test('drops rules whose tileTargets disable them for this tile', () => {
+        const disabledRule: DashboardFilterRule = {
+            ...statusRule,
+            tileTargets: { 't-1': false },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        const { metricQuery, appliedDashboardFilters } =
+            applyDashboardFiltersForTile({
+                tileUuid: 't-1',
+                metricQuery: baseMetricQuery,
+                dashboardFilters: {
+                    dimensions: [disabledRule],
+                    metrics: [],
+                    tableCalculations: [],
+                },
+                explore: mockExplore,
+            });
+
+        expect(appliedDashboardFilters.dimensions).toEqual([]);
+        expect(
+            (metricQuery.filters.dimensions as AndFilterGroup | undefined)
+                ?.and ?? [],
+        ).toEqual([]);
+    });
+
+    test('merges applicable rules into the metric query', () => {
+        const { metricQuery, appliedDashboardFilters } =
+            applyDashboardFiltersForTile({
+                tileUuid: 't-1',
+                metricQuery: baseMetricQuery,
+                dashboardFilters: {
+                    dimensions: [statusRule, offExploreRule],
+                    metrics: [],
+                    tableCalculations: [],
+                },
+                explore: mockExplore,
+            });
+
+        expect(appliedDashboardFilters.dimensions).toHaveLength(1);
+        expect(appliedDashboardFilters.dimensions[0].id).toBe('f-status');
+        const merged = (metricQuery.filters.dimensions as AndFilterGroup).and;
+        expect(merged).toHaveLength(1);
+        expect(merged[0]).toMatchObject({
+            target: { fieldId: 'orders_status' },
+            values: [true],
+        });
+    });
+
+    test('applies saved filters when their dimension becomes hidden', () => {
+        const { metricQuery, appliedDashboardFilters } =
+            applyDashboardFiltersForTile({
+                tileUuid: 't-1',
+                metricQuery: baseMetricQuery,
+                dashboardFilters: {
+                    dimensions: [statusRule],
+                    metrics: [],
+                    tableCalculations: [],
+                },
+                explore: exploreWithHiddenStatus,
+            });
+
+        expect(appliedDashboardFilters.dimensions).toEqual([statusRule]);
+        expect(
+            (metricQuery.filters.dimensions as AndFilterGroup).and,
+        ).toContainEqual(
+            expect.objectContaining({
+                target: { fieldId: 'orders_status' },
+                values: [true],
+            }),
+        );
+    });
+
+    test('applies saved hidden metric filters as HAVING filters', () => {
+        const metricRule: DashboardFilterRule = {
+            id: 'f-total-orders',
+            target: {
+                fieldId: 'orders_total_orders',
+                tableName: 'orders',
+            },
+            operator: FilterOperator.GREATER_THAN,
+            values: [10],
+            label: undefined,
+        };
+
+        const { metricQuery, appliedDashboardFilters } =
+            applyDashboardFiltersForTile({
+                tileUuid: 't-1',
+                metricQuery: baseMetricQuery,
+                dashboardFilters: {
+                    dimensions: [],
+                    metrics: [metricRule],
+                    tableCalculations: [],
+                },
+                explore: exploreWithHiddenMetric,
+            });
+
+        expect(appliedDashboardFilters.metrics).toEqual([metricRule]);
+        expect(
+            (metricQuery.filters.metrics as AndFilterGroup).and,
+        ).toContainEqual(
+            expect.objectContaining({
+                target: { fieldId: 'orders_total_orders' },
+                values: [10],
+            }),
+        );
+    });
+});
+
+describe('stripOverridesForLockedFiltersOnTab', () => {
+    const TAB_A = 'tab-a';
+    const TAB_B = 'tab-b';
+    const makeRule = (
+        id: string,
+        fieldId: string,
+        tableName: string,
+        opts: { lockedTabUuids?: string[]; values?: unknown[] } = {},
+    ): DashboardFilterRule => ({
+        id,
+        operator: FilterOperator.EQUALS,
+        target: { fieldId, tableName },
+        values: opts.values ?? ['x'],
+        label: undefined,
+        ...(opts.lockedTabUuids ? { lockedTabUuids: opts.lockedTabUuids } : {}),
+    });
+
+    test('drops override on a tab where the rule is locked', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'orders_status', 'orders', {
+                    lockedTabUuids: [TAB_A],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [
+                makeRule('o-1', 'orders_status', 'orders', {
+                    values: ['returned'],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            TAB_A,
+            true,
+        );
+        expect(result.filters.dimensions).toEqual([]);
+        expect(result.droppedCount).toBe(1);
+    });
+
+    test('keeps override on a tab where the rule is NOT locked', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'orders_status', 'orders', {
+                    lockedTabUuids: [TAB_A],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [makeRule('o-1', 'orders_status', 'orders')],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            TAB_B,
+            true,
+        );
+        expect(result.filters.dimensions).toHaveLength(1);
+        expect(result.droppedCount).toBe(0);
+    });
+
+    test('keeps override on a different field even if a sibling field is locked', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'orders_status', 'orders', {
+                    lockedTabUuids: [TAB_A],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [makeRule('o-1', 'orders_amount', 'orders')],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            TAB_A,
+            true,
+        );
+        expect(result.filters.dimensions).toHaveLength(1);
+        expect(result.droppedCount).toBe(0);
+    });
+
+    test('does not cross filter groups (dim lock leaves metric overrides alone)', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'orders_status', 'orders', {
+                    lockedTabUuids: [TAB_A],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [],
+            metrics: [makeRule('o-1', 'orders_status', 'orders')],
+            tableCalculations: [],
+        };
+        const result = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            TAB_A,
+            true,
+        );
+        expect(result.filters.metrics).toHaveLength(1);
+        expect(result.droppedCount).toBe(0);
+    });
+
+    test('matches on both fieldId and tableName', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'status', 'orders', {
+                    lockedTabUuids: [TAB_A],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [makeRule('o-1', 'status', 'customers')],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            TAB_A,
+            true,
+        );
+        expect(result.filters.dimensions).toHaveLength(1);
+        expect(result.droppedCount).toBe(0);
+    });
+
+    test('tabbed dashboard with undefined tabUuid strips nothing (transient pre-selection state)', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'orders_status', 'orders', {
+                    lockedTabUuids: [TAB_A],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [makeRule('o-1', 'orders_status', 'orders')],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            undefined,
+            true,
+        );
+        expect(result.filters.dimensions).toHaveLength(1);
+        expect(result.droppedCount).toBe(0);
+    });
+
+    test('rule locked on multiple tabs is enforced on each', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'orders_status', 'orders', {
+                    lockedTabUuids: [TAB_A, TAB_B],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [makeRule('o-1', 'orders_status', 'orders')],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const a = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            TAB_A,
+            true,
+        );
+        const b = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            TAB_B,
+            true,
+        );
+        expect(a.droppedCount).toBe(1);
+        expect(b.droppedCount).toBe(1);
+    });
+
+    test('empty lockedTabUuids never strips', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'orders_status', 'orders', {
+                    lockedTabUuids: [],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [makeRule('o-1', 'orders_status', 'orders')],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            TAB_A,
+            true,
+        );
+        expect(result.filters.dimensions).toHaveLength(1);
+        expect(result.droppedCount).toBe(0);
+    });
+
+    test('tab-less dashboard: any non-empty lockedTabUuids strips overrides', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'orders_status', 'orders', {
+                    lockedTabUuids: ['dashboard-uuid-as-sentinel'],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [
+                makeRule('o-1', 'orders_status', 'orders', {
+                    values: ['returned'],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            undefined,
+            false,
+        );
+        expect(result.filters.dimensions).toEqual([]);
+        expect(result.droppedCount).toBe(1);
+    });
+
+    test('tab-less dashboard: empty lockedTabUuids still does not strip', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'orders_status', 'orders', {
+                    lockedTabUuids: [],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [makeRule('o-1', 'orders_status', 'orders')],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            undefined,
+            false,
+        );
+        expect(result.filters.dimensions).toHaveLength(1);
+        expect(result.droppedCount).toBe(0);
+    });
+
+    test('tab-less dashboard: non-target field is not affected by lock', () => {
+        const saved = {
+            dimensions: [
+                makeRule('s-1', 'orders_status', 'orders', {
+                    lockedTabUuids: ['dashboard-uuid-as-sentinel'],
+                }),
+            ],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const overrides = {
+            dimensions: [makeRule('o-1', 'orders_amount', 'orders')],
+            metrics: [],
+            tableCalculations: [],
+        };
+        const result = stripOverridesForLockedFiltersOnTab(
+            saved,
+            overrides,
+            undefined,
+            false,
+        );
+        expect(result.filters.dimensions).toHaveLength(1);
+        expect(result.droppedCount).toBe(0);
+    });
+});
+
+describe('isEmptyDashboardFilterRule', () => {
+    test('flags disabled:false + empty values + value-requiring operator', () => {
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.EQUALS,
+                disabled: false,
+                values: [],
+            }),
+        ).toBe(true);
+    });
+
+    test('flags missing values (treated as empty)', () => {
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.EQUALS,
+                disabled: false,
+            }),
+        ).toBe(true);
+    });
+
+    test('flags omitted disabled (defaults to active)', () => {
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.EQUALS,
+                values: [],
+            }),
+        ).toBe(true);
+    });
+
+    test('treats null values (YAML `values: ~`) as empty', () => {
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.EQUALS,
+                disabled: false,
+                values: null,
+            }),
+        ).toBe(true);
+    });
+
+    test('does NOT flag disabled filters', () => {
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.EQUALS,
+                disabled: true,
+                values: [],
+            }),
+        ).toBe(false);
+    });
+
+    test('does NOT flag operators that legitimately take no values', () => {
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.NULL,
+                disabled: false,
+                values: [],
+            }),
+        ).toBe(false);
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.NOT_NULL,
+                disabled: false,
+            }),
+        ).toBe(false);
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.IN_PERIOD_TO_DATE,
+                disabled: false,
+            }),
+        ).toBe(false);
+    });
+
+    test('does NOT flag value-less relative-date operators (compile from settings, not values)', () => {
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.IN_THE_CURRENT,
+                disabled: false,
+                values: [],
+            }),
+        ).toBe(false);
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.NOT_IN_THE_CURRENT,
+                disabled: false,
+                values: [],
+            }),
+        ).toBe(false);
+    });
+
+    test('does NOT flag filters with values', () => {
+        expect(
+            isEmptyDashboardFilterRule({
+                operator: FilterOperator.EQUALS,
+                disabled: false,
+                values: ['some-value'],
+            }),
+        ).toBe(false);
+    });
+});
+
+describe('getUnmetFilterRequirements', () => {
+    const createRule = (
+        id: string,
+        overrides: Partial<DashboardFilterRule> = {},
+    ): DashboardFilterRule => ({
+        id,
+        label: undefined,
+        target: { fieldId: `${id}_field`, tableName: 'test' },
+        operator: FilterOperator.EQUALS,
+        values: [],
+        ...overrides,
+    });
+
+    const toDashboardFilters = (
+        partial: Partial<DashboardFilters>,
+    ): DashboardFilters => ({
+        dimensions: [],
+        metrics: [],
+        tableCalculations: [],
+        ...partial,
+    });
+
+    test('returns empty array when there are no filters', () => {
+        expect(getUnmetFilterRequirements(toDashboardFilters({}))).toEqual([]);
+    });
+
+    test('returns empty array when all requirements are satisfied', () => {
+        const filters = toDashboardFilters({
+            dimensions: [
+                createRule('a', {
+                    required: true,
+                    disabled: false,
+                    values: ['x'],
+                }),
+                createRule('b', {
+                    requiredGroupId: 'g1',
+                    disabled: false,
+                    values: ['y'],
+                }),
+                createRule('c'),
+            ],
+        });
+        expect(getUnmetFilterRequirements(filters)).toEqual([]);
+    });
+
+    test('returns a single entry for a required filter without a value', () => {
+        const required = createRule('a', { required: true, disabled: true });
+        const filters = toDashboardFilters({
+            dimensions: [required, createRule('b')],
+        });
+        expect(getUnmetFilterRequirements(filters)).toEqual([
+            { type: 'single', filter: required },
+        ]);
+    });
+
+    test('returns a group entry when every member is valueless', () => {
+        const memberA = createRule('a', {
+            requiredGroupId: 'g1',
+            disabled: true,
+        });
+        const memberB = createRule('b', {
+            requiredGroupId: 'g1',
+            disabled: true,
+        });
+        const filters = toDashboardFilters({ dimensions: [memberA, memberB] });
+        expect(getUnmetFilterRequirements(filters)).toEqual([
+            { type: 'group', groupId: 'g1', filters: [memberA, memberB] },
+        ]);
+    });
+
+    test('group is satisfied when at least one member has a value', () => {
+        const filters = toDashboardFilters({
+            dimensions: [
+                createRule('a', { requiredGroupId: 'g1', disabled: true }),
+                createRule('b', {
+                    requiredGroupId: 'g1',
+                    disabled: false,
+                    values: ['y'],
+                }),
+            ],
+        });
+        expect(getUnmetFilterRequirements(filters)).toEqual([]);
+    });
+
+    test('an enabled rule with a value-requiring operator and no values does not satisfy a requirement', () => {
+        const emptyRequired = createRule('a', {
+            required: true,
+            disabled: false,
+        });
+        const emptyMemberA = createRule('b', {
+            requiredGroupId: 'g1',
+            disabled: false,
+        });
+        const emptyMemberB = createRule('c', {
+            requiredGroupId: 'g1',
+            disabled: true,
+        });
+        const filters = toDashboardFilters({
+            dimensions: [emptyRequired, emptyMemberA, emptyMemberB],
+        });
+        expect(getUnmetFilterRequirements(filters)).toEqual([
+            { type: 'single', filter: emptyRequired },
+            {
+                type: 'group',
+                groupId: 'g1',
+                filters: [emptyMemberA, emptyMemberB],
+            },
+        ]);
+    });
+
+    test('an enabled rule with a value-less operator satisfies a requirement without values', () => {
+        const filters = toDashboardFilters({
+            dimensions: [
+                createRule('a', {
+                    required: true,
+                    disabled: false,
+                    operator: FilterOperator.NOT_NULL,
+                }),
+                createRule('b', { requiredGroupId: 'g1', disabled: true }),
+                createRule('c', {
+                    requiredGroupId: 'g1',
+                    disabled: false,
+                    operator: FilterOperator.IN_THE_CURRENT,
+                    settings: { unitOfTime: 'months' },
+                }),
+            ],
+        });
+        expect(getUnmetFilterRequirements(filters)).toEqual([]);
+    });
+
+    test('a rule with both required and requiredGroupId is a single, not a group member', () => {
+        const both = createRule('a', {
+            required: true,
+            requiredGroupId: 'g1',
+            disabled: true,
+        });
+        const memberB = createRule('b', {
+            requiredGroupId: 'g1',
+            disabled: true,
+        });
+
+        // `required` wins: the dual-flag rule is excluded from its group
+        const unmetGroupFilters = toDashboardFilters({
+            dimensions: [both, memberB],
+        });
+        expect(getUnmetFilterRequirements(unmetGroupFilters)).toEqual([
+            { type: 'single', filter: both },
+            { type: 'group', groupId: 'g1', filters: [memberB] },
+        ]);
+
+        // A value on the dual-flag rule satisfies its single, not the group
+        const satisfiedSingle = createRule('a', {
+            required: true,
+            requiredGroupId: 'g1',
+            disabled: false,
+            values: ['x'],
+        });
+        const satisfiedSingleFilters = toDashboardFilters({
+            dimensions: [satisfiedSingle, memberB],
+        });
+        expect(getUnmetFilterRequirements(satisfiedSingleFilters)).toEqual([
+            { type: 'group', groupId: 'g1', filters: [memberB] },
+        ]);
+
+        // Group satisfied by the other member, but the required single remains unmet
+        const satisfiedGroupFilters = toDashboardFilters({
+            dimensions: [
+                both,
+                createRule('b', {
+                    requiredGroupId: 'g1',
+                    disabled: false,
+                    values: ['y'],
+                }),
+            ],
+        });
+        expect(getUnmetFilterRequirements(satisfiedGroupFilters)).toEqual([
+            { type: 'single', filter: both },
+        ]);
+    });
+
+    test('evaluates independent groups separately', () => {
+        const g2MemberA = createRule('c', {
+            requiredGroupId: 'g2',
+            disabled: true,
+        });
+        const g2MemberB = createRule('d', {
+            requiredGroupId: 'g2',
+            disabled: true,
+        });
+        const filters = toDashboardFilters({
+            dimensions: [
+                createRule('a', { requiredGroupId: 'g1', disabled: true }),
+                createRule('b', {
+                    requiredGroupId: 'g1',
+                    disabled: false,
+                    values: ['y'],
+                }),
+                g2MemberA,
+                g2MemberB,
+            ],
+        });
+        expect(getUnmetFilterRequirements(filters)).toEqual([
+            { type: 'group', groupId: 'g2', filters: [g2MemberA, g2MemberB] },
+        ]);
+    });
+
+    test('includes metric filters as group members', () => {
+        const dimensionMember = createRule('a', {
+            requiredGroupId: 'g1',
+            disabled: true,
+        });
+        const metricMember = createRule('b', {
+            requiredGroupId: 'g1',
+            disabled: true,
+        });
+        const filters = toDashboardFilters({
+            dimensions: [dimensionMember],
+            metrics: [metricMember],
+        });
+        expect(getUnmetFilterRequirements(filters)).toEqual([
+            {
+                type: 'group',
+                groupId: 'g1',
+                filters: [dimensionMember, metricMember],
+            },
+        ]);
+
+        // A metric member with a value satisfies the group
+        const satisfied = toDashboardFilters({
+            dimensions: [dimensionMember],
+            metrics: [
+                createRule('b', { requiredGroupId: 'g1', values: ['y'] }),
+            ],
+        });
+        expect(getUnmetFilterRequirements(satisfied)).toEqual([]);
+    });
+
+    test('ignores tableCalculations filters', () => {
+        const filters = toDashboardFilters({
+            tableCalculations: [
+                createRule('a', { required: true, disabled: true }),
+                createRule('b', { requiredGroupId: 'g1', disabled: true }),
+            ],
+        });
+        expect(getUnmetFilterRequirements(filters)).toEqual([]);
+    });
+
+    test('does not treat an empty-string requiredGroupId as a group', () => {
+        const filters = toDashboardFilters({
+            dimensions: [
+                createRule('a', { requiredGroupId: '', disabled: true }),
+                createRule('b', { requiredGroupId: '', disabled: true }),
+            ],
+        });
+        expect(getUnmetFilterRequirements(filters)).toEqual([]);
+    });
+});
+
+describe('createFilterRuleFromField — quick filter operator per field type', () => {
+    const typedDim = (type: DimensionType) => ({
+        ...dimension('field', 'orders'),
+        type,
+    });
+    const intervalDim = (timeInterval: TimeFrames) =>
+        ({
+            ...dimension(`order_date_${timeInterval.toLowerCase()}`, 'orders'),
+            type: DimensionType.DATE,
+            timeInterval,
+            timeIntervalBaseDimensionName: 'order_date',
+            timeIntervalBaseDimensionType: DimensionType.TIMESTAMP,
+        }) as const;
+
+    describe('include (equals, the default)', () => {
+        test('string dimension', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.STRING),
+                'completed',
+            );
+            expect(rule.operator).toBe(FilterOperator.EQUALS);
+            expect(rule.values).toEqual(['completed']);
+        });
+
+        test('number dimension', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.NUMBER),
+                42,
+            );
+            expect(rule.operator).toBe(FilterOperator.EQUALS);
+            expect(rule.values).toEqual([42]);
+        });
+
+        test('boolean dimension', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.BOOLEAN),
+                true,
+            );
+            expect(rule.operator).toBe(FilterOperator.EQUALS);
+            expect(rule.values).toEqual([true]);
+        });
+
+        test('null value becomes isNull', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.STRING),
+                null,
+            );
+            expect(rule.operator).toBe(FilterOperator.NULL);
+            expect(rule.values).toEqual([]);
+        });
+    });
+
+    describe('exclude (notEquals)', () => {
+        test('string dimension', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.STRING),
+                'completed',
+                undefined,
+                FilterOperator.NOT_EQUALS,
+            );
+            expect(rule.operator).toBe(FilterOperator.NOT_EQUALS);
+            expect(rule.values).toEqual(['completed']);
+        });
+
+        test('number dimension', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.NUMBER),
+                42,
+                undefined,
+                FilterOperator.NOT_EQUALS,
+            );
+            expect(rule.operator).toBe(FilterOperator.NOT_EQUALS);
+            expect(rule.values).toEqual([42]);
+        });
+
+        test('boolean dimension', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.BOOLEAN),
+                false,
+                undefined,
+                FilterOperator.NOT_EQUALS,
+            );
+            expect(rule.operator).toBe(FilterOperator.NOT_EQUALS);
+            expect(rule.values).toEqual([false]);
+        });
+
+        test('null value becomes notNull', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.STRING),
+                null,
+                undefined,
+                FilterOperator.NOT_EQUALS,
+            );
+            expect(rule.operator).toBe(FilterOperator.NOT_NULL);
+            expect(rule.values).toEqual([]);
+        });
+    });
+
+    describe('falsy but real values are kept', () => {
+        test('number 0 with equals', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.NUMBER),
+                0,
+            );
+            expect(rule.operator).toBe(FilterOperator.EQUALS);
+            expect(rule.values).toEqual([0]);
+        });
+
+        test('number 0 with notEquals', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.NUMBER),
+                0,
+                undefined,
+                FilterOperator.NOT_EQUALS,
+            );
+            expect(rule.values).toEqual([0]);
+        });
+
+        test('boolean false with equals', () => {
+            const rule = createFilterRuleFromField(
+                typedDim(DimensionType.BOOLEAN),
+                false,
+            );
+            expect(rule.operator).toBe(FilterOperator.EQUALS);
+            expect(rule.values).toEqual([false]);
+        });
+    });
+
+    describe.each([FilterOperator.EQUALS, FilterOperator.NOT_EQUALS] as const)(
+        'date/timestamp value formatting is identical for %s',
+        (operator) => {
+            test('DAY keeps the calendar day', () => {
+                const rule = createFilterRuleFromField(
+                    intervalDim(TimeFrames.DAY),
+                    '2026-03-03',
+                    undefined,
+                    operator,
+                );
+                expect(rule.operator).toBe(operator);
+                expect(rule.values).toEqual(['2026-03-03']);
+            });
+
+            test('WEEK keeps the week-commencing day', () => {
+                const rule = createFilterRuleFromField(
+                    intervalDim(TimeFrames.WEEK),
+                    '2026-03-02',
+                    undefined,
+                    operator,
+                );
+                expect(rule.values).toEqual(['2026-03-02']);
+            });
+
+            test('MONTH formats as YYYY-MM', () => {
+                const rule = createFilterRuleFromField(
+                    intervalDim(TimeFrames.MONTH),
+                    '2026-03-01',
+                    undefined,
+                    operator,
+                );
+                expect(rule.values).toEqual(['2026-03']);
+            });
+
+            test('QUARTER stores the first day of the quarter', () => {
+                const rule = createFilterRuleFromField(
+                    intervalDim(TimeFrames.QUARTER),
+                    '2025-04-01',
+                    undefined,
+                    operator,
+                );
+                expect(rule.values).toEqual(['2025-04-01']);
+            });
+
+            test('YEAR formats as YYYY', () => {
+                const rule = createFilterRuleFromField(
+                    intervalDim(TimeFrames.YEAR),
+                    '2026-01-01',
+                    undefined,
+                    operator,
+                );
+                expect(rule.values).toEqual(['2026']);
+            });
+
+            test('timestamp (RAW) keeps the full instant as ISO', () => {
+                const rawDim = {
+                    ...dimension('created_raw', 'customers'),
+                    type: DimensionType.TIMESTAMP,
+                    timeInterval: TimeFrames.RAW,
+                } as const;
+                const rule = createFilterRuleFromField(
+                    rawDim,
+                    '2025-06-28T11:00:00+00:00',
+                    'UTC',
+                    operator,
+                );
+                expect(rule.operator).toBe(operator);
+                expect(rule.values).toEqual(['2025-06-28T11:00:00+00:00']);
+            });
+
+            test('timestamp HOUR keeps the truncated instant', () => {
+                const hourDim = {
+                    ...dimension('timestamp_tz_hour', 'events'),
+                    type: DimensionType.TIMESTAMP,
+                    timeInterval: TimeFrames.HOUR,
+                } as const;
+                const rule = createFilterRuleFromField(
+                    hourDim,
+                    '2020-08-11T23:00:00+00:00',
+                    'UTC',
+                    operator,
+                );
+                expect(rule.values).toEqual(['2020-08-11T23:00:00+00:00']);
+            });
+        },
+    );
+});
+
+describe('excludeTilesFromTabScopedFilters', () => {
+    const TAB_1 = 'tab-1';
+    const TAB_2 = 'tab-2';
+    const chartTile = (uuid: string, tabUuid?: string) => ({
+        uuid,
+        type: DashboardTileTypes.SAVED_CHART,
+        tabUuid,
+    });
+    const markdownTile = (uuid: string, tabUuid: string) => ({
+        uuid,
+        type: DashboardTileTypes.MARKDOWN,
+        tabUuid,
+    });
+    const rule = (
+        id: string,
+        tileTargets?: DashboardFilterRule['tileTargets'],
+    ): DashboardFilterRule => ({
+        id,
+        label: undefined,
+        target: { fieldId: 'orders_status', tableName: 'orders' },
+        operator: FilterOperator.EQUALS,
+        values: ['completed'],
+        ...(tileTargets ? { tileTargets } : {}),
+    });
+    const filters = (
+        dimensions: DashboardFilterRule[],
+        metrics: DashboardFilterRule[] = [],
+    ): DashboardFilters => ({ dimensions, metrics, tableCalculations: [] });
+
+    it('excludes a new tile from a filter that excludes every chart tile on its tab', () => {
+        const existing = [chartTile('t1', TAB_1), chartTile('t2', TAB_2)];
+        const scopedToTab2 = rule('f1', { t1: false });
+        const result = excludeTilesFromTabScopedFilters(
+            filters([scopedToTab2]),
+            [chartTile('new-tile', TAB_1)],
+            existing,
+        );
+        expect(result.dimensions[0].tileTargets).toEqual({
+            t1: false,
+            'new-tile': false,
+        });
+    });
+
+    it('keeps auto-apply for a filter that targets at least one chart tile on the tab', () => {
+        const existing = [
+            chartTile('t1', TAB_1),
+            chartTile('t2', TAB_1),
+            chartTile('t3', TAB_2),
+        ];
+        const partiallyApplied = rule('f1', { t1: false });
+        const input = filters([partiallyApplied]);
+        const result = excludeTilesFromTabScopedFilters(
+            input,
+            [chartTile('new-tile', TAB_1)],
+            existing,
+        );
+        expect(result).toBe(input);
+    });
+
+    it('keeps auto-apply when the tab has no pre-existing chart tiles', () => {
+        const existing = [chartTile('t2', TAB_2)];
+        const scopedToTab2 = rule('f1', {});
+        const input = filters([scopedToTab2]);
+        const result = excludeTilesFromTabScopedFilters(
+            input,
+            [chartTile('new-tile', TAB_1)],
+            existing,
+        );
+        expect(result).toBe(input);
+    });
+
+    it('ignores non-chart tiles when checking whether a tab is fully excluded', () => {
+        const existing = [
+            chartTile('t1', TAB_1),
+            markdownTile('md1', TAB_1),
+            chartTile('t2', TAB_2),
+        ];
+        const scopedToTab2 = rule('f1', { t1: false });
+        const result = excludeTilesFromTabScopedFilters(
+            filters([scopedToTab2]),
+            [chartTile('new-tile', TAB_1)],
+            existing,
+        );
+        expect(result.dimensions[0].tileTargets).toEqual({
+            t1: false,
+            'new-tile': false,
+        });
+    });
+
+    it('does nothing for new tiles without a tab', () => {
+        const existing = [chartTile('t1', TAB_1)];
+        const input = filters([rule('f1', { t1: false })]);
+        const result = excludeTilesFromTabScopedFilters(
+            input,
+            [chartTile('new-tile', undefined)],
+            existing,
+        );
+        expect(result).toBe(input);
+    });
+
+    it('applies the same inference to metric filters', () => {
+        const existing = [chartTile('t1', TAB_1), chartTile('t2', TAB_2)];
+        const metricScopedToTab2 = rule('m1', { t1: false });
+        const result = excludeTilesFromTabScopedFilters(
+            filters([], [metricScopedToTab2]),
+            [chartTile('new-tile', TAB_1)],
+            existing,
+        );
+        expect(result.metrics[0].tileTargets).toEqual({
+            t1: false,
+            'new-tile': false,
+        });
+    });
+
+    it('handles each new tile against its own tab', () => {
+        const existing = [chartTile('t1', TAB_1), chartTile('t2', TAB_2)];
+        const scopedToTab1 = rule('f1', { t2: false });
+        const result = excludeTilesFromTabScopedFilters(
+            filters([scopedToTab1]),
+            [chartTile('new-1', TAB_1), chartTile('new-2', TAB_2)],
+            existing,
+        );
+        expect(result.dimensions[0].tileTargets).toEqual({
+            t2: false,
+            'new-2': false,
+        });
+    });
+
+    it('treats a mapped tile target as applied, not excluded', () => {
+        const existing = [chartTile('t1', TAB_1)];
+        const mappedOnTab1 = rule('f1', {
+            t1: { fieldId: 'orders_status', tableName: 'orders' },
+        });
+        const input = filters([mappedOnTab1]);
+        const result = excludeTilesFromTabScopedFilters(
+            input,
+            [chartTile('new-tile', TAB_1)],
+            existing,
+        );
+        expect(result).toBe(input);
+    });
+});
+
+describe('createDashboardFilterRuleFromField', () => {
+    const fieldA = {
+        ...dimension('name', 'team'),
+        tableLabel: 'Team at Event A',
+        label: 'Name',
+    };
+    const fieldB = { ...fieldA, tableLabel: 'Team at Event B' };
+
+    test('excludes tiles that relabel the same field and targets the rest by default', () => {
+        const rule = createDashboardFilterRuleFromField({
+            field: fieldB,
+            availableTileFilters: {
+                'tile-a': [fieldA],
+                'tile-b': [fieldB],
+                'tile-c': [{ ...fieldB }],
+            },
+            isTemporary: false,
+        });
+        expect(rule.target).toEqual({
+            fieldId: 'team_name',
+            tableName: 'team',
+            fieldName: 'name',
+        });
+        expect(rule.tileTargets).toEqual({
+            'tile-a': false,
+            'tile-b': { fieldId: 'team_name', tableName: 'team' },
+            'tile-c': { fieldId: 'team_name', tableName: 'team' },
+        });
+    });
+});
+
+describe('getDashboardFilterField', () => {
+    const fieldA = {
+        ...dimension('name', 'team'),
+        tableLabel: 'Team at Event A',
+    };
+    const fieldB = { ...fieldA, tableLabel: 'Team at Event B' };
+    const fieldsByTile = { 'tile-a': [fieldA], 'tile-b': [fieldB] };
+    const target = { fieldId: 'team_name', tableName: 'team' };
+
+    test('returns the field of an explicitly targeted tile', () => {
+        expect(
+            getDashboardFilterField(
+                { team_name: fieldA },
+                { target, tileTargets: { 'tile-a': false, 'tile-b': target } },
+                fieldsByTile,
+            ),
+        ).toBe(fieldB);
+    });
+
+    test('ignores tiles mapped to a different field', () => {
+        expect(
+            getDashboardFilterField(
+                { team_name: fieldA },
+                {
+                    target,
+                    tileTargets: {
+                        'tile-b': { fieldId: 'other', tableName: 'team' },
+                    },
+                },
+                fieldsByTile,
+            ),
+        ).toBe(fieldA);
+    });
+
+    test('falls back to the shared map without tile targets', () => {
+        expect(getDashboardFilterField({ team_name: fieldA }, { target })).toBe(
+            fieldA,
+        );
+    });
+});
+
+describe('getDashboardFilterableFieldKey', () => {
+    test('separates same-id fields whose labels differ', () => {
+        const field = dimension('name', 'team');
+        expect(getDashboardFilterableFieldKey(field)).toBe(
+            'team_name::mockTableLabel::mockLabel',
+        );
+        expect(
+            getDashboardFilterableFieldKey({ ...field, tableLabel: 'Other' }),
+        ).not.toBe(getDashboardFilterableFieldKey(field));
     });
 });

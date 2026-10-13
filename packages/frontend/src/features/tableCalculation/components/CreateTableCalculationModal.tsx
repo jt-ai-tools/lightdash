@@ -1,5 +1,8 @@
-import { type TableCalculation } from '@lightdash/common';
-import { type ModalProps } from '@mantine/core';
+import {
+    CustomFormatType,
+    TableCalculationType,
+    type TableCalculation,
+} from '@lightdash/common';
 import { useCallback, type FC } from 'react';
 import {
     explorerActions,
@@ -7,9 +10,11 @@ import {
 } from '../../../features/explorer/store';
 import useTracking from '../../../providers/Tracking/useTracking';
 import { EventName } from '../../../types/Events';
-import TableCalculationModal from './TableCalculationModal';
+import TableCalculationModal, {
+    type TableCalculationSaveMeta,
+} from './TableCalculationModal';
 
-type Props = ModalProps & {
+type Props = {
     opened: boolean;
     onClose: () => void;
 };
@@ -19,10 +24,16 @@ export const CreateTableCalculationModal: FC<Props> = ({ opened, onClose }) => {
     const { track } = useTracking();
 
     const onCreate = useCallback(
-        (value: TableCalculation) => {
+        (value: TableCalculation, meta: TableCalculationSaveMeta) => {
             dispatch(explorerActions.addTableCalculation(value));
             track({
                 name: EventName.CREATE_TABLE_CALCULATION_BUTTON_CLICKED,
+                properties: {
+                    mode: meta.mode,
+                    generatedByAi: meta.generatedByAi,
+                    resultType: value.type ?? TableCalculationType.NUMBER,
+                    formatType: value.format?.type ?? CustomFormatType.DEFAULT,
+                },
             });
             onClose();
         },

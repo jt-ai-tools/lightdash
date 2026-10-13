@@ -1,4 +1,4 @@
-import { FeatureFlags, type FieldId } from '@lightdash/common';
+import { getMissingRequiredParameters, type FieldId } from '@lightdash/common';
 import { useCallback, useMemo } from 'react';
 import { useParams } from 'react-router';
 import useEmbed from '../ee/providers/Embed/useEmbed';
@@ -19,11 +19,18 @@ import {
     useExplorerDispatch,
     useExplorerSelector,
 } from '../features/explorer/store';
+import { useMergeSafe } from '../features/mergeQuery/context/useMerge';
 import { useQueryExecutor } from '../providers/Explorer/useQueryExecutor';
 import { buildQueryArgs } from './explorer/buildQueryArgs';
-import { useExplore } from './useExplore';
+import { useExploreByProjectUuid } from './useExplore';
 import { useDateZoomGranularitySearch } from './useExplorerRoute';
-import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
+import { usePreAggregateCacheEnabled } from './usePreAggregateCacheEnabled';
+import { useProjectUuid } from './useProjectUuid';
+
+type ExplorerQueryManagerArgs = {
+    projectUuid?: string;
+    savedQueryUuid?: string;
+};
 
 /**
  * Manager hook for Explorer query state
@@ -38,7 +45,10 @@ import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
  *
  * Child components should use useExplorerQuery() for the full public API.
  */
-export const useExplorerQueryManager = () => {
+export const useExplorerQueryManager = ({
+    projectUuid: explicitProjectUuid,
+    savedQueryUuid: explicitSavedQueryUuid,
+}: ExplorerQueryManagerArgs = {}) => {
     // Get state from Redux selectors
     const dispatch = useExplorerDispatch();
     const metricQuery = useExplorerSelector(selectMetricQuery);
@@ -60,12 +70,21 @@ export const useExplorerQueryManager = () => {
     );
 
     const embed = useEmbed();
+    const customSqlProvenanceChartUuid =
+        embed?.customSqlProvenanceChartUuid ??
+        (embed?.savedChart && 'uuid' in embed.savedChart
+            ? embed.savedChart.uuid
+            : undefined);
+    const routeProjectUuid = useProjectUuid();
     const params = useParams<{
         savedQueryUuid: string;
-        projectUuid: string;
     }>();
-    const savedQueryUuid = embed?.savedQueryUuid || params.savedQueryUuid;
-    const projectUuid = embed?.projectUuid || params.projectUuid!;
+    const savedQueryUuid =
+        explicitSavedQueryUuid ||
+        embed?.savedQueryUuid ||
+        params.savedQueryUuid;
+    const projectUuid =
+        explicitProjectUuid || embed?.projectUuid || routeProjectUuid!;
     const viewModeQueryArgs = useMemo(() => {
         return savedQueryUuid ? { chartUuid: savedQueryUuid } : undefined;
     }, [savedQueryUuid]);
@@ -83,13 +102,16 @@ export const useExplorerQueryManager = () => {
     );
 
     // Get explore data and pivot configuration
-    const { data: explore } = useExplore(tableName, {
-        refetchOnMount: false,
-        refetchOnWindowFocus: false,
-    });
-    const { data: useSqlPivotResults } = useServerFeatureFlag(
-        FeatureFlags.UseSqlPivotResults,
+    const { data: explore, error: exploreError } = useExploreByProjectUuid(
+        tableName,
+        projectUuid,
+        {
+            refetchOnMount: false,
+            refetchOnWindowFocus: false,
+        },
     );
+
+    const [preAggCacheEnabled] = usePreAggregateCacheEnabled();
 
     // Compute active fields and query validity
     const activeFields = useMemo<Set<FieldId>>(() => {
@@ -104,13 +126,11 @@ export const useExplorerQueryManager = () => {
     const missingRequiredParameters = useMemo(() => {
         if (parameterReferences === null) return null;
 
-        // Missing required parameters are the ones that are not set and don't have a default value
-        const missing = parameterReferences.filter(
-            (parameter) =>
-                !parameters?.[parameter] &&
-                !parameterDefinitions?.[parameter]?.default,
+        return getMissingRequiredParameters(
+            parameterReferences,
+            parameters,
+            parameterDefinitions,
         );
-        return missing;
     }, [parameterReferences, parameters, parameterDefinitions]);
 
     // Dispatch functions for query UUID history
@@ -128,11 +148,18 @@ export const useExplorerQueryManager = () => {
         [dispatch],
     );
 
+    // A merge replaces the query it was built from, so once one has been
+    // submitted there is nothing left for this query to render, and its sorts
+    // may name merged fields the warehouse has never heard of. It stays
+    // enabled while the merge is being built, because until then its results
+    // are what is on screen.
+    const mergeReplacesQuery = !!useMergeSafe()?.replacesQuery;
+
     // Main query executor - creates TanStack Query subscriptions
     const [mainQueryExecutor] = useQueryExecutor(
         validQueryArgs,
         missingRequiredParameters,
-        true,
+        !mergeReplacesQuery,
         queryUuidHistory,
         setQueryUuidHistory,
     );
@@ -150,38 +177,41 @@ export const useExplorerQueryManager = () => {
     const { query: unpivotedQuery, queryResults: unpivotedQueryResults } =
         unpivotedQueryExecutor;
 
-    // Function to prepare and set query arguments (single source of truth)
-    const runQuery = useCallback(() => {
+    const runQuery = useCallback((): boolean => {
         const mainQueryArgs = buildQueryArgs({
             activeFields,
             tableName,
             projectUuid,
             explore,
-            useSqlPivotResults: useSqlPivotResults?.enabled ?? false,
             computedMetricQuery: metricQuery,
             parameters,
             isEditMode,
             viewModeQueryArgs,
             dateZoomGranularity,
             minimal,
+            usePreAggregateCache: preAggCacheEnabled,
+            customSqlProvenanceChartUuid,
             savedChart: chartConfigForQuery,
         });
 
         if (mainQueryArgs) {
             dispatch(explorerActions.setValidQueryArgs(mainQueryArgs));
+            return true;
         }
+        return false;
     }, [
         activeFields,
         tableName,
         projectUuid,
         explore,
-        useSqlPivotResults?.enabled,
         metricQuery,
         parameters,
         isEditMode,
         viewModeQueryArgs,
         dateZoomGranularity,
         minimal,
+        preAggCacheEnabled,
+        customSqlProvenanceChartUuid,
         chartConfigForQuery,
         dispatch,
     ]);
@@ -218,6 +248,7 @@ export const useExplorerQueryManager = () => {
         tableName,
         projectUuid,
         explore,
+        exploreError,
         computedMetricQuery: metricQuery,
         parameters,
 

@@ -4,32 +4,33 @@ import {
     Group,
     Paper,
     Stack,
+    Switch,
     Text,
     Tooltip,
     useMantineColorScheme,
-} from '@mantine-8/core';
-import { Switch } from '@mantine/core';
+} from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
-import {
-    Editor,
-    type BeforeMount,
-    type EditorProps,
-    type Monaco,
-    type OnMount,
-} from '@monaco-editor/react';
 import { IconHelpCircle } from '@tabler/icons-react';
 import { type editor, type IDisposable, type languages } from 'monaco-editor';
 import { useCallback, useEffect, useRef, useState, type FC } from 'react';
 import { useDeepCompareEffect } from 'react-use';
 import { AiTooltipInput } from '../../../../ee/features/ambientAi/components/tooltip';
 import { useAmbientAiEnabled } from '../../../../ee/features/ambientAi/hooks/useAmbientAiEnabled';
+import useIsEmbedded from '../../../../ee/providers/Embed/useIsEmbedded';
 import { getLightdashMonacoTheme } from '../../../../features/sqlRunner/utils/monaco';
+import { useProjectUuid } from '../../../../hooks/useProjectUuid';
 import MantineIcon from '../../../common/MantineIcon';
 import { isCartesianVisualizationConfig } from '../../../LightdashVisualization/types';
 import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
+import {
+    Editor,
+    type BeforeMount,
+    type EditorProps,
+    type Monaco,
+    type OnMount,
+} from '../../../MonacoEditor';
 import { Config } from '../../common/Config';
 import styles from './TooltipConfig.module.css';
-
 import '../../../../styles/monaco.css';
 
 const MONACO_DEFAULT_OPTIONS: EditorProps['options'] = {
@@ -113,7 +114,9 @@ const calculateEditorHeight = (lineCount: number): number => {
 export const TooltipConfig: FC<Props> = ({ fields }) => {
     const { visualizationConfig } = useVisualizationContext();
     const { colorScheme } = useMantineColorScheme();
-    const isAmbientAiEnabled = useAmbientAiEnabled();
+    const projectUuid = useProjectUuid();
+    const isAmbientAiEnabled = useAmbientAiEnabled(projectUuid);
+    const isEmbedded = useIsEmbedded();
     const isCartesianChart =
         isCartesianVisualizationConfig(visualizationConfig);
 
@@ -262,38 +265,41 @@ export const TooltipConfig: FC<Props> = ({ fields }) => {
         <Stack gap="xs">
             <Group gap="xs" align="center">
                 <Config.Label>Custom</Config.Label>
-                <Tooltip
-                    withinPortal={true}
-                    maw={350}
-                    variant="xs"
-                    multiline
-                    label="Use this input to enhance chart tooltips with additional content. You can incorporate HTML code and include dynamic values using the format ${variable_name}.
+                {!isEmbedded && (
+                    <Tooltip
+                        maw={350}
+                        label="Use this input to enhance chart tooltips with additional content. You can incorporate HTML code and include dynamic values using the format ${variable_name}.
                                 Click here to read more about this on our docs."
-                >
-                    <MantineIcon
-                        onClick={() => {
-                            window.open(
-                                'https://docs.lightdash.com/references/custom-tooltip',
-                                '_blank',
-                            );
-                        }}
-                        icon={IconHelpCircle}
-                        size="md"
-                        display="inline"
-                        color="ldGray.5"
-                        style={{ cursor: 'pointer' }}
-                    />
-                </Tooltip>
-                <Switch checked={show} onChange={() => setShow(!show)} />
+                    >
+                        <MantineIcon
+                            onClick={() => {
+                                window.open(
+                                    'https://docs.lightdash.com/references/custom-tooltip',
+                                    '_blank',
+                                    'noopener,noreferrer',
+                                );
+                            }}
+                            icon={IconHelpCircle}
+                            size="md"
+                            display="inline"
+                            color="ldGray.5"
+                            className={styles.helpIcon}
+                        />
+                    </Tooltip>
+                )}
+                <Switch
+                    size="xs"
+                    checked={show}
+                    onChange={() => setShow(!show)}
+                />
             </Group>
 
-            <Collapse in={show}>
+            <Collapse expanded={show}>
                 {/* Monaco does not support placeholders, so this is a workaround to show the example tooltip
                 we show some text, by giving position absolute, it is placed on top of the editor*/}
                 <Paper
                     className={styles.editorWrapper}
                     radius="md"
-                    withBorder
                     pos="relative"
                 >
                     {tooltipValue?.length === 0 ? (

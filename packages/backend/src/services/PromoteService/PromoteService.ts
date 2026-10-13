@@ -1,14 +1,20 @@
-import { subject } from '@casl/ability';
+import { Ability, subject } from '@casl/ability';
 import {
     AlreadyExistsError,
     ChartSummary,
+    ChartType,
+    ConflictError,
     DashboardDAO,
     DashboardTileTypes,
     ForbiddenError,
     getDeepestPaths,
+    getDocumentSavedChartLinks,
     getErrorMessage,
     isDashboardChartTileType,
+    isDashboardDataAppTileType,
     isSubPath,
+    mapDocumentCharts,
+    mapDocumentSavedChartLinks,
     NotFoundError,
     ParameterError,
     PromotedChart as PromotedChangeChart,
@@ -21,33 +27,61 @@ import {
     Space,
     SpaceAccess,
     SpaceGroup,
-    type SpaceSummaryBase,
     UnexpectedServerError,
     UpdateSqlChart,
+    type Document,
+    type DocumentChartContent,
+    type DocumentContent,
+    type DocumentSavedChartKind,
+    type RegisteredAccount,
+    type SpaceSummaryBase,
+    type UUID,
+    type UuidOrSlug,
 } from '@lightdash/common';
+import { isEqual } from 'lodash';
+import { validate as isValidUuid } from 'uuid';
 import { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
+import { toSessionUser } from '../../auth/account/account';
 import { LightdashConfig } from '../../config/parseConfig';
+import type { AppGenerateService } from '../../ee/services/AppGenerateService/AppGenerateService';
+import type { CaslAuditWrapper } from '../../logging/caslAuditWrapper';
 import Logger from '../../logging/logger';
+import { type AgentActionLogModel } from '../../models/AgentActionLogModel';
+import type { AppModel } from '../../models/AppModel';
 import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
 import { SavedChartModel } from '../../models/SavedChartModel';
-import { SavedSqlModel } from '../../models/SavedSqlModel';
+import {
+    SavedSqlModel,
+    type SqlChartConnectionBinding,
+} from '../../models/SavedSqlModel';
 import { SpaceModel } from '../../models/SpaceModel';
+import { getContentWriteAgentIdentity } from '../AiAccessService/agentExecutionContext';
+import { logAgentContentWrite } from '../AiAccessService/logAgentContentWrite';
 import { BaseService } from '../BaseService';
-import type { SpacePermissionService } from '../SpaceService/SpacePermissionService';
+import {
+    getContentConnectionName,
+    listContentConnections,
+    type ContentConnectionModels,
+} from '../CoderService/handlers/contentConnections';
+import type { DocumentService } from '../DocumentService/DocumentService';
+import type {
+    SpaceAccessContextForCasl,
+    SpacePermissionService,
+} from '../SpaceService/SpacePermissionService';
 
 export type PromotedChart = {
     projectUuid: string;
     chart: SavedChartDAO;
     space: PromotedSpace; // even if chart belongs to dashboard, this is not undefined
     spaces: PromotedSpace[];
-    access: SpaceAccess[];
+    spaceAccessContext: SpaceAccessContextForCasl | undefined;
 };
 export type UpstreamChart = {
     projectUuid: string;
     chart: (ChartSummary & { updatedAt: Date }) | undefined;
     space: PromotedSpace | undefined;
-    access: SpaceAccess[];
+    spaceAccessContext: SpaceAccessContextForCasl | undefined;
     dashboardUuid?: string; // dashboard uuid if chart belongs to dashboard
 };
 export type PromotedDashboard = {
@@ -55,7 +89,7 @@ export type PromotedDashboard = {
     dashboard: DashboardDAO;
     space: PromotedSpace;
     spaces: PromotedSpace[];
-    access: SpaceAccess[];
+    spaceAccessContext: SpaceAccessContextForCasl | undefined;
 };
 
 export type UpstreamDashboard = {
@@ -64,7 +98,7 @@ export type UpstreamDashboard = {
         | Pick<DashboardDAO, 'uuid' | 'name' | 'spaceUuid' | 'description'>
         | undefined;
     space: PromotedSpace | undefined;
-    access: SpaceAccess[];
+    spaceAccessContext: SpaceAccessContextForCasl | undefined;
 };
 
 type PromotedSqlChart = {
@@ -72,14 +106,14 @@ type PromotedSqlChart = {
     chart: SavedSqlChart;
     space: PromotedSpace;
     spaces: PromotedSpace[];
-    access: SpaceAccess[];
+    spaceAccessContext: SpaceAccessContextForCasl | undefined;
 };
 
 type UpstreamSqlChart = {
     projectUuid: string;
     chart: SavedSqlChart | undefined;
     space: PromotedSpace | undefined;
-    access: SpaceAccess[];
+    spaceAccessContext: SpaceAccessContextForCasl | undefined;
 };
 
 type PromotedSqlChartChange = {
@@ -97,6 +131,7 @@ type PromotedSqlChartChange = {
 };
 
 type PromoteServiceArguments = {
+    agentActionLogModel: Pick<AgentActionLogModel, 'insert'>;
     lightdashConfig: LightdashConfig;
     analytics: LightdashAnalytics;
     projectModel: ProjectModel;
@@ -105,12 +140,74 @@ type PromoteServiceArguments = {
     savedSqlModel: SavedSqlModel;
     dashboardModel: DashboardModel;
     spacePermissionService: SpacePermissionService;
+    // Lazily resolves the EE data-app service so dashboard promotion can promote
+    // embedded DATA_APP tiles. A thunk — not the instance — because
+    // AppGenerateService depends on PromoteService, so eager injection would
+    // create a construction cycle. Resolves undefined in core (non-EE) builds.
+    getAppGenerateService?: () => AppGenerateService | undefined;
+    // A thunk too: eager resolution of DocumentService risks a construction cycle.
+    getDocumentService: () => DocumentService;
+    appModel: Pick<
+        AppModel,
+        'findApp' | 'getLatestRenderableDataAppVizVersion'
+    >;
+    warehouseConnectionModel: ContentConnectionModels['warehouseConnectionModel'];
 };
 
 type SavedSqlChart = Awaited<ReturnType<SavedSqlModel['getByUuid']>>;
 
 const isChartWithinDashboard = (chart: Pick<SavedChartDAO, 'dashboardUuid'>) =>
     chart.dashboardUuid !== null;
+
+type DataAppVizBinding = { appUuid: string; version: number };
+
+const getDataAppVizUuid = (content: DocumentChartContent): string | undefined =>
+    content.source !== 'sql' &&
+    content.chart.chartConfig.type === ChartType.DATA_APP_VIZ
+        ? content.chart.chartConfig.config?.dataAppVizUuid
+        : undefined;
+
+/**
+ * Point custom charts at the given chart types. Reads add a portable slug
+ * that names a different app upstream, so it is always dropped.
+ */
+const bindDataAppVizs = (
+    content: DocumentContent,
+    bindings: ReadonlyMap<string, DataAppVizBinding>,
+): DocumentContent =>
+    mapDocumentCharts(content, (chartContent) => {
+        if (chartContent.source === 'sql') {
+            return chartContent;
+        }
+        const { chart } = chartContent;
+        if (
+            chart.chartConfig.type !== ChartType.DATA_APP_VIZ ||
+            chart.chartConfig.config === undefined
+        ) {
+            return chartContent;
+        }
+        const { dataAppVizSlug, ...config } = chart.chartConfig.config;
+        const binding =
+            config.dataAppVizUuid === undefined
+                ? undefined
+                : bindings.get(config.dataAppVizUuid);
+        return {
+            ...chartContent,
+            chart: {
+                ...chart,
+                chartConfig: {
+                    type: ChartType.DATA_APP_VIZ,
+                    config: binding
+                        ? {
+                              ...config,
+                              dataAppVizUuid: binding.appUuid,
+                              dataAppVizVersion: binding.version,
+                          }
+                        : config,
+                },
+            },
+        } as DocumentChartContent;
+    });
 
 export class PromoteService extends BaseService {
     private readonly lightdashConfig: LightdashConfig;
@@ -129,8 +226,21 @@ export class PromoteService extends BaseService {
 
     private readonly spacePermissionService: SpacePermissionService;
 
+    private readonly warehouseConnectionModel: ContentConnectionModels['warehouseConnectionModel'];
+
+    private readonly getDocumentService: () => DocumentService;
+
+    private readonly appModel: PromoteServiceArguments['appModel'];
+
+    private readonly getAppGenerateService?: () =>
+        | AppGenerateService
+        | undefined;
+
+    private readonly agentActionLogModel: Pick<AgentActionLogModel, 'insert'>;
+
     constructor(args: PromoteServiceArguments) {
         super();
+        this.agentActionLogModel = args.agentActionLogModel;
         this.lightdashConfig = args.lightdashConfig;
         this.analytics = args.analytics;
         this.savedChartModel = args.savedChartModel;
@@ -139,6 +249,63 @@ export class PromoteService extends BaseService {
         this.spaceModel = args.spaceModel;
         this.dashboardModel = args.dashboardModel;
         this.spacePermissionService = args.spacePermissionService;
+        this.getAppGenerateService = args.getAppGenerateService;
+        this.getDocumentService = args.getDocumentService;
+        this.appModel = args.appModel;
+        this.warehouseConnectionModel = args.warehouseConnectionModel;
+    }
+
+    private async getPromotedSqlChartBindings(
+        sourceProjectUuid: string,
+        targetProjectUuid: string,
+        sqlCharts: Pick<
+            SavedSqlChart,
+            'savedSqlUuid' | 'warehouseConnectionUuid'
+        >[],
+    ): Promise<ReadonlyMap<string, SqlChartConnectionBinding | undefined>> {
+        const models = {
+            projectModel: this.projectModel,
+            warehouseConnectionModel: this.warehouseConnectionModel,
+        };
+        const [sourceConnections, targetConnections] = await Promise.all([
+            listContentConnections(models, sourceProjectUuid),
+            listContentConnections(models, targetProjectUuid),
+        ]);
+        return new Map(
+            sqlCharts.map((sqlChart) => {
+                const name = getContentConnectionName(
+                    sourceConnections,
+                    sqlChart.warehouseConnectionUuid,
+                );
+                if (targetConnections.length === 0) {
+                    if (name !== undefined) {
+                        throw new ParameterError(
+                            `The upstream project has no connection named "${name}".`,
+                        );
+                    }
+                    return [sqlChart.savedSqlUuid, undefined] as const;
+                }
+                const target = targetConnections.find((connection) =>
+                    name === undefined
+                        ? connection.isOriginal
+                        : connection.name === name,
+                );
+                if (!target) {
+                    throw new ParameterError(
+                        `The upstream project has no connection named "${name}".`,
+                    );
+                }
+                return [
+                    sqlChart.savedSqlUuid,
+                    {
+                        kind: 'connection',
+                        warehouseConnectionUuid: target.isOriginal
+                            ? null
+                            : target.warehouseConnectionUuid,
+                    },
+                ] as const;
+            }),
+        );
     }
 
     private async trackAnalytics(
@@ -188,6 +355,7 @@ export class PromoteService extends BaseService {
         upstreamProjectUuid: string,
         chartUuid: string,
         includeOrphanChartsWithinDashboard?: boolean,
+        cachedUpstreamChart?: UpstreamChart['chart'],
     ): Promise<{
         promotedChart: PromotedChart;
         upstreamChart: UpstreamChart;
@@ -211,18 +379,38 @@ export class PromoteService extends BaseService {
                   })
                 : [];
 
-        const upstreamCharts = await this.savedChartModel.find({
-            projectUuid: upstreamProjectUuid,
-            slug: savedChart.slug,
-            includeOrphanChartsWithinDashboard,
-        });
-        if (upstreamCharts.length > 1) {
-            throw new AlreadyExistsError(
-                `There are multiple charts with the same identifier ${savedChart.slug}`,
-            );
+        let upstreamChart: UpstreamChart['chart'];
+        if (cachedUpstreamChart !== undefined) {
+            upstreamChart = cachedUpstreamChart;
+        } else {
+            const mappedUpstreamChartUuid =
+                savedChart.projectUuid === upstreamProjectUuid
+                    ? null
+                    : await this.projectModel.getUpstreamChartUuidFromPreview(
+                          savedChart.projectUuid,
+                          savedChart.uuid,
+                      );
+            if (mappedUpstreamChartUuid) {
+                upstreamChart = await this.savedChartModel.get(
+                    mappedUpstreamChartUuid,
+                    undefined,
+                    { projectUuid: upstreamProjectUuid },
+                );
+            } else {
+                const upstreamCharts = await this.savedChartModel.find({
+                    projectUuid: upstreamProjectUuid,
+                    slug: savedChart.slug,
+                    includeOrphanChartsWithinDashboard,
+                });
+                if (upstreamCharts.length > 1) {
+                    throw new AlreadyExistsError(
+                        `There are multiple charts with the same identifier ${savedChart.slug}`,
+                    );
+                }
+                upstreamChart =
+                    upstreamCharts.length === 1 ? upstreamCharts[0] : undefined;
+            }
         }
-        const upstreamChart =
-            upstreamCharts.length === 1 ? upstreamCharts[0] : undefined;
 
         const upstreamSpaces = await this.spaceModel.find({
             projectUuid: upstreamProjectUuid,
@@ -236,17 +424,23 @@ export class PromoteService extends BaseService {
         const upstreamSpace =
             upstreamSpaces.length === 1 ? upstreamSpaces[0] : undefined;
 
-        const promotedCtx =
-            await this.spacePermissionService.getSpaceAccessContext(
+        const promotedCtx = await this.spacePermissionService.resolveAccess(
+            user.userUuid,
+            { type: 'space', spaceUuid: promotedSpace.uuid },
+        );
+        let upstreamCtx: SpaceAccessContextForCasl | undefined;
+        if (upstreamSpace === undefined) {
+            upstreamCtx = undefined;
+        } else if (upstreamSpace.uuid === promotedSpace.uuid) {
+            // Same project upsert resolves promoted and upstream to the same
+            // space, so the access context is identical — skip the re-query.
+            upstreamCtx = promotedCtx;
+        } else {
+            upstreamCtx = await this.spacePermissionService.resolveAccess(
                 user.userUuid,
-                promotedSpace.uuid,
+                { type: 'space', spaceUuid: upstreamSpace.uuid },
             );
-        const upstreamCtx = upstreamSpace
-            ? await this.spacePermissionService.getSpaceAccessContext(
-                  user.userUuid,
-                  upstreamSpace.uuid,
-              )
-            : undefined;
+        }
 
         return {
             promotedChart: {
@@ -254,13 +448,13 @@ export class PromoteService extends BaseService {
                 projectUuid: upstreamProjectUuid,
                 space: promotedSpace,
                 spaces: promotedSpaceAncestors,
-                access: promotedCtx.access,
+                spaceAccessContext: promotedCtx,
             },
             upstreamChart: {
                 chart: upstreamChart,
                 projectUuid: upstreamProjectUuid,
                 space: upstreamSpace,
-                access: upstreamCtx?.access ?? [],
+                spaceAccessContext: upstreamCtx,
             },
         };
     }
@@ -322,16 +516,15 @@ export class PromoteService extends BaseService {
         const upstreamSpace =
             upstreamSpaces.length === 1 ? upstreamSpaces[0] : undefined;
 
-        const promotedCtx =
-            await this.spacePermissionService.getSpaceAccessContext(
-                user.userUuid,
-                promotedSpace.uuid,
-            );
+        const promotedCtx = await this.spacePermissionService.resolveAccess(
+            user.userUuid,
+            { type: 'space', spaceUuid: promotedSpace.uuid },
+        );
         const upstreamCtx = upstreamSpace
-            ? await this.spacePermissionService.getSpaceAccessContext(
-                  user.userUuid,
-                  upstreamSpace.uuid,
-              )
+            ? await this.spacePermissionService.resolveAccess(user.userUuid, {
+                  type: 'space',
+                  spaceUuid: upstreamSpace.uuid,
+              })
             : undefined;
 
         return {
@@ -340,35 +533,42 @@ export class PromoteService extends BaseService {
                 projectUuid: savedSql.project.projectUuid,
                 space: promotedSpace,
                 spaces: promotedSpaceAncestors,
-                access: promotedCtx.access,
+                spaceAccessContext: promotedCtx,
             },
             upstreamSqlChart: {
                 chart: upstreamSqlChart,
                 projectUuid: upstreamProjectUuid,
                 space: upstreamSpace,
-                access: upstreamCtx?.access ?? [],
+                spaceAccessContext: upstreamCtx,
             },
         };
     }
 
     private static checkPromoteSpacePermissions(
-        user: SessionUser,
+        auditedAbility: CaslAuditWrapper<Ability>,
+        organizationUuid: string,
         upstreamContent: Pick<
             UpstreamChart | UpstreamDashboard | UpstreamSqlChart,
-            'space' | 'projectUuid' | 'access'
+            'space' | 'projectUuid' | 'spaceAccessContext'
         >,
     ) {
-        const { organizationUuid } = user;
         if (upstreamContent.space) {
             // If upstreamContent has a matching space, we check if we have access
             if (
-                user.ability.cannot(
+                auditedAbility.cannot(
                     'manage',
                     subject('Space', {
                         organizationUuid,
                         projectUuid: upstreamContent.projectUuid,
-                        isPrivate: upstreamContent.space.isPrivate,
-                        access: upstreamContent.access,
+                        inheritsFromOrgOrProject:
+                            upstreamContent.spaceAccessContext
+                                ?.inheritsFromOrgOrProject,
+                        access:
+                            upstreamContent.spaceAccessContext?.access ?? [],
+                        metadata: {
+                            spaceUuid: upstreamContent.space.uuid,
+                            spaceName: upstreamContent.space.name,
+                        },
                     }),
                 )
             ) {
@@ -378,7 +578,7 @@ export class PromoteService extends BaseService {
             }
         } // If upstreamContent has no space, we check if we have permissions to create new spaces
         else if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'create',
                 subject('Space', {
                     organizationUuid,
@@ -393,23 +593,30 @@ export class PromoteService extends BaseService {
     }
 
     private static checkPromoteChartPermissions(
-        user: SessionUser,
+        auditedAbility: CaslAuditWrapper<Ability>,
+        organizationUuid: string,
         promotedChart: PromotedChart,
         upstreamChart: UpstreamChart,
         promotedDashboard?: PromotedDashboard,
     ) {
-        const { organizationUuid } = user;
+        const chartMetadata = {
+            savedChartUuid: promotedChart.chart.uuid,
+            savedChartName: promotedChart.chart.name,
+        };
         // Check permissions on `from project`
         if (promotedChart.space) {
             // Charts within space
             if (
-                user.ability.cannot(
+                auditedAbility.cannot(
                     'promote',
                     subject('SavedChart', {
                         organizationUuid,
                         projectUuid: promotedChart.projectUuid,
-                        isPrivate: promotedChart.space.isPrivate,
-                        access: promotedChart.access,
+                        inheritsFromOrgOrProject:
+                            promotedChart.spaceAccessContext
+                                ?.inheritsFromOrgOrProject,
+                        access: promotedChart.spaceAccessContext?.access ?? [],
+                        metadata: chartMetadata,
                     }),
                 )
             )
@@ -420,11 +627,12 @@ export class PromoteService extends BaseService {
                 );
         } // Charts within dashboard
         else if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'promote',
                 subject('SavedChart', {
                     organizationUuid,
                     projectUuid: promotedChart.projectUuid,
+                    metadata: chartMetadata,
                 }),
             )
         )
@@ -440,13 +648,17 @@ export class PromoteService extends BaseService {
 
             if (upstreamChart.space) {
                 if (
-                    user.ability.cannot(
+                    auditedAbility.cannot(
                         'promote',
                         subject('SavedChart', {
                             organizationUuid,
                             projectUuid: upstreamChart.projectUuid,
-                            isPrivate: upstreamChart.space.isPrivate,
-                            access: upstreamChart.access,
+                            inheritsFromOrgOrProject:
+                                upstreamChart.spaceAccessContext
+                                    ?.inheritsFromOrgOrProject,
+                            access:
+                                upstreamChart.spaceAccessContext?.access ?? [],
+                            metadata: chartMetadata,
                         }),
                     )
                 ) {
@@ -457,11 +669,12 @@ export class PromoteService extends BaseService {
                     );
                 }
             } else if (
-                user.ability.cannot(
+                auditedAbility.cannot(
                     'promote',
                     subject('SavedChart', {
                         organizationUuid,
                         projectUuid: upstreamChart.projectUuid,
+                        metadata: chartMetadata,
                     }),
                 )
             ) {
@@ -474,12 +687,13 @@ export class PromoteService extends BaseService {
         } else if (upstreamChart.space !== undefined) {
             // If upstreamContent has no matching chart, we check if we have access to create, if space already exists
             if (
-                user.ability.cannot(
+                auditedAbility.cannot(
                     'manage',
                     subject('SavedChart', {
                         organizationUuid,
                         projectUuid: upstreamChart.projectUuid,
-                        access: upstreamChart.access,
+                        access: upstreamChart.spaceAccessContext?.access ?? [],
+                        metadata: chartMetadata,
                     }),
                 )
             ) {
@@ -491,25 +705,48 @@ export class PromoteService extends BaseService {
             }
         }
 
-        PromoteService.checkPromoteSpacePermissions(user, upstreamChart);
+        // Promotion only mutates the upstream space when creating a new one or
+        // renaming an existing one (see isSpaceUpdated). When the upstream
+        // space already exists and won't be renamed, the entity-level checks
+        // above already gate the operation — no `manage Space` required.
+        const promotionWillModifyChartSpace =
+            !upstreamChart.space ||
+            PromoteService.isSpaceUpdated(
+                promotedChart.space,
+                upstreamChart.space,
+            );
+        if (promotionWillModifyChartSpace) {
+            PromoteService.checkPromoteSpacePermissions(
+                auditedAbility,
+                organizationUuid,
+                upstreamChart,
+            );
+        }
     }
 
     private static checkPromoteSqlChartPermissions(
-        user: SessionUser,
+        auditedAbility: CaslAuditWrapper<Ability>,
+        organizationUuid: string,
         promotedSqlChart: PromotedSqlChart,
         upstreamSqlChart: UpstreamSqlChart,
         promotedDashboard?: PromotedDashboard,
     ) {
-        const { organizationUuid } = user;
+        const sqlChartMetadata = {
+            savedSqlUuid: promotedSqlChart.chart.savedSqlUuid,
+            savedSqlName: promotedSqlChart.chart.name,
+        };
 
         if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'promote',
                 subject('SavedChart', {
                     organizationUuid,
                     projectUuid: promotedSqlChart.projectUuid,
-                    isPrivate: promotedSqlChart.space.isPrivate,
-                    access: promotedSqlChart.access,
+                    inheritsFromOrgOrProject:
+                        promotedSqlChart.spaceAccessContext
+                            ?.inheritsFromOrgOrProject,
+                    access: promotedSqlChart.spaceAccessContext?.access ?? [],
+                    metadata: sqlChartMetadata,
                 }),
             )
         ) {
@@ -523,13 +760,18 @@ export class PromoteService extends BaseService {
         if (upstreamSqlChart.chart !== undefined) {
             if (upstreamSqlChart.space) {
                 if (
-                    user.ability.cannot(
+                    auditedAbility.cannot(
                         'promote',
                         subject('SavedChart', {
                             organizationUuid,
                             projectUuid: upstreamSqlChart.projectUuid,
-                            isPrivate: upstreamSqlChart.space.isPrivate,
-                            access: upstreamSqlChart.access,
+                            inheritsFromOrgOrProject:
+                                upstreamSqlChart.spaceAccessContext
+                                    ?.inheritsFromOrgOrProject,
+                            access:
+                                upstreamSqlChart.spaceAccessContext?.access ??
+                                [],
+                            metadata: sqlChartMetadata,
                         }),
                     )
                 ) {
@@ -540,11 +782,12 @@ export class PromoteService extends BaseService {
                     );
                 }
             } else if (
-                user.ability.cannot(
+                auditedAbility.cannot(
                     'promote',
                     subject('SavedChart', {
                         organizationUuid,
                         projectUuid: upstreamSqlChart.projectUuid,
+                        metadata: sqlChartMetadata,
                     }),
                 )
             ) {
@@ -556,12 +799,14 @@ export class PromoteService extends BaseService {
             }
         } else if (upstreamSqlChart.space !== undefined) {
             if (
-                user.ability.cannot(
+                auditedAbility.cannot(
                     'manage',
                     subject('SavedChart', {
                         organizationUuid,
                         projectUuid: upstreamSqlChart.projectUuid,
-                        access: upstreamSqlChart.access,
+                        access:
+                            upstreamSqlChart.spaceAccessContext?.access ?? [],
+                        metadata: sqlChartMetadata,
                     }),
                 )
             ) {
@@ -573,24 +818,43 @@ export class PromoteService extends BaseService {
             }
         }
 
-        PromoteService.checkPromoteSpacePermissions(user, upstreamSqlChart);
+        const promotionWillModifySqlChartSpace =
+            !upstreamSqlChart.space ||
+            PromoteService.isSpaceUpdated(
+                promotedSqlChart.space,
+                upstreamSqlChart.space,
+            );
+        if (promotionWillModifySqlChartSpace) {
+            PromoteService.checkPromoteSpacePermissions(
+                auditedAbility,
+                organizationUuid,
+                upstreamSqlChart,
+            );
+        }
     }
 
     static checkPromoteDashboardPermissions(
-        user: SessionUser,
+        auditedAbility: CaslAuditWrapper<Ability>,
+        organizationUuid: string,
         promotedDashboard: PromotedDashboard,
         upstreamDashboard: UpstreamDashboard,
     ) {
+        const dashboardMetadata = {
+            dashboardUuid: promotedDashboard.dashboard.uuid,
+            dashboardName: promotedDashboard.dashboard.name,
+        };
         // Check permissions on `from project`
-        const { organizationUuid } = user;
         if (
-            user.ability.cannot(
+            auditedAbility.cannot(
                 'promote',
                 subject('Dashboard', {
                     organizationUuid,
                     projectUuid: promotedDashboard.projectUuid,
-                    isPrivate: promotedDashboard.space.isPrivate,
-                    access: promotedDashboard.access,
+                    inheritsFromOrgOrProject:
+                        promotedDashboard.spaceAccessContext
+                            ?.inheritsFromOrgOrProject,
+                    access: promotedDashboard.spaceAccessContext?.access ?? [],
+                    metadata: dashboardMetadata,
                 }),
             )
         )
@@ -604,13 +868,18 @@ export class PromoteService extends BaseService {
 
             if (upstreamDashboard.space) {
                 if (
-                    user.ability.cannot(
+                    auditedAbility.cannot(
                         'promote',
                         subject('Dashboard', {
                             organizationUuid,
                             projectUuid: upstreamDashboard.projectUuid,
-                            isPrivate: upstreamDashboard.space.isPrivate,
-                            access: upstreamDashboard.access,
+                            inheritsFromOrgOrProject:
+                                upstreamDashboard.spaceAccessContext
+                                    ?.inheritsFromOrgOrProject,
+                            access:
+                                upstreamDashboard.spaceAccessContext?.access ??
+                                [],
+                            metadata: dashboardMetadata,
                         }),
                     )
                 ) {
@@ -619,11 +888,12 @@ export class PromoteService extends BaseService {
                     );
                 }
             } else if (
-                user.ability.cannot(
+                auditedAbility.cannot(
                     'promote',
                     subject('Dashboard', {
                         organizationUuid,
                         projectUuid: upstreamDashboard.projectUuid,
+                        metadata: dashboardMetadata,
                     }),
                 )
             ) {
@@ -634,12 +904,14 @@ export class PromoteService extends BaseService {
         } else if (upstreamDashboard.space !== undefined) {
             // If upstreamContent has no matching dashboard, we check if we have access to create, if space already exists
             if (
-                user.ability.cannot(
+                auditedAbility.cannot(
                     'manage',
                     subject('Dashboard', {
                         organizationUuid,
                         projectUuid: upstreamDashboard.projectUuid,
-                        access: upstreamDashboard.access,
+                        access:
+                            upstreamDashboard.spaceAccessContext?.access ?? [],
+                        metadata: dashboardMetadata,
                     }),
                 )
             ) {
@@ -648,7 +920,19 @@ export class PromoteService extends BaseService {
                 );
             }
         }
-        PromoteService.checkPromoteSpacePermissions(user, upstreamDashboard);
+        const promotionWillModifyDashboardSpace =
+            !upstreamDashboard.space ||
+            PromoteService.isSpaceUpdated(
+                promotedDashboard.space,
+                upstreamDashboard.space,
+            );
+        if (promotionWillModifyDashboardSpace) {
+            PromoteService.checkPromoteSpacePermissions(
+                auditedAbility,
+                organizationUuid,
+                upstreamDashboard,
+            );
+        }
     }
 
     private static isSpaceUpdated(
@@ -682,7 +966,8 @@ export class PromoteService extends BaseService {
         return (
             promotedChart.updatedAt > upstreamChart.updatedAt ||
             promotedChart.name !== upstreamChart.name ||
-            promotedChart.description !== upstreamChart.description
+            promotedChart.description !== upstreamChart.description ||
+            promotedChart.slug !== upstreamChart.slug
         );
     }
 
@@ -704,31 +989,19 @@ export class PromoteService extends BaseService {
         promotionChanges: PromotionChanges,
         promotedDashboardUuid?: string, // dashboard uuid if chart belongs to dashboard
     ): Promise<PromotionChanges> {
+        const agentIdentity = getContentWriteAgentIdentity({
+            userUuid: user.userUuid,
+            organizationUuid: user.organizationUuid ?? null,
+        });
         const { charts } = promotionChanges;
 
         const existingCharts = charts.filter(
             (change) => change.action === PromotionAction.NO_CHANGES,
         );
 
-        await Promise.all(
-            charts
-                .filter((change) => change.action === PromotionAction.UPDATE)
-                .map((chartChange) => {
-                    const changeChart = chartChange.data;
-                    // We also update chart name and description if they have changed
-                    return this.savedChartModel.update(changeChart.uuid, {
-                        name: changeChart.name,
-                        description: changeChart.description,
-                        spaceUuid: isChartWithinDashboard(changeChart)
-                            ? undefined
-                            : changeChart.spaceUuid,
-                    });
-                }),
-        );
-
         const updatedChartPromises = charts
             .filter((change) => change.action === PromotionAction.UPDATE)
-            .map((chartChange) => {
+            .map(async (chartChange) => {
                 const changeChart = chartChange.data;
 
                 const chartData =
@@ -747,14 +1020,67 @@ export class PromoteService extends BaseService {
                               updatedByUser: user,
                               slug: changeChart.slug,
                           };
-                return this.savedChartModel
-                    .createVersion(changeChart.uuid, chartData, user)
-                    .then((updatedChart) => ({
-                        ...updatedChart,
-                        oldUuid: changeChart.oldUuid,
-                        spaceSlug: changeChart.spaceSlug,
-                        spacePath: changeChart.spacePath,
-                    }));
+                const currentChart = await this.savedChartModel.get(
+                    changeChart.uuid,
+                    undefined,
+                    { projectUuid: changeChart.projectUuid },
+                );
+
+                await this.savedChartModel.transaction(async (transaction) => {
+                    if (currentChart.slug !== changeChart.slug) {
+                        await this.savedChartModel.renameSlug(
+                            {
+                                projectUuid: changeChart.projectUuid,
+                                savedChartUuid: changeChart.uuid,
+                                from: currentChart.slug,
+                                to: changeChart.slug,
+                            },
+                            transaction,
+                        );
+                    }
+                    await this.savedChartModel.updateInTransaction(
+                        changeChart.uuid,
+                        {
+                            name: changeChart.name,
+                            description: changeChart.description,
+                            spaceUuid: isChartWithinDashboard(changeChart)
+                                ? undefined
+                                : changeChart.spaceUuid,
+                        },
+                        transaction,
+                    );
+                    await this.savedChartModel.createVersion(
+                        changeChart.uuid,
+                        chartData,
+                        user,
+                        transaction,
+                        undefined,
+                        agentIdentity,
+                        (trx, versionUuid, objectUuid) =>
+                            logAgentContentWrite({
+                                trx,
+                                model: this.agentActionLogModel,
+                                projectUuid: changeChart.projectUuid,
+                                agentIdentity,
+                                objectType: 'chart',
+                                objectUuid,
+                                versionUuid,
+                                action: 'update',
+                            }),
+                    );
+                });
+
+                const updatedChart = await this.savedChartModel.get(
+                    changeChart.uuid,
+                    undefined,
+                    { projectUuid: changeChart.projectUuid },
+                );
+                return {
+                    ...updatedChart,
+                    oldUuid: changeChart.oldUuid,
+                    spaceSlug: changeChart.spaceSlug,
+                    spacePath: changeChart.spacePath,
+                };
             });
         const updatedCharts = await Promise.all(updatedChartPromises);
 
@@ -791,6 +1117,18 @@ export class PromoteService extends BaseService {
                             ...chartData,
                             forceSlug: true,
                         },
+                        agentIdentity,
+                        (trx, versionUuid, objectUuid) =>
+                            logAgentContentWrite({
+                                trx,
+                                model: this.agentActionLogModel,
+                                projectUuid: changeChart.projectUuid,
+                                agentIdentity,
+                                objectType: 'chart',
+                                objectUuid,
+                                versionUuid,
+                                action: 'create',
+                            }),
                     );
 
                     return {
@@ -865,7 +1203,15 @@ export class PromoteService extends BaseService {
         user: SessionUser,
         promotionChanges: PromotionChanges,
         promotedSqlCharts: PromotedSqlChartChange[],
+        bindings: ReadonlyMap<
+            string,
+            SqlChartConnectionBinding | undefined
+        > = new Map(),
     ): Promise<PromotionChanges> {
+        const agentIdentity = getContentWriteAgentIdentity({
+            userUuid: user.userUuid,
+            organizationUuid: user.organizationUuid ?? null,
+        });
         if (promotedSqlCharts.length === 0) {
             return promotionChanges;
         }
@@ -893,8 +1239,8 @@ export class PromoteService extends BaseService {
         await Promise.all(
             sqlChangesWithResolvedSpaces
                 .filter((change) => change.action === PromotionAction.UPDATE)
-                .map((sqlChartChange) =>
-                    this.savedSqlModel.update({
+                .map(async (sqlChartChange) => {
+                    const sqlChartUpdate = {
                         userUuid: user.userUuid,
                         savedSqlUuid: sqlChartChange.data.uuid,
                         sqlChart: {
@@ -902,24 +1248,59 @@ export class PromoteService extends BaseService {
                                 sqlChartChange.data.unversionedData,
                             versionedData: sqlChartChange.data.versionedData,
                         },
-                    }),
-                ),
+                    };
+                    const binding = bindings.get(sqlChartChange.data.oldUuid);
+                    const updated = await this.savedSqlModel.update(
+                        sqlChartUpdate,
+                        binding,
+                        agentIdentity,
+                        (trx, versionUuid, objectUuid) =>
+                            logAgentContentWrite({
+                                trx,
+                                model: this.agentActionLogModel,
+                                projectUuid: sqlChartChange.data.projectUuid,
+                                agentIdentity,
+                                objectType: 'sql_chart',
+                                objectUuid,
+                                versionUuid,
+                                action: 'update',
+                            }),
+                    );
+                    return updated;
+                }),
         );
 
         const createdSqlCharts = await Promise.all(
             sqlChangesWithResolvedSpaces
                 .filter((change) => change.action === PromotionAction.CREATE)
-                .map((sqlChartChange) =>
-                    this.savedSqlModel.create(
+                .map(async (sqlChartChange) => {
+                    const sqlChartToCreate = {
+                        ...sqlChartChange.data.unversionedData,
+                        ...sqlChartChange.data.versionedData,
+                        slug: sqlChartChange.data.slug,
+                    };
+                    const binding = bindings.get(sqlChartChange.data.oldUuid);
+                    const created = await this.savedSqlModel.create(
                         user.userUuid,
                         sqlChartChange.data.projectUuid,
-                        {
-                            ...sqlChartChange.data.unversionedData,
-                            ...sqlChartChange.data.versionedData,
-                            slug: sqlChartChange.data.slug,
-                        },
-                    ),
-                ),
+                        sqlChartToCreate,
+                        binding,
+                        { slugMode: 'exact' },
+                        agentIdentity,
+                        (trx, versionUuid, objectUuid) =>
+                            logAgentContentWrite({
+                                trx,
+                                model: this.agentActionLogModel,
+                                projectUuid: sqlChartChange.data.projectUuid,
+                                agentIdentity,
+                                objectType: 'sql_chart',
+                                objectUuid,
+                                versionUuid,
+                                action: 'create',
+                            }),
+                    );
+                    return created;
+                }),
         );
 
         const sqlChartUuidMap = new Map<string, string>();
@@ -978,6 +1359,205 @@ export class PromoteService extends BaseService {
         };
     }
 
+    private static getDataAppUuidsFromChanges(
+        promotionChanges: PromotionChanges,
+    ): string[] {
+        const appUuids = promotionChanges.dashboards.reduce<Set<string>>(
+            (acc, dashboardChange) => {
+                dashboardChange.data.tiles.forEach((tile) => {
+                    if (
+                        isDashboardDataAppTileType(tile) &&
+                        tile.properties.appUuid
+                    ) {
+                        acc.add(tile.properties.appUuid);
+                    }
+                });
+                return acc;
+            },
+            new Set<string>(),
+        );
+        // Charts bound to a custom chart type reference it via chartConfig —
+        // the viz must promote with the chart or the upstream copy points at
+        // a viz that only exists in the preview.
+        promotionChanges.charts.forEach((chartChange) => {
+            const { chartConfig } = chartChange.data;
+            if (
+                chartConfig.type === ChartType.DATA_APP_VIZ &&
+                chartConfig.config?.dataAppVizUuid
+            ) {
+                appUuids.add(chartConfig.config.dataAppVizUuid);
+            }
+        });
+        return Array.from(appUuids);
+    }
+
+    /**
+     * Promote the apps a promotion references — DATA_APP dashboard tiles and
+     * the custom chart types bound by charts' DATA_APP_VIZ configs — into the
+     * upstream project, then remap each tile's `appUuid` and each chart's
+     * `dataAppVizUuid` to the freshly promoted upstream app.
+     *
+     * Must run before `upsertCharts` persists chart configs and before
+     * `updateDashboard` persists the tiles, so the remapped references (and
+     * the `dashboard_tile_data_apps` FK) point at rows that exist upstream.
+     *
+     * The actual app promotion (S3 copy, versioning, permission checks) lives in
+     * the EE AppGenerateService, reached via the injected accessor. Apps whose
+     * referenced row no longer exists (soft-deleted placeholder tiles) are left
+     * untouched rather than failing the whole promotion.
+     */
+    async upsertDataApps(
+        user: SessionUser,
+        promotionChanges: PromotionChanges,
+        sourceProjectUuid: string,
+    ): Promise<PromotionChanges> {
+        const appUuids =
+            PromoteService.getDataAppUuidsFromChanges(promotionChanges);
+        if (appUuids.length === 0) {
+            return promotionChanges;
+        }
+
+        const appGenerateService = this.getAppGenerateService?.();
+        if (!appGenerateService) {
+            throw new ParameterError(
+                'Data apps are not available in this instance',
+            );
+        }
+
+        const promotedApps = await appGenerateService.promoteAppsForDashboard(
+            user,
+            sourceProjectUuid,
+            appUuids,
+        );
+        const appUuidMap = new Map(
+            promotedApps.map(({ sourceAppUuid, upstreamAppUuid }) => [
+                sourceAppUuid,
+                upstreamAppUuid,
+            ]),
+        );
+        const appVersionMap = new Map(
+            promotedApps.map(({ sourceAppUuid, upstreamAppVersion }) => [
+                sourceAppUuid,
+                upstreamAppVersion,
+            ]),
+        );
+
+        const updatedDashboards = promotionChanges.dashboards.map(
+            (dashboardChange) => ({
+                ...dashboardChange,
+                data: {
+                    ...dashboardChange.data,
+                    tiles: dashboardChange.data.tiles.map((tile) => {
+                        if (
+                            !isDashboardDataAppTileType(tile) ||
+                            !tile.properties.appUuid
+                        ) {
+                            return tile;
+                        }
+                        const upstreamAppUuid = appUuidMap.get(
+                            tile.properties.appUuid,
+                        );
+                        // No mapping → the app was soft-deleted and skipped;
+                        // leave the placeholder tile pointing at its original
+                        // reference.
+                        if (!upstreamAppUuid) {
+                            return tile;
+                        }
+                        return {
+                            ...tile,
+                            properties: {
+                                ...tile.properties,
+                                appUuid: upstreamAppUuid,
+                                appDeletedAt: null,
+                            },
+                        };
+                    }),
+                },
+            }),
+        );
+
+        const updatedCharts = promotionChanges.charts.map((chartChange) => {
+            const { chartConfig } = chartChange.data;
+            if (
+                chartConfig.type !== ChartType.DATA_APP_VIZ ||
+                !chartConfig.config?.dataAppVizUuid
+            ) {
+                return chartChange;
+            }
+            const upstreamAppUuid = appUuidMap.get(
+                chartConfig.config.dataAppVizUuid,
+            );
+            const upstreamAppVersion = appVersionMap.get(
+                chartConfig.config.dataAppVizUuid,
+            );
+            // A skipped viz has no upstream replacement. Keep the complete
+            // binding so a placeholder chart remains pinned to the version it
+            // was saved with if that original reference becomes available.
+            if (!upstreamAppUuid || upstreamAppVersion === undefined) {
+                return chartChange;
+            }
+            return {
+                ...chartChange,
+                data: {
+                    ...chartChange.data,
+                    chartConfig: {
+                        ...chartConfig,
+                        config: {
+                            ...chartConfig.config,
+                            dataAppVizUuid: upstreamAppUuid,
+                            dataAppVizVersion: upstreamAppVersion,
+                        },
+                    },
+                },
+            };
+        });
+
+        return {
+            ...promotionChanges,
+            dashboards: updatedDashboards,
+            charts: updatedCharts,
+        };
+    }
+
+    /**
+     * Read-only diff of the data apps a dashboard promotion would create/update,
+     * for the promote confirmation dialog. Mirrors how `getPromoteDashboardDiff`
+     * surfaces charts and SQL charts. Returns [] when the dashboard has no
+     * DATA_APP tiles.
+     */
+    private async getDataAppDiffChanges(
+        user: SessionUser,
+        sourceProjectUuid: string,
+        promotionChanges: PromotionChanges,
+    ): Promise<NonNullable<PromotionChanges['dataApps']>> {
+        const appUuids =
+            PromoteService.getDataAppUuidsFromChanges(promotionChanges);
+        if (appUuids.length === 0) {
+            return [];
+        }
+
+        const appGenerateService = this.getAppGenerateService?.();
+        if (!appGenerateService) {
+            throw new ParameterError(
+                'Data apps are not available in this instance',
+            );
+        }
+
+        const changes = await appGenerateService.getDataAppPromoteChanges(
+            user,
+            sourceProjectUuid,
+            appUuids,
+        );
+
+        return changes.map(({ uuid, name, action }) => ({
+            action:
+                action === 'create'
+                    ? PromotionAction.CREATE
+                    : PromotionAction.UPDATE,
+            data: { uuid, name },
+        }));
+    }
+
     async promoteChart(user: SessionUser, chartUuid: string) {
         const { projectUuid } =
             await this.savedChartModel.getSummary(chartUuid);
@@ -1002,8 +1582,10 @@ export class PromoteService extends BaseService {
             );
         }
         try {
+            const auditedAbility = this.createAuditedAbility(user);
             PromoteService.checkPromoteChartPermissions(
-                user,
+                auditedAbility,
+                user.organizationUuid!,
                 promotedChart,
                 upstreamChart,
             );
@@ -1017,6 +1599,14 @@ export class PromoteService extends BaseService {
                 user,
                 projectUuid,
                 promotionChanges,
+            );
+
+            // Promote the chart's custom chart type (if any) and remap the
+            // viz binding before the chart config is persisted upstream.
+            promotionChanges = await this.upsertDataApps(
+                user,
+                promotionChanges,
+                projectUuid,
             );
 
             promotionChanges = await this.upsertCharts(user, promotionChanges);
@@ -1058,13 +1648,29 @@ export class PromoteService extends BaseService {
             chartUuid,
         );
 
+        const auditedAbility = this.createAuditedAbility(user);
+        PromoteService.checkPromoteChartPermissions(
+            auditedAbility,
+            user.organizationUuid!,
+            promotedChart,
+            upstreamChart,
+        );
+
         const promotionChanges = await this.getChartChanges(
             promotedChart,
             upstreamChart,
         );
 
+        // A chart bound to a custom chart type promotes that viz with it.
+        const dataApps = await this.getDataAppDiffChanges(
+            user,
+            projectUuid,
+            promotionChanges,
+        );
+
         return {
             ...promotionChanges,
+            dataApps,
             spaces: PromoteService.sortSpaceChanges(promotionChanges.spaces),
         };
     }
@@ -1093,6 +1699,14 @@ export class PromoteService extends BaseService {
                 upstreamProjectUuid,
                 savedSqlUuid,
             );
+
+        const auditedAbility = this.createAuditedAbility(user);
+        PromoteService.checkPromoteSqlChartPermissions(
+            auditedAbility,
+            user.organizationUuid!,
+            promotedSqlChart,
+            upstreamSqlChart,
+        );
 
         const { promotionChanges, sqlChartChange } =
             await this.getSqlChartChanges(promotedSqlChart, upstreamSqlChart);
@@ -1137,10 +1751,18 @@ export class PromoteService extends BaseService {
             );
 
         try {
+            const auditedAbility = this.createAuditedAbility(user);
             PromoteService.checkPromoteSqlChartPermissions(
-                user,
+                auditedAbility,
+                user.organizationUuid!,
                 promotedSqlChart,
                 upstreamSqlChart,
+            );
+
+            const sqlChartBindings = await this.getPromotedSqlChartBindings(
+                savedSqlChart.project.projectUuid,
+                upstreamProjectUuid,
+                [promotedSqlChart.chart],
             );
 
             const { promotionChanges, sqlChartChange } =
@@ -1155,9 +1777,12 @@ export class PromoteService extends BaseService {
                 promotionChanges,
             );
 
-            await this.upsertSqlCharts(user, promotionChangesWithSpaces, [
-                sqlChartChange,
-            ]);
+            await this.upsertSqlCharts(
+                user,
+                promotionChangesWithSpaces,
+                [sqlChartChange],
+                sqlChartBindings,
+            );
 
             const promotedSqlChartUuid =
                 await this.getUpstreamPromotedSqlChartUuid(
@@ -1175,16 +1800,57 @@ export class PromoteService extends BaseService {
         }
     }
 
-    async getPromoteDashboardDiff(user: SessionUser, dashboardUuid: string) {
-        const dashboard =
-            await this.dashboardModel.getByIdOrSlug(dashboardUuid);
+    /**
+     * Resolve a dashboard uuid-or-slug for promotion. Slugs are duplicated
+     * across preview projects by design, so an unscoped slug lookup must not
+     * guess — it only resolves when the slug is unique within the caller's
+     * organization; otherwise callers must pass projectUuid or use the uuid.
+     */
+    private async getDashboardToPromote(
+        user: SessionUser,
+        dashboardUuidOrSlug: UuidOrSlug,
+        projectUuid?: UUID,
+    ): Promise<DashboardDAO> {
+        if (projectUuid) {
+            return this.dashboardModel.getByIdOrSlug(dashboardUuidOrSlug, {
+                projectUuid,
+            });
+        }
+        if (isValidUuid(dashboardUuidOrSlug)) {
+            return this.dashboardModel.getByIdOrSlug(dashboardUuidOrSlug);
+        }
+        const matches = await this.dashboardModel.find({
+            slug: dashboardUuidOrSlug,
+            organizationUuid: user.organizationUuid!,
+        });
+        if (matches.length === 0) {
+            throw new NotFoundError('Dashboard not found');
+        }
+        if (matches.length > 1) {
+            throw new ParameterError(
+                `Multiple dashboards match slug '${dashboardUuidOrSlug}'. Use the dashboard uuid or pass projectUuid to disambiguate.`,
+            );
+        }
+        return this.dashboardModel.getByIdOrSlug(matches[0].uuid);
+    }
+
+    async getPromoteDashboardDiff(
+        user: SessionUser,
+        dashboardUuidOrSlug: UuidOrSlug,
+        options?: { projectUuid?: UUID },
+    ) {
+        const dashboard = await this.getDashboardToPromote(
+            user,
+            dashboardUuidOrSlug,
+            options?.projectUuid,
+        );
 
         const { upstreamProjectUuid } = await this.projectModel.getSummary(
             dashboard.projectUuid,
         );
         if (!upstreamProjectUuid)
             throw new NotFoundError(
-                'This chart does not have an upstream project',
+                "This dashboard's project does not have an upstream project",
             );
 
         const { promotedDashboard, upstreamDashboard } =
@@ -1195,12 +1861,44 @@ export class PromoteService extends BaseService {
             );
 
         // We're going to be updating this structure with new UUIDs if we need to create the items (eg: spaces)
-        const [promotionChanges, , , sqlCharts] =
+        const [promotionChanges, promotedCharts, promotedSqlCharts, sqlCharts] =
             await this.getPromotionDashboardChanges(
                 user,
                 promotedDashboard,
                 upstreamDashboard,
             );
+
+        const auditedAbility = this.createAuditedAbility(user);
+        PromoteService.checkPromoteDashboardPermissions(
+            auditedAbility,
+            user.organizationUuid!,
+            promotedDashboard,
+            upstreamDashboard,
+        );
+        promotedCharts.forEach(({ promotedChart, upstreamChart }) =>
+            PromoteService.checkPromoteChartPermissions(
+                auditedAbility,
+                user.organizationUuid!,
+                promotedChart,
+                upstreamChart,
+                promotedDashboard,
+            ),
+        );
+        promotedSqlCharts.forEach(({ promotedSqlChart, upstreamSqlChart }) =>
+            PromoteService.checkPromoteSqlChartPermissions(
+                auditedAbility,
+                user.organizationUuid!,
+                promotedSqlChart,
+                upstreamSqlChart,
+                promotedDashboard,
+            ),
+        );
+
+        const dataApps = await this.getDataAppDiffChanges(
+            user,
+            dashboard.projectUuid,
+            promotionChanges,
+        );
 
         return {
             ...promotionChanges,
@@ -1208,6 +1906,7 @@ export class PromoteService extends BaseService {
                 action: sqlChartChange.action,
                 data: PromoteService.toPromotedSqlChartChange(sqlChartChange),
             })),
+            dataApps,
             spaces: PromoteService.sortSpaceChanges(promotionChanges.spaces),
         };
     }
@@ -1241,16 +1940,33 @@ export class PromoteService extends BaseService {
             return promotionChanges;
         }
 
+        const agentIdentity = getContentWriteAgentIdentity({
+            userUuid: user.userUuid,
+            organizationUuid: user.organizationUuid ?? null,
+        });
         const promotedDashboard = dashboardChange.data;
         // Update dashboard with new space if it was created
         const newDashboard = await this.dashboardModel.create(
             promotedDashboard.spaceUuid,
             {
                 ...promotedDashboard,
+                ownerUserUuid: promotedDashboard.owner?.userUuid ?? null,
                 forceSlug: true,
             },
             user,
             promotedDashboard.projectUuid,
+            agentIdentity,
+            (trx, versionUuid, objectUuid) =>
+                logAgentContentWrite({
+                    trx,
+                    model: this.agentActionLogModel,
+                    projectUuid: promotedDashboard.projectUuid,
+                    agentIdentity,
+                    objectType: 'dashboard',
+                    objectUuid,
+                    versionUuid,
+                    action: 'create',
+                }),
         );
 
         // Update charts within dashboards with the new dashboard uuid
@@ -1296,23 +2012,64 @@ export class PromoteService extends BaseService {
             return promotionChanges;
         }
 
+        const agentIdentity = getContentWriteAgentIdentity({
+            userUuid: user.userUuid,
+            organizationUuid: user.organizationUuid ?? null,
+        });
         const promotedDashboard = dahsboardChange.data;
-
-        if (dahsboardChange.action === PromotionAction.UPDATE) {
-            // TODO Check if we need to update the dashboard
-            // We also update dashboard name and description if they have changed
-            await this.dashboardModel.update(promotedDashboard.uuid, {
-                name: promotedDashboard.name,
-                description: promotedDashboard.description,
-                spaceUuid: promotedDashboard.spaceUuid,
-            });
-        }
 
         const updatedDashboard = await this.dashboardModel.addVersion(
             promotedDashboard.uuid,
             promotedDashboard,
             user,
             promotedDashboard.projectUuid,
+            undefined,
+            agentIdentity,
+            async (trx, versionUuid, objectUuid) => {
+                if (dahsboardChange.action === PromotionAction.UPDATE) {
+                    const currentDashboard =
+                        await this.dashboardModel.getByIdOrSlug(
+                            promotedDashboard.uuid,
+                            { projectUuid: promotedDashboard.projectUuid },
+                            trx,
+                        );
+                    if (currentDashboard.slug !== promotedDashboard.slug) {
+                        await this.dashboardModel.renameSlug(
+                            {
+                                projectUuid: promotedDashboard.projectUuid,
+                                dashboardUuid: promotedDashboard.uuid,
+                                from: currentDashboard.slug,
+                                to: promotedDashboard.slug,
+                            },
+                            trx,
+                        );
+                    }
+                    // TODO Check if we need to update the dashboard
+                    // We also update dashboard name and description if they have changed
+                    await this.dashboardModel.update(
+                        promotedDashboard.uuid,
+                        {
+                            name: promotedDashboard.name,
+                            description: promotedDashboard.description,
+                            spaceUuid: promotedDashboard.spaceUuid,
+                            ownerUserUuid:
+                                promotedDashboard.owner?.userUuid ?? null,
+                        },
+                        trx,
+                    );
+                }
+
+                await logAgentContentWrite({
+                    trx,
+                    model: this.agentActionLogModel,
+                    projectUuid: promotedDashboard.projectUuid,
+                    agentIdentity,
+                    objectType: 'dashboard',
+                    objectUuid,
+                    versionUuid,
+                    action: 'update',
+                });
+            },
         );
 
         return {
@@ -1327,6 +2084,67 @@ export class PromoteService extends BaseService {
                     },
                 },
             ],
+        };
+    }
+
+    /**
+     * Resolve a single source space (by its path) into the upstream project,
+     * creating it — and any missing ancestors — when absent. Returns the
+     * upstream space uuid.
+     *
+     * Data-app promotion needs only to place one entity into a space, so this
+     * builds the minimal space change set (the space plus its ancestors) and
+     * reuses `upsertSpaces` for the actual create + parent-chain + permission
+     * copy, rather than assembling a full chart/dashboard PromotionChanges.
+     */
+    async getOrCreateUpstreamSpace(
+        user: SessionUser,
+        sourceSpaceUuid: string,
+        upstreamProjectUuid: string,
+    ): Promise<string> {
+        const { path, projectUuid, spaceChanges } =
+            await this.getUpstreamSpaceChanges(
+                sourceSpaceUuid,
+                upstreamProjectUuid,
+            );
+        const result = await this.upsertSpaces(user, projectUuid, {
+            spaces: spaceChanges,
+            dashboards: [],
+            charts: [],
+        });
+        return PromoteService.getSpaceByPath(result.spaces, path).uuid;
+    }
+
+    /** Changes that mirror a space and its ancestors into the upstream project. */
+    private async getUpstreamSpaceChanges(
+        sourceSpaceUuid: string,
+        upstreamProjectUuid: string,
+    ): Promise<{
+        path: string;
+        projectUuid: string;
+        spaceChanges: PromotionChanges['spaces'];
+    }> {
+        const promotedSpace =
+            await this.spaceModel.getSpaceSummary(sourceSpaceUuid);
+
+        const ancestorUuids = await this.spaceModel.getSpaceAncestors({
+            spaceUuid: sourceSpaceUuid,
+            projectUuid: promotedSpace.projectUuid,
+        });
+        const ancestors =
+            ancestorUuids.length > 0
+                ? await this.spaceModel.find({ spaceUuids: ancestorUuids })
+                : [];
+
+        const spaceChanges = await Promise.all(
+            [promotedSpace, ...ancestors].map((space) =>
+                this.getSpaceChange(upstreamProjectUuid, space),
+            ),
+        );
+        return {
+            path: promotedSpace.path,
+            projectUuid: promotedSpace.projectUuid,
+            spaceChanges,
         };
     }
 
@@ -1358,7 +2176,18 @@ export class PromoteService extends BaseService {
             .map((change) => change.data.path);
         const deepestPaths = getDeepestPaths(paths);
 
-        const newSpaces = new Map<string, Space>();
+        const newSpaces = new Map<
+            string,
+            Omit<
+                Space,
+                | 'queries'
+                | 'dashboards'
+                | 'access'
+                | 'groupsAccess'
+                | 'childSpaces'
+                | 'inheritsFromOrgOrProject'
+            >
+        >();
 
         for await (const deepestPath of deepestPaths) {
             const filteredSortedSpaceChanges = spaceChanges
@@ -1416,8 +2245,7 @@ export class PromoteService extends BaseService {
 
                 const space = await this.spaceModel.createSpace(
                     {
-                        isPrivate: data.isPrivate,
-                        inheritParentPermissions: !data.isPrivate,
+                        inheritParentPermissions: data.inheritParentPermissions,
                         name: data.name,
                         parentSpaceUuid,
                     },
@@ -1429,7 +2257,7 @@ export class PromoteService extends BaseService {
                 );
                 parentSpaceUuid = space.uuid;
 
-                if (data.isPrivate) {
+                if (!data.inheritParentPermissions) {
                     const [ctx, groupsAccess] = await Promise.all([
                         this.spacePermissionService.getAllSpaceAccessContext(
                             data.uuid,
@@ -1471,6 +2299,9 @@ export class PromoteService extends BaseService {
                 ...space,
                 chartCount: 0,
                 dashboardCount: 0,
+                childSpaceCount: 0,
+                appCount: 0,
+                documentCount: 0,
             };
             return {
                 action: PromotionAction.CREATE,
@@ -2011,10 +2842,26 @@ export class PromoteService extends BaseService {
                   })
                 : [];
 
-        const existingUpstreamDashboards = await this.dashboardModel.find({
-            projectUuid: upstreamProjectUuid,
-            slug: dashboard.slug,
-        });
+        const mappedUpstreamDashboardUuid =
+            dashboard.projectUuid === upstreamProjectUuid
+                ? null
+                : await this.projectModel.getUpstreamDashboardUuidFromPreview(
+                      dashboard.projectUuid,
+                      dashboard.uuid,
+                  );
+        const existingUpstreamDashboards = mappedUpstreamDashboardUuid
+            ? [
+                  await this.dashboardModel.getByIdOrSlug(
+                      mappedUpstreamDashboardUuid,
+                      {
+                          projectUuid: upstreamProjectUuid,
+                      },
+                  ),
+              ]
+            : await this.dashboardModel.find({
+                  projectUuid: upstreamProjectUuid,
+                  slug: dashboard.slug,
+              });
         if (existingUpstreamDashboards.length > 1) {
             throw new AlreadyExistsError(
                 `There are multiple dashboards with the same identifier ${dashboard.slug}`,
@@ -2031,27 +2878,26 @@ export class PromoteService extends BaseService {
             );
         }
 
-        const promotedCtx =
-            await this.spacePermissionService.getSpaceAccessContext(
-                user.userUuid,
-                promotedSpace.uuid,
-            );
+        const promotedCtx = await this.spacePermissionService.resolveAccess(
+            user.userUuid,
+            { type: 'space', spaceUuid: promotedSpace.uuid },
+        );
 
         const promotedDashboard: PromotedDashboard = {
             dashboard,
             projectUuid: dashboard.projectUuid,
             space: promotedSpace,
             spaces: promotedSpaceAncestors,
-            access: promotedCtx.access,
+            spaceAccessContext: promotedCtx,
         };
         const upstreamSpace =
             upstreamSpaces.length === 1 ? upstreamSpaces[0] : undefined;
 
         const upstreamCtx = upstreamSpace
-            ? await this.spacePermissionService.getSpaceAccessContext(
-                  user.userUuid,
-                  upstreamSpace.uuid,
-              )
+            ? await this.spacePermissionService.resolveAccess(user.userUuid, {
+                  type: 'space',
+                  spaceUuid: upstreamSpace.uuid,
+              })
             : undefined;
 
         const upstreamDashboard: UpstreamDashboard = {
@@ -2061,22 +2907,29 @@ export class PromoteService extends BaseService {
                     : undefined,
             projectUuid: upstreamProjectUuid,
             space: upstreamSpace,
-            access: upstreamCtx?.access ?? [],
+            spaceAccessContext: upstreamCtx,
         };
 
         return { promotedDashboard, upstreamDashboard };
     }
 
-    async promoteDashboard(user: SessionUser, dashboardUuid: string) {
-        const dashboard =
-            await this.dashboardModel.getByIdOrSlug(dashboardUuid);
+    async promoteDashboard(
+        user: SessionUser,
+        dashboardUuidOrSlug: UuidOrSlug,
+        options?: { projectUuid?: UUID },
+    ) {
+        const dashboard = await this.getDashboardToPromote(
+            user,
+            dashboardUuidOrSlug,
+            options?.projectUuid,
+        );
 
         const { upstreamProjectUuid } = await this.projectModel.getSummary(
             dashboard.projectUuid,
         );
         if (!upstreamProjectUuid)
             throw new NotFoundError(
-                'This chart does not have an upstream project',
+                "This dashboard's project does not have an upstream project",
             );
 
         const { promotedDashboard, upstreamDashboard } =
@@ -2096,8 +2949,10 @@ export class PromoteService extends BaseService {
             );
 
         try {
+            const auditedAbility = this.createAuditedAbility(user);
             PromoteService.checkPromoteDashboardPermissions(
-                user,
+                auditedAbility,
+                user.organizationUuid!,
                 promotedDashboard,
                 upstreamDashboard,
             );
@@ -2105,7 +2960,8 @@ export class PromoteService extends BaseService {
             // Check permissions for all chart tiles
             promotedCharts.forEach(({ promotedChart, upstreamChart }) =>
                 PromoteService.checkPromoteChartPermissions(
-                    user,
+                    auditedAbility,
+                    user.organizationUuid!,
                     promotedChart,
                     upstreamChart,
                     promotedDashboard,
@@ -2114,11 +2970,20 @@ export class PromoteService extends BaseService {
             promotedSqlCharts.forEach(
                 ({ promotedSqlChart, upstreamSqlChart }) =>
                     PromoteService.checkPromoteSqlChartPermissions(
-                        user,
+                        auditedAbility,
+                        user.organizationUuid!,
                         promotedSqlChart,
                         upstreamSqlChart,
                         promotedDashboard,
                     ),
+            );
+
+            const sqlChartBindings = await this.getPromotedSqlChartBindings(
+                dashboard.projectUuid,
+                upstreamProjectUuid,
+                promotedSqlCharts.map(
+                    ({ promotedSqlChart }) => promotedSqlChart.chart,
+                ),
             );
 
             // at this point, all permisions checks are done, so we can safely promote the dashboard and charts.
@@ -2136,6 +3001,16 @@ export class PromoteService extends BaseService {
                 promotionChanges,
             );
 
+            // Promote embedded data apps and chart types, remapping tiles and
+            // chart viz bindings. Must run before upsertCharts persists chart
+            // configs and before updateDashboard persists tiles (the tile FK
+            // needs the upstream apps row).
+            promotionChanges = await this.upsertDataApps(
+                user,
+                promotionChanges,
+                dashboard.projectUuid,
+            );
+
             // Update or create charts
             // and return the list of dashboard.tiles updates with the new chart uuids
             promotionChanges = await this.upsertCharts(
@@ -2148,6 +3023,7 @@ export class PromoteService extends BaseService {
                 user,
                 promotionChanges,
                 sqlChanges,
+                sqlChartBindings,
             );
 
             promotionChanges = await this.updateDashboard(
@@ -2186,5 +3062,382 @@ export class PromoteService extends BaseService {
             );
             throw e;
         }
+    }
+
+    /** Read-only preview of promoting a Document to its upstream project. */
+    async getPromoteDocumentDiff(
+        account: RegisteredAccount,
+        projectUuid: string,
+        documentUuid: UUID,
+    ): Promise<PromotionChanges> {
+        const { source, upstream, upstreamProjectUuid, spaceChanges } =
+            await this.getDocumentPromotion(account, projectUuid, documentUuid);
+        const { bindings, missingAppUuids } = await this.getDataAppVizBindings(
+            projectUuid,
+            upstreamProjectUuid,
+            source.version.content,
+        );
+        const dataAppChanges =
+            missingAppUuids.length > 0
+                ? await this.getRequiredAppGenerateService().getDataAppPromoteChanges(
+                      toSessionUser(account),
+                      projectUuid,
+                      missingAppUuids,
+                  )
+                : [];
+        const isUnchanged =
+            upstream !== null &&
+            upstream.spaceUuid ===
+                PromoteService.getSpaceByPath(spaceChanges, source.spacePath)
+                    .uuid &&
+            upstream.name === source.name &&
+            upstream.description === source.description &&
+            isEqual(
+                bindDataAppVizs(upstream.version.content, new Map()),
+                bindDataAppVizs(source.version.content, bindings),
+            );
+        const getAction = () => {
+            if (upstream === null) {
+                return PromotionAction.CREATE;
+            }
+            return isUnchanged
+                ? PromotionAction.NO_CHANGES
+                : PromotionAction.UPDATE;
+        };
+        return {
+            spaces: PromoteService.sortSpaceChanges(spaceChanges),
+            dashboards: [],
+            charts: [],
+            dataApps: dataAppChanges.map(({ uuid, name, action }) => ({
+                action:
+                    action === 'create'
+                        ? PromotionAction.CREATE
+                        : PromotionAction.UPDATE,
+                data: { uuid, name },
+            })),
+            documents: [
+                {
+                    action: getAction(),
+                    data: {
+                        uuid: upstream?.documentUuid ?? source.documentUuid,
+                        name: source.name,
+                    },
+                },
+            ],
+        };
+    }
+
+    /**
+     * Upstream writes go through DocumentService, which enforces the flag,
+     * permissions and chart validation. Unchanged parts are skipped, so a
+     * retried promotion writes nothing new.
+     */
+    async promoteDocument(
+        account: RegisteredAccount,
+        projectUuid: string,
+        documentUuid: UUID,
+    ): Promise<Document> {
+        const documentService = this.getDocumentService();
+        const { source, upstream, upstreamProjectUuid } =
+            await this.getDocumentPromotion(account, projectUuid, documentUuid);
+        const user = toSessionUser(account);
+        const { bindings, missingAppUuids } = await this.getDataAppVizBindings(
+            projectUuid,
+            upstreamProjectUuid,
+            source.version.content,
+        );
+        const promotedBindings = await this.promoteDataAppVizs(
+            user,
+            projectUuid,
+            missingAppUuids,
+        );
+        const content = await this.promoteLinkedCharts(
+            user,
+            projectUuid,
+            bindDataAppVizs(
+                source.version.content,
+                new Map([...bindings, ...promotedBindings]),
+            ),
+        );
+        const spaceUuid = await this.getOrCreateUpstreamSpace(
+            user,
+            source.spaceUuid,
+            upstreamProjectUuid,
+        );
+        const change = { source: 'promotion' as const };
+
+        if (upstream === null) {
+            return documentService.create(
+                account,
+                upstreamProjectUuid,
+                {
+                    name: source.name,
+                    slug: source.slug,
+                    description: source.description,
+                    spaceUuid,
+                    schemaVersion: source.version.schemaVersion,
+                    content,
+                },
+                change,
+            );
+        }
+        // Content first: it is the write most likely to be rejected upstream.
+        if (
+            !isEqual(
+                content,
+                bindDataAppVizs(upstream.version.content, new Map()),
+            )
+        ) {
+            await documentService.updateContent(
+                account,
+                upstreamProjectUuid,
+                upstream.documentUuid,
+                { baseVersionUuid: upstream.version.versionUuid, content },
+                { change },
+            );
+        }
+        if (
+            source.name !== upstream.name ||
+            source.description !== upstream.description
+        ) {
+            await documentService.updateMetadata(
+                account,
+                upstreamProjectUuid,
+                upstream.documentUuid,
+                { name: source.name, description: source.description },
+                { change },
+            );
+        }
+        if (upstream.spaceUuid !== spaceUuid) {
+            await documentService.moveToSpace(
+                account,
+                {
+                    projectUuid: upstreamProjectUuid,
+                    itemUuid: upstream.documentUuid,
+                    targetSpaceUuid: spaceUuid,
+                },
+                { change },
+            );
+        }
+        return documentService.get(
+            account,
+            upstreamProjectUuid,
+            upstream.documentUuid,
+        );
+    }
+
+    /**
+     * Promote the saved charts a Document links to, as a dashboard promotes
+     * its charts, and point the links at the upstream copies.
+     */
+    private async promoteLinkedCharts(
+        user: SessionUser,
+        projectUuid: string,
+        content: DocumentContent,
+    ): Promise<DocumentContent> {
+        const links = getDocumentSavedChartLinks(content);
+        const promote = async (
+            kind: DocumentSavedChartKind,
+            uuid: string,
+        ): Promise<string> =>
+            kind === 'chart'
+                ? (await this.promoteChart(user, uuid)).uuid
+                : (await this.promoteSqlChart(user, projectUuid, uuid))
+                      .savedSqlUuid;
+        const upstreamUuids = new Map<string, string>();
+        // Sequential: promotions may create the same upstream Spaces
+        // eslint-disable-next-line no-restricted-syntax
+        for (const { kind, attributes } of links) {
+            const key = `${kind}:${attributes.uuid}`;
+            if (attributes.uuid && !upstreamUuids.has(key)) {
+                // eslint-disable-next-line no-await-in-loop
+                upstreamUuids.set(key, await promote(kind, attributes.uuid));
+            }
+        }
+        return mapDocumentSavedChartLinks(content, ({ kind, attributes }) => {
+            const upstreamUuid = upstreamUuids.get(
+                `${kind}:${attributes.uuid}`,
+            );
+            return upstreamUuid === undefined
+                ? attributes
+                : { ...attributes, uuid: upstreamUuid };
+        });
+    }
+
+    private async getDocumentPromotion(
+        account: RegisteredAccount,
+        projectUuid: string,
+        documentUuid: UUID,
+    ) {
+        const documentService = this.getDocumentService();
+        const document = await documentService.get(
+            account,
+            projectUuid,
+            documentUuid,
+        );
+        const { spaceUuid } = document;
+        if (spaceUuid === null) {
+            throw new ParameterError(
+                'Move this personal Document to a Space before promoting it',
+            );
+        }
+        const source = { ...document, spaceUuid };
+        const { upstreamProjectUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        if (!upstreamProjectUuid) {
+            throw new NotFoundError(
+                'This Document does not have an upstream project',
+            );
+        }
+        const ability = this.createAuditedAbility(account);
+        const upstreamProject =
+            await this.projectModel.getSummary(upstreamProjectUuid);
+        if (ability.cannot('view', subject('Project', upstreamProject))) {
+            throw new NotFoundError('Upstream project not found');
+        }
+
+        const [upstream, { path, spaceChanges }] = await Promise.all([
+            documentService
+                .getBySlug(account, upstreamProjectUuid, source.slug)
+                .catch((error: unknown) => {
+                    if (error instanceof NotFoundError) {
+                        return null;
+                    }
+                    throw error;
+                }),
+            this.getUpstreamSpaceChanges(source.spaceUuid, upstreamProjectUuid),
+        ]);
+        await Promise.all(
+            spaceChanges
+                .filter(({ action }) => action !== PromotionAction.NO_CHANGES)
+                .map(async ({ action, data }) => {
+                    const isNew = action === PromotionAction.CREATE;
+                    PromoteService.checkPromoteSpacePermissions(
+                        ability,
+                        source.organizationUuid,
+                        {
+                            projectUuid: upstreamProjectUuid,
+                            space: isNew ? undefined : data,
+                            spaceAccessContext: isNew
+                                ? undefined
+                                : await this.spacePermissionService.resolveAccess(
+                                      account.user.userUuid,
+                                      { type: 'space', spaceUuid: data.uuid },
+                                  ),
+                        },
+                    );
+                }),
+        );
+        return {
+            source: { ...source, spacePath: path },
+            upstream,
+            upstreamProjectUuid,
+            spaceChanges,
+        };
+    }
+
+    /**
+     * Custom chart types linked upstream are reused at their latest renderable
+     * version, so promotions don't mint a new chart type version each time.
+     */
+    private async getDataAppVizBindings(
+        sourceProjectUuid: string,
+        upstreamProjectUuid: string,
+        content: DocumentContent,
+    ): Promise<{
+        bindings: Map<string, DataAppVizBinding>;
+        missingAppUuids: string[];
+    }> {
+        const appUuids = [
+            ...new Set(
+                Object.values(content.charts).flatMap(
+                    (chart) => getDataAppVizUuid(chart) ?? [],
+                ),
+            ),
+        ];
+        const resolved = await Promise.all(
+            appUuids.map(async (appUuid) => {
+                const sourceApp = await this.appModel.findApp(
+                    appUuid,
+                    sourceProjectUuid,
+                );
+                if (!sourceApp) {
+                    throw new NotFoundError(
+                        `Custom chart type ${appUuid} used by this Document no longer exists`,
+                    );
+                }
+                const upstreamApp = sourceApp.upstream_app_uuid
+                    ? await this.appModel.findApp(
+                          sourceApp.upstream_app_uuid,
+                          upstreamProjectUuid,
+                      )
+                    : undefined;
+                const version = upstreamApp
+                    ? await this.appModel.getLatestRenderableDataAppVizVersion(
+                          upstreamApp.app_id,
+                      )
+                    : null;
+                return {
+                    appUuid,
+                    binding:
+                        upstreamApp && version
+                            ? {
+                                  appUuid: upstreamApp.app_id,
+                                  version: version.version,
+                              }
+                            : null,
+                };
+            }),
+        );
+        return {
+            bindings: new Map(
+                resolved.flatMap(({ appUuid, binding }) =>
+                    binding ? [[appUuid, binding]] : [],
+                ),
+            ),
+            missingAppUuids: resolved
+                .filter(({ binding }) => binding === null)
+                .map(({ appUuid }) => appUuid),
+        };
+    }
+
+    private getRequiredAppGenerateService(): AppGenerateService {
+        const appGenerateService = this.getAppGenerateService?.();
+        if (!appGenerateService) {
+            throw new ParameterError(
+                'Custom chart types are not available in this instance',
+            );
+        }
+        return appGenerateService;
+    }
+
+    private async promoteDataAppVizs(
+        user: SessionUser,
+        sourceProjectUuid: string,
+        appUuids: string[],
+    ): Promise<Map<string, DataAppVizBinding>> {
+        if (appUuids.length === 0) {
+            return new Map();
+        }
+        const promoted =
+            await this.getRequiredAppGenerateService().promoteAppsForDashboard(
+                user,
+                sourceProjectUuid,
+                appUuids,
+            );
+        // Chart types deleted meanwhile are skipped; their charts would dangle.
+        if (promoted.length !== appUuids.length) {
+            throw new ConflictError(
+                'A custom chart type used by this Document was deleted. Reload the Document and promote again.',
+            );
+        }
+        return new Map(
+            promoted.map(
+                ({ sourceAppUuid, upstreamAppUuid, upstreamAppVersion }) => [
+                    sourceAppUuid,
+                    { appUuid: upstreamAppUuid, version: upstreamAppVersion },
+                ],
+            ),
+        );
     }
 }

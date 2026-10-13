@@ -2,21 +2,21 @@ import { assertUnreachable, WarehouseTypes } from '@lightdash/common';
 import { Avatar } from '@mantine/core';
 import { IconDots } from '@tabler/icons-react';
 import MantineIcon, { type MantineIconSize } from '../../common/MantineIcon';
-import {
-    OtherWarehouse,
-    type SelectedWarehouse,
-    type WarehouseLabel,
-} from './types';
-
 // assets
 import Athena from './Assets/athena.svg';
 import BigQuery from './Assets/bigquery.svg';
 import ClickHouse from './Assets/clickhouse.svg';
 import Databricks from './Assets/databricks.svg';
+import DuckDB from './Assets/duckdb.svg';
 import PostgressLogo from './Assets/postgresql.svg';
 import Redshift from './Assets/redshift.svg';
 import Snowflake from './Assets/snowflake.svg';
 import Trino from './Assets/trino.svg';
+import {
+    OtherWarehouse,
+    type SelectedWarehouse,
+    type WarehouseLabel,
+} from './types';
 
 export const WarehouseTypeLabels: WarehouseLabel[] = [
     {
@@ -66,6 +66,12 @@ export const WarehouseTypeLabels: WarehouseLabel[] = [
         key: WarehouseTypes.ATHENA,
         iconType: 'image',
         image: Athena,
+    },
+    {
+        label: 'DuckDB',
+        key: WarehouseTypes.DUCKDB,
+        iconType: 'image',
+        image: DuckDB,
     },
     {
         label: 'Other',

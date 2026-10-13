@@ -10,7 +10,7 @@ import {
     ApiSchedulerRunsResponse,
     ApiSchedulersResponse,
     ApiTestSchedulerResponse,
-    AuthorizationError,
+    assertRegisteredAccount,
     KnexPaginateArgs,
     ReassignSchedulerOwnerRequest,
     SchedulerJobStatus,
@@ -19,6 +19,7 @@ import {
 import {
     Body,
     Delete,
+    Deprecated,
     Get,
     Middlewares,
     OperationId,
@@ -33,6 +34,8 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     parseEnumList,
     parseUuidList,
@@ -40,13 +43,12 @@ import {
 } from '../utils/inputValidation';
 import {
     allowApiKeyAuthentication,
+    getDeprecatedRouteMiddleware,
     isAuthenticated,
     unauthorisedInDemo,
 } from './authentication';
 import { BaseController } from './baseController';
-
-// Valid destination types (whitelist for parseWhitelistedList)
-const VALID_DESTINATIONS = ['email', 'slack', 'msteams', 'gsheets'] as const;
+import { VALID_SCHEDULER_RUN_DESTINATIONS } from './schedulerConstants';
 
 @Route('/api/v1/schedulers')
 @Response<ApiErrorPayload>('default', 'Error')
@@ -62,12 +64,22 @@ export class SchedulerController extends BaseController {
      * @param searchQuery search query to filter logs by scheduler name
      * @param statuses filter by log statuses (comma-separated)
      * @param createdByUserUuids filter by creator user UUIDs (comma-separated)
-     * @param destinations filter by destination types (comma-separated: email, slack, msteams)
+     * @param destinations filter by destination types (comma-separated: email, slack, msteams, googlechat)
+     *
+     * @deprecated Use GET /api/v1/schedulers/{projectUuid}/runs instead
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'Use GET /api/v1/schedulers/{projectUuid}/runs instead.',
+        }),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/{projectUuid}/logs')
     @OperationId('getSchedulerLogs')
+    @Deprecated()
     async getLogs(
         @Path() projectUuid: string,
         @Request() req: express.Request,
@@ -78,6 +90,7 @@ export class SchedulerController extends BaseController {
         @Query() createdByUserUuids?: string,
         @Query() destinations?: string,
     ): Promise<ApiSchedulerLogsResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         let paginateArgs: KnexPaginateArgs | undefined;
@@ -103,7 +116,7 @@ export class SchedulerController extends BaseController {
             results: await this.services
                 .getSchedulerService()
                 .getSchedulerLogs(
-                    req.user!,
+                    toSessionUser(req.account),
                     projectUuid,
                     paginateArgs,
                     searchQuery,
@@ -125,7 +138,7 @@ export class SchedulerController extends BaseController {
      * @param schedulerUuids filter by specific scheduler UUIDs (comma-separated)
      * @param statuses filter by run statuses (comma-separated: completed, partial_failure, failed, running, scheduled)
      * @param createdByUserUuids filter by creator user UUIDs (comma-separated)
-     * @param destinations filter by destination types (comma-separated: email, slack, msteams)
+     * @param destinations filter by destination types (comma-separated: email, slack, msteams, googlechat)
      * @param resourceType filter by resource type (chart or dashboard)
      * @param resourceUuids filter by resource UUIDs (comma-separated)
      */
@@ -148,6 +161,7 @@ export class SchedulerController extends BaseController {
         @Query() resourceType?: 'chart' | 'dashboard',
         @Query() resourceUuids?: string,
     ): Promise<ApiSchedulerRunsResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         let paginateArgs: KnexPaginateArgs | undefined;
@@ -172,7 +186,7 @@ export class SchedulerController extends BaseController {
             ),
             destinations: parseWhitelistedList(
                 destinations,
-                VALID_DESTINATIONS,
+                VALID_SCHEDULER_RUN_DESTINATIONS,
                 'destinations',
             ),
             resourceType,
@@ -184,7 +198,7 @@ export class SchedulerController extends BaseController {
             results: await this.services
                 .getSchedulerService()
                 .getSchedulerRuns(
-                    req.user!,
+                    toSessionUser(req.account),
                     projectUuid,
                     paginateArgs,
                     searchQuery,
@@ -208,13 +222,14 @@ export class SchedulerController extends BaseController {
         @Path() runId: string,
         @Request() req: express.Request,
     ): Promise<ApiSchedulerRunLogsResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         return {
             status: 'ok',
             results: await this.services
                 .getSchedulerService()
-                .getRunLogs(req.user!, runId),
+                .getRunLogs(toSessionUser(req.account), runId),
         };
     }
 
@@ -230,7 +245,7 @@ export class SchedulerController extends BaseController {
      * @param formats filter by scheduler formats (comma-separated)
      * @param resourceType filter by resource type (chart or dashboard)
      * @param resourceUuids filter by resource UUIDs (comma-separated)
-     * @param destinations filter by destination types (comma-separated: email, slack, msteams)
+     * @param destinations filter by destination types (comma-separated: email, slack, msteams, googlechat)
      * @param includeLatestRun include latest run information for each scheduler
      */
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
@@ -250,6 +265,7 @@ export class SchedulerController extends BaseController {
         @Query() destinations?: string,
         @Query() includeLatestRun?: boolean,
     ): Promise<ApiSchedulersResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         let paginateArgs: KnexPaginateArgs | undefined;
 
@@ -273,7 +289,7 @@ export class SchedulerController extends BaseController {
             results: await this.services
                 .getSchedulerService()
                 .getUserSchedulers(
-                    req.user!,
+                    toSessionUser(req.account),
                     paginateArgs,
                     searchQuery,
                     sort,
@@ -306,7 +322,7 @@ export class SchedulerController extends BaseController {
      * @param formats filter by scheduler formats (comma-separated)
      * @param resourceType filter by resource type (chart or dashboard)
      * @param resourceUuids filter by resource UUIDs (comma-separated)
-     * @param destinations filter by destination types (comma-separated: email, slack, msteams)
+     * @param destinations filter by destination types (comma-separated: email, slack, msteams, googlechat)
      */
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
     @SuccessResponse('200', 'Success')
@@ -327,6 +343,7 @@ export class SchedulerController extends BaseController {
         @Query() destinations?: string,
         @Query() includeLatestRun?: boolean,
     ): Promise<ApiSchedulersResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         let paginateArgs: KnexPaginateArgs | undefined;
 
@@ -360,7 +377,7 @@ export class SchedulerController extends BaseController {
             results: await this.services
                 .getSchedulerService()
                 .getSchedulers(
-                    req.user!,
+                    toSessionUser(req.account),
                     projectUuid,
                     paginateArgs,
                     searchQuery,
@@ -385,12 +402,13 @@ export class SchedulerController extends BaseController {
         @Path() schedulerUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiSchedulerAndTargetsResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getSchedulerService()
-                .getScheduler(req.user!, schedulerUuid),
+                .getScheduler(toSessionUser(req.account), schedulerUuid),
         };
     }
 
@@ -414,12 +432,17 @@ export class SchedulerController extends BaseController {
         @Request() req: express.Request,
         @Body() body: AnyType, // TODO: It should be UpdateSchedulerAndTargetsWithoutId but tsoa returns an error
     ): Promise<ApiSchedulerAndTargetsResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getSchedulerService()
-                .updateScheduler(req.user!, schedulerUuid, body),
+                .updateScheduler(
+                    toSessionUser(req.account),
+                    schedulerUuid,
+                    body,
+                ),
         };
     }
 
@@ -434,6 +457,7 @@ export class SchedulerController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('SchedulerController.patchEnabled'),
     ])
     @SuccessResponse('201', 'Updated')
     @Patch('{schedulerUuid}/enabled')
@@ -443,12 +467,17 @@ export class SchedulerController extends BaseController {
         @Request() req: express.Request,
         @Body() body: { enabled: boolean },
     ): Promise<ApiSchedulerAndTargetsResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getSchedulerService()
-                .setSchedulerEnabled(req.user!, schedulerUuid, body.enabled),
+                .setSchedulerEnabled(
+                    toSessionUser(req.account),
+                    schedulerUuid,
+                    body.enabled,
+                ),
         };
     }
 
@@ -472,17 +501,14 @@ export class SchedulerController extends BaseController {
         @Request() req: express.Request,
         @Body() body: ReassignSchedulerOwnerRequest,
     ): Promise<ApiReassignSchedulerOwnerResponse> {
-        if (!req.user) {
-            throw new AuthorizationError('User session not found');
-        }
-
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getSchedulerService()
                 .reassignSchedulerOwner(
-                    req.user,
+                    toSessionUser(req.account),
                     projectUuid,
                     body.schedulerUuids,
                     body.newOwnerUserUuid,
@@ -500,6 +526,7 @@ export class SchedulerController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('SchedulerController.delete'),
     ])
     @SuccessResponse('201', 'Deleted')
     @Delete('{schedulerUuid}')
@@ -511,10 +538,11 @@ export class SchedulerController extends BaseController {
         status: 'ok';
         results: undefined;
     }> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         await this.services
             .getSchedulerService()
-            .deleteScheduler(req.user!, schedulerUuid);
+            .deleteScheduler(toSessionUser(req.account), schedulerUuid);
         return {
             status: 'ok',
             results: undefined,
@@ -526,21 +554,33 @@ export class SchedulerController extends BaseController {
      * @summary Get scheduled jobs
      * @param schedulerUuid The uuid of the scheduler to update
      * @param req express request
+     *
+     * @deprecated This endpoint will be removed; there is no replacement
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-06-10'), {
+            suffixMessage:
+                'This endpoint will be removed; there is no replacement.',
+        }),
+        requireOAuthScopeOperation('SchedulerController.getJobs'),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('{schedulerUuid}/jobs')
     @OperationId('getScheduledJobs')
+    @Deprecated()
     async getJobs(
         @Path() schedulerUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiScheduledJobsResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getSchedulerService()
-                .getScheduledJobs(req.user!, schedulerUuid),
+                .getScheduledJobs(toSessionUser(req.account), schedulerUuid),
         };
     }
 
@@ -590,6 +630,7 @@ export class SchedulerController extends BaseController {
         @Request() req: express.Request,
         @Body() body: AnyType, // TODO: It should be CreateSchedulerAndTargets but tsoa returns an error
     ): Promise<ApiTestSchedulerResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
 
         return {
@@ -598,7 +639,7 @@ export class SchedulerController extends BaseController {
                 jobId: (
                     await this.services
                         .getSchedulerService()
-                        .sendScheduler(req.user!, body)
+                        .sendScheduler(toSessionUser(req.account), body)
                 ).jobId,
             },
         };
@@ -614,6 +655,7 @@ export class SchedulerController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('SchedulerController.postByUuid'),
     ])
     @SuccessResponse('200', 'Success')
     @Post('{schedulerUuid}/send')
@@ -622,6 +664,7 @@ export class SchedulerController extends BaseController {
         @Path() schedulerUuid: string,
         @Request() req: express.Request,
     ): Promise<ApiTestSchedulerResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
@@ -629,7 +672,10 @@ export class SchedulerController extends BaseController {
                 jobId: (
                     await this.services
                         .getSchedulerService()
-                        .sendSchedulerByUuid(req.user!, schedulerUuid)
+                        .sendSchedulerByUuid(
+                            toSessionUser(req.account),
+                            schedulerUuid,
+                        )
                 ).jobId,
             },
         };

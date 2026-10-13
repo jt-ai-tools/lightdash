@@ -1,0 +1,437 @@
+import type { AiAgentWithContext } from '@lightdash/common';
+import { McpService, McpToolName } from './McpService';
+
+type RegisteredToolCallback = (
+    args: Record<string, unknown>,
+    extra: Record<string, unknown>,
+) => Promise<unknown>;
+
+const mockRegisteredMcpTools = new Map<string, RegisteredToolCallback>();
+
+vi.mock('@sentry/node', () => ({
+    captureException: vi.fn(),
+    addBreadcrumb: vi.fn(),
+    getActiveSpan: () => undefined,
+    isEnabled: () => false,
+    startSpanManual: (_options: unknown, callback: CallableFunction) =>
+        callback({ spanContext: () => ({ spanId: 'span-id' }) }, vi.fn()),
+    wrapMcpServerWithSentry: (server: unknown) => server,
+}));
+
+vi.mock('@modelcontextprotocol/sdk/server/mcp.js', () => ({
+    McpServer: vi.fn().mockImplementation(
+        // eslint-disable-next-line prefer-arrow-callback
+        function MockMcpServer() {
+            return {
+                server: {
+                    registerCapabilities: vi.fn(),
+                    setRequestHandler: vi.fn(),
+                },
+                registerResource: vi.fn(),
+                registerPrompt: vi.fn(),
+                registerTool: vi.fn(
+                    (
+                        name: string,
+                        _config: Record<string, unknown>,
+                        callback: RegisteredToolCallback,
+                    ) => {
+                        mockRegisteredMcpTools.set(name, callback);
+                        return {};
+                    },
+                ),
+            };
+        },
+    ),
+}));
+
+const projectUuid = 'project-uuid';
+const organizationUuid = 'organization-uuid';
+const userUuid = 'user-uuid';
+const allowedSpaceUuid = 'allowed-space-uuid';
+const blockedSpaceUuid = 'blocked-space-uuid';
+
+const account = {
+    user: {
+        userUuid,
+        ability: {
+            can: vi.fn(() => true),
+            cannot: vi.fn(() => false),
+            relevantRuleFor: vi.fn(() => ({ inverted: false })),
+            rules: [],
+        },
+    },
+    organization: { organizationUuid },
+    authentication: { type: 'pat' },
+};
+
+const user = {
+    userUuid,
+    organizationUuid,
+    ability: account.user.ability,
+};
+
+const extra = {
+    signal: new AbortController().signal,
+    requestId: 'request-id',
+    sendNotification: vi.fn(),
+    sendRequest: vi.fn(),
+    authInfo: {
+        extra: {
+            user,
+            account,
+        },
+    },
+};
+
+const selectedAgent: AiAgentWithContext = {
+    uuid: 'agent-uuid',
+    projectUuid,
+    organizationUuid,
+    name: 'Finance',
+    description: 'Finance specialist',
+    imageUrl: null,
+    imageUrlSource: null,
+    tags: ['finance'],
+    integrations: [],
+    createdAt: new Date('2026-01-01'),
+    updatedAt: new Date('2026-01-01'),
+    instruction: 'Prioritize revenue metrics.',
+    groupAccess: [],
+    userAccess: [],
+    spaceAccess: [allowedSpaceUuid],
+    enableDataAccess: true,
+    enableSelfImprovement: true,
+    enableContentTools: true,
+    enableUserContext: false,
+    enableSqlMode: true,
+    adminOnly: false,
+    modelConfig: null,
+    providerCredentialUuid: null,
+    version: 1,
+    threadRetentionHours: null,
+    context: {
+        uuid: 'agent-uuid',
+        projectUuid,
+        name: 'Finance',
+        description: 'Finance specialist',
+        explores: ['orders'],
+        verifiedQuestions: ['What is monthly revenue?'],
+        instruction: 'Prioritize revenue metrics.',
+    },
+};
+
+const routeCandidates = [
+    selectedAgent,
+    {
+        ...selectedAgent,
+        uuid: 'agent-2',
+        name: 'General',
+        context: {
+            ...selectedAgent.context,
+            uuid: 'agent-2',
+            name: 'General',
+        },
+    },
+];
+
+const makeMcpService = () => {
+    const storedContext = {
+        projectUuid,
+        projectName: 'Project',
+        agentUuid: null as string | null,
+        agentName: null as string | null,
+        tags: ['finance-only'],
+    };
+
+    const mcpContextModel = {
+        getContext: vi.fn().mockImplementation(async () => ({
+            context: { ...storedContext },
+        })),
+        setContext: vi.fn().mockImplementation(async ({ context }) => {
+            Object.assign(storedContext, context);
+            return { context: { ...storedContext } };
+        }),
+    };
+
+    const aiAgentService = {
+        getAgent: vi.fn().mockResolvedValue(selectedAgent),
+    };
+
+    const aiAgentToolsService = {
+        createRuntime: vi.fn(({ spaceAccess, agentUuid }) => ({
+            listContent: vi.fn(async ({ spaceSlug }: { spaceSlug: null }) => {
+                const visibleSpaceUuids =
+                    spaceAccess?.length === 0 || !spaceAccess
+                        ? [allowedSpaceUuid, blockedSpaceUuid]
+                        : [allowedSpaceUuid, blockedSpaceUuid].filter((uuid) =>
+                              spaceAccess.includes(uuid),
+                          );
+
+                return {
+                    spaceSlug,
+                    items: visibleSpaceUuids.map((uuid) => ({
+                        contentType: 'space',
+                        name:
+                            uuid === allowedSpaceUuid
+                                ? 'Allowed Space'
+                                : 'Blocked Space',
+                        slug:
+                            uuid === allowedSpaceUuid
+                                ? 'allowed-space'
+                                : 'blocked-space',
+                        chartCount: 0,
+                        dashboardCount: 0,
+                        childSpaceCount: 0,
+                        appCount: 0,
+                        directAccess: true,
+                        agentUuid,
+                    })),
+                    pagination: {
+                        page: 1,
+                        pageSize: 25,
+                        totalResults: visibleSpaceUuids.length,
+                        totalPageCount: 1,
+                    },
+                };
+            }),
+        })),
+    };
+
+    const aiRouterService = {
+        routePromptToAgent: vi.fn().mockResolvedValue({
+            candidates: routeCandidates,
+            suggestedAgent: selectedAgent,
+            routerUuid: 'router-uuid',
+            confidence: 'low',
+            reasoning: 'Finance agent is the closest fit.',
+            shouldSkipForwardingQuery: false,
+            nextAction: 'create_thread',
+        }),
+    };
+
+    const service = new McpService({
+        agentActionLogModel: { insert: vi.fn().mockResolvedValue(undefined) },
+        aiAgentService,
+        aiAgentToolsService,
+        aiOrganizationSettingsService: {
+            isMcpAgentsEnabled: vi.fn().mockResolvedValue(true),
+        },
+        aiRouterService,
+        aiWritebackService: {},
+        analytics: { track: vi.fn() },
+        asyncQueryService: {},
+        catalogService: {},
+        contentVerificationService: {},
+        featureFlagService: {},
+        lightdashConfig: {
+            ai: {
+                copilot: {
+                    maxQueryLimit: 500,
+                },
+            },
+            mcp: {
+                enabled: true,
+                runSqlMaxLimit: 500,
+            },
+            siteUrl: 'https://lightdash.example',
+        },
+        mcpContextModel,
+        projectModel: {},
+        projectService: {
+            getProject: vi
+                .fn()
+                .mockResolvedValue({ organizationUuid, name: 'Project' }),
+            getSpaces: vi.fn().mockResolvedValue([]),
+        },
+        searchModel: {},
+        shareService: {},
+        spaceService: {},
+        userAttributesModel: {},
+    } as unknown as ConstructorParameters<typeof McpService>[0]);
+
+    return {
+        service,
+        aiAgentService,
+        aiAgentToolsService,
+        aiRouterService,
+        mcpContextModel,
+        storedContext,
+    };
+};
+
+describe('McpService route_agent', () => {
+    beforeEach(() => {
+        mockRegisteredMcpTools.clear();
+    });
+
+    it('writes the routed agent into context and get_current_agent returns it', async () => {
+        const { aiRouterService, mcpContextModel } = makeMcpService();
+
+        const routeAgentTool = mockRegisteredMcpTools.get(
+            McpToolName.ROUTE_AGENT,
+        );
+        const getCurrentAgentTool = mockRegisteredMcpTools.get(
+            McpToolName.GET_CURRENT_AGENT,
+        );
+
+        expect(routeAgentTool).toBeDefined();
+        expect(getCurrentAgentTool).toBeDefined();
+
+        const routeResult = (await routeAgentTool!(
+            { prompt: 'show revenue by month', projectUuid },
+            extra,
+        )) as {
+            content: Array<{ text: string }>;
+            structuredContent: Record<string, unknown>;
+        };
+
+        expect(aiRouterService.routePromptToAgent).toHaveBeenCalledWith(
+            account,
+            {
+                prompt: 'show revenue by month',
+                projectUuid,
+                mode: 'mcp',
+            },
+        );
+        expect(mcpContextModel.setContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+                context: expect.objectContaining({
+                    projectUuid,
+                    projectName: 'Project',
+                    tags: ['finance-only'],
+                    agentUuid: 'agent-uuid',
+                    agentName: 'Finance',
+                }),
+            }),
+        );
+        expect(routeResult.structuredContent).toEqual(
+            expect.objectContaining({
+                agentUuid: 'agent-uuid',
+                agentName: 'Finance',
+                confidence: 'low',
+                reasoning: 'Finance agent is the closest fit.',
+            }),
+        );
+
+        const currentResult = (await getCurrentAgentTool!(
+            { projectUuid },
+            extra,
+        )) as {
+            content: Array<{ text: string }>;
+        };
+        expect(JSON.parse(currentResult.content[0].text)).toEqual(
+            expect.objectContaining({
+                agentUuid: 'agent-uuid',
+                agentName: 'Finance',
+                explores: ['orders'],
+            }),
+        );
+    });
+
+    it('applies an explicitly routed agent to later tool calls', async () => {
+        const { aiAgentToolsService } = makeMcpService();
+
+        const routeAgentTool = mockRegisteredMcpTools.get(
+            McpToolName.ROUTE_AGENT,
+        );
+        const listContentTool = mockRegisteredMcpTools.get(
+            McpToolName.LIST_CONTENT,
+        );
+
+        await routeAgentTool!(
+            { prompt: 'show revenue by month', projectUuid },
+            extra,
+        );
+
+        const listContentResult = (await listContentTool!(
+            {
+                projectUuid,
+                agentUuid: 'agent-uuid',
+                spaceSlug: null,
+                page: 1,
+                pageSize: 25,
+            },
+            extra,
+        )) as {
+            content: Array<{ text: string }>;
+        };
+        const rendered = listContentResult.content[0].text;
+
+        expect(aiAgentToolsService.createRuntime).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+                agentUuid: 'agent-uuid',
+                tags: ['finance'],
+                spaceAccess: [allowedSpaceUuid],
+            }),
+        );
+        expect(rendered).toContain('slug="allowed-space"');
+        expect(rendered).not.toContain('slug="blocked-space"');
+    });
+
+    it('rejects a project argument that differs from the pinned project', async () => {
+        const { aiRouterService } = makeMcpService();
+        const routeAgentTool = mockRegisteredMcpTools.get(
+            McpToolName.ROUTE_AGENT,
+        );
+        const pinnedExtra = {
+            ...extra,
+            authInfo: {
+                extra: {
+                    ...extra.authInfo.extra,
+                    headerProjectUuid: projectUuid,
+                },
+            },
+        };
+
+        await expect(
+            routeAgentTool!(
+                {
+                    prompt: 'show revenue by month',
+                    projectUuid: 'another-project-uuid',
+                },
+                pinnedExtra,
+            ),
+        ).rejects.toThrow(
+            'The requested project does not match the pinned MCP project',
+        );
+        expect(aiRouterService.routePromptToAgent).not.toHaveBeenCalled();
+    });
+
+    it('uses pinned project context instead of a stored project and agent', async () => {
+        const { aiAgentService, storedContext } = makeMcpService();
+        storedContext.projectUuid = 'stored-project-uuid';
+        storedContext.agentUuid = 'stored-agent-uuid';
+        const getCurrentProjectTool = mockRegisteredMcpTools.get(
+            McpToolName.GET_CURRENT_PROJECT,
+        );
+        const getCurrentAgentTool = mockRegisteredMcpTools.get(
+            McpToolName.GET_CURRENT_AGENT,
+        );
+        const pinnedExtra = {
+            ...extra,
+            authInfo: {
+                extra: {
+                    ...extra.authInfo.extra,
+                    headerProjectUuid: projectUuid,
+                },
+            },
+        };
+
+        const projectResult = (await getCurrentProjectTool!(
+            {},
+            pinnedExtra,
+        )) as { content: Array<{ text: string }> };
+        const agentResult = (await getCurrentAgentTool!(
+            { projectUuid },
+            pinnedExtra,
+        )) as { content: Array<{ text: string }> };
+
+        expect(JSON.parse(projectResult.content[0].text)).toEqual(
+            expect.objectContaining({ projectUuid }),
+        );
+        expect(JSON.parse(agentResult.content[0].text)).toEqual({
+            error: 'No active agent set. Use set_agent to set one.',
+        });
+        expect(aiAgentService.getAgent).not.toHaveBeenCalled();
+    });
+});

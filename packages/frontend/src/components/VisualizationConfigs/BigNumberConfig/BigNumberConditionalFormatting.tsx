@@ -6,12 +6,13 @@ import {
     type ConditionalFormattingConfig,
     type FilterableItem,
 } from '@lightdash/common';
-import { Accordion } from '@mantine-8/core';
+import { Accordion } from '@mantine/core';
 import { produce } from 'immer';
 import { useCallback, useEffect, useMemo, useRef, type FC } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { isBigNumberVisualizationConfig } from '../../LightdashVisualization/types';
 import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import accordionClasses from '../common/Accordion.module.css';
 import { AddButton } from '../common/AddButton';
 import { Config } from '../common/Config';
 import { BigNumberConditionalFormattingItem } from './BigNumberConditionalFormattingItem';
@@ -100,7 +101,13 @@ export const BigNumberConditionalFormatting: FC = () => {
                     <Config.Heading>Rules and Conditions</Config.Heading>
                     <AddButton onClick={handleAdd} />
                 </Config.Group>
-                <Accordion multiple variant="contained" radius="md">
+                <Accordion
+                    multiple
+                    variant="contained"
+                    chevronPosition="right"
+                    className={accordionClasses.containedList}
+                    transparentActiveItem
+                >
                     {activeConfigs.map((conditionalFormatting, index) => (
                         <BigNumberConditionalFormattingItem
                             key={configIdsRef.current[index] ?? index}

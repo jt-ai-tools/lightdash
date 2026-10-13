@@ -10,6 +10,17 @@ export type CompilationHistoryReport = {
     dimensionsCount: number;
     exploresWithErrors: ExploreError[];
     baseTableNames: string[];
+    connectionWarnings?: string[];
+};
+
+export type ExploreWarningSummary = Pick<Explore, 'name'> & {
+    warnings: NonNullable<Explore['warnings']>;
+};
+
+export type ExploreWarningReport = {
+    warningCount: number;
+    warningExploreCount: number;
+    exploresWithWarnings: ExploreWarningSummary[];
 };
 
 export const calculateCompilationReport = (args: {
@@ -44,5 +55,33 @@ export const calculateCompilationReport = (args: {
         dimensionsCount,
         exploresWithErrors,
         baseTableNames,
+    };
+};
+
+export const calculateExploreWarningReport = (args: {
+    explores: (Explore | ExploreError)[];
+}): ExploreWarningReport => {
+    const exploresWithWarnings = args.explores.flatMap<ExploreWarningSummary>(
+        (explore) => {
+            if (isExploreError(explore) || !explore.warnings?.length) {
+                return [];
+            }
+
+            return [
+                {
+                    name: explore.name,
+                    warnings: explore.warnings,
+                },
+            ];
+        },
+    );
+
+    return {
+        warningCount: exploresWithWarnings.reduce(
+            (count, explore) => count + explore.warnings.length,
+            0,
+        ),
+        warningExploreCount: exploresWithWarnings.length,
+        exploresWithWarnings,
     };
 };

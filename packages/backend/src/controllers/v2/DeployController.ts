@@ -1,0 +1,247 @@
+import {
+    AnyType,
+    ApiAddDeployBatchRequest,
+    ApiAddDeployBatchResponse,
+    ApiErrorPayload,
+    ApiFinalizeDeployResponse,
+    ApiSetExploresResponse,
+    ApiStartDeploySessionResponse,
+    assertRegisteredAccount,
+    LightdashCliVersionHeader,
+    type DeployTarget,
+} from '@lightdash/common';
+import {
+    Body,
+    Middlewares,
+    OperationId,
+    Path,
+    Post,
+    Put,
+    Request,
+    Response,
+    Route,
+    SuccessResponse,
+    Tags,
+} from '@tsoa/runtime';
+import express from 'express';
+import { toSessionUser } from '../../auth/account';
+import { assertAgentConnectionGrantOperation } from '../../auth/agentConnectionGrants/evaluateGrant';
+import { requireOAuthScopeOperation } from '../../auth/oauthScopes/unchecked';
+import {
+    allowApiKeyAuthentication,
+    isAuthenticated,
+    unauthorisedInDemo,
+} from '../authentication';
+import { BaseController } from '../baseController';
+
+@Route('/api/v2/projects/{projectUuid}/deploy')
+@Response<ApiErrorPayload>('default', 'Error')
+@Tags('Project')
+export class DeployController extends BaseController {
+    /**
+     * Deploy explores with the full dbt model inventory for selective cleanup.
+     * @summary Deploy explores
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Put('/')
+    @OperationId('deployExplores')
+    async deployExplores(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Body() body: {
+            explores: AnyType[];
+            complete: boolean;
+            dbtModelNames: string[];
+            sourceUuid?: string;
+            target?: DeployTarget;
+        },
+    ): Promise<ApiSetExploresResponse> {
+        assertAgentConnectionGrantOperation(req.account, {
+            kind: 'rest',
+            key: 'DeployController.deployExplores',
+            projectUuids: [projectUuid],
+            deploymentOverrides: body,
+        });
+        assertRegisteredAccount(req.account);
+        const results = await this.services
+            .getProjectService()
+            .setExplores(
+                toSessionUser(req.account),
+                projectUuid,
+                body.explores,
+                req.header(LightdashCliVersionHeader),
+                body.complete,
+                body.dbtModelNames,
+                {
+                    sourceUuid: body.sourceUuid ?? null,
+                    target: body.target ?? null,
+                },
+            );
+        return { status: 'ok', results };
+    }
+
+    /**
+     * Start a new deploy session for batched explore uploads
+     * @summary Start deploy session
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/')
+    @OperationId('startDeploySession')
+    async startDeploySession(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+    ): Promise<ApiStartDeploySessionResponse> {
+        assertAgentConnectionGrantOperation(req.account, {
+            kind: 'rest',
+            key: 'DeployController.startDeploySession',
+            projectUuids: [projectUuid],
+            deploymentOverrides: req.body,
+        });
+        this.setStatus(200);
+        const result = await this.services
+            .getDeployService()
+            .startDeploySession(req.account!, projectUuid);
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+
+    /**
+     * Add a batch of explores to an existing deploy session
+     * @summary Add deploy batch
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+        requireOAuthScopeOperation('DeployController.addDeployBatch'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/{sessionUuid}/batch')
+    @OperationId('addDeployBatch')
+    async addDeployBatch(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() sessionUuid: string,
+        @Body() body: AnyType, // ApiAddDeployBatchRequest,
+    ): Promise<ApiAddDeployBatchResponse> {
+        assertAgentConnectionGrantOperation(req.account, {
+            kind: 'rest',
+            key: 'DeployController.addDeployBatch',
+            projectUuids: [projectUuid],
+            deploymentOverrides: body,
+        });
+        if (
+            req.account?.authentication.type === 'oauth' &&
+            req.account.authentication.agentConnectionGrant
+        ) {
+            await this.services
+                .getAgentConnectionGrantService()
+                .assertRestOperation(
+                    {
+                        account: req.account,
+                        method: req.method,
+                        query: req.query,
+                        params: { projectUuid, sessionUuid },
+                        body,
+                    },
+                    'DeployController.addDeployBatch',
+                );
+        }
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const result = await this.services
+            .getDeployService()
+            .addDeployBatch(
+                toSessionUser(req.account),
+                projectUuid,
+                sessionUuid,
+                (body as unknown as ApiAddDeployBatchRequest).explores,
+                (body as unknown as ApiAddDeployBatchRequest).batchNumber,
+                (body as unknown as ApiAddDeployBatchRequest).complete,
+            );
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+
+    /**
+     * Finalize a deploy session and commit all staged explores to the project
+     * @summary Finalize deploy
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+        requireOAuthScopeOperation('DeployController.finalizeDeploySession'),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('/{sessionUuid}/finalize')
+    @OperationId('finalizeDeploySession')
+    async finalizeDeploySession(
+        @Request() req: express.Request,
+        @Path() projectUuid: string,
+        @Path() sessionUuid: string,
+        @Body()
+        body?: {
+            dbtModelNames?: string[];
+            sourceUuid?: string;
+            target?: DeployTarget;
+        },
+    ): Promise<ApiFinalizeDeployResponse> {
+        assertAgentConnectionGrantOperation(req.account, {
+            kind: 'rest',
+            key: 'DeployController.finalizeDeploySession',
+            projectUuids: [projectUuid],
+            deploymentOverrides: body,
+        });
+        if (
+            req.account?.authentication.type === 'oauth' &&
+            req.account.authentication.agentConnectionGrant
+        ) {
+            await this.services
+                .getAgentConnectionGrantService()
+                .assertRestOperation(
+                    {
+                        account: req.account,
+                        method: req.method,
+                        query: req.query,
+                        params: { projectUuid, sessionUuid },
+                        body,
+                    },
+                    'DeployController.finalizeDeploySession',
+                );
+        }
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        const result = await this.services
+            .getDeployService()
+            .finalizeDeploy(
+                toSessionUser(req.account),
+                projectUuid,
+                sessionUuid,
+                req.header(LightdashCliVersionHeader),
+                body?.dbtModelNames,
+                {
+                    sourceUuid: body?.sourceUuid ?? null,
+                    target: body?.target ?? null,
+                },
+            );
+        return {
+            status: 'ok',
+            results: result,
+        };
+    }
+}

@@ -1,20 +1,31 @@
 import {
+    ApiContentVerificationDeleteResponse,
+    ApiContentVerificationResponse,
     ApiErrorPayload,
     ApiPromoteDashboardResponse,
     ApiPromotionChangesResponse,
     ApiSuccessEmpty,
-    AuthorizationError,
+    ApiUpdateDashboardCustomMetricResponse,
+    assertRegisteredAccount,
+    UpdateDashboardCustomMetric,
     type ApiCreateDashboardSchedulerResponse,
     type ApiDashboardSchedulersResponse,
     type ApiGetDashboardHistoryResponse,
+    type ApiGetDashboardVersionResponse,
+    type UUID,
+    type UuidOrSlug,
 } from '@lightdash/common';
 import {
+    Body,
+    Delete,
     Deprecated,
     Get,
     Middlewares,
     OperationId,
+    Patch,
     Path,
     Post,
+    Query,
     Request,
     Response,
     Route,
@@ -22,21 +33,25 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
+    getDeprecatedRouteMiddleware,
     isAuthenticated,
     unauthorisedInDemo,
 } from './authentication';
 import { BaseController } from './baseController';
 
-@Route('/api/v1/dashboards/{dashboardUuid}')
+@Route('/api/v1/dashboards/{dashboardUuidOrSlug}')
 @Response<ApiErrorPayload>('default', 'Error')
 @Tags('Dashboards')
 export class DashboardController extends BaseController {
     /**
      * Promote dashboard to its upstream project
      * @summary Promote dashboard
-     * @param dashboardUuid dashboardUuid for the dashboard to run
+     * @param dashboardUuidOrSlug uuid or slug for the dashboard to run
+     * @param projectUuid project to resolve a slug in, required when the slug exists in multiple projects (e.g. preview projects)
      * @param req express request
      */
     @Middlewares([
@@ -48,22 +63,29 @@ export class DashboardController extends BaseController {
     @Post('/promote')
     @OperationId('promoteDashboard')
     async promoteDashboard(
-        @Path() dashboardUuid: string,
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
         @Request() req: express.Request,
+        @Query() projectUuid?: UUID,
     ): Promise<ApiPromoteDashboardResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getPromoteService()
-                .promoteDashboard(req.user!, dashboardUuid),
+                .promoteDashboard(
+                    toSessionUser(req.account),
+                    dashboardUuidOrSlug,
+                    { projectUuid },
+                ),
         };
     }
 
     /**
      * Get diff from dashboard to promote
      * @summary Get dashboard promotion diff
-     * @param dashboardUuid dashboardUuid for the dashboard to check diff
+     * @param dashboardUuidOrSlug uuid or slug for the dashboard to check diff
+     * @param projectUuid project to resolve a slug in, required when the slug exists in multiple projects (e.g. preview projects)
      * @param req express request
      */
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
@@ -71,22 +93,117 @@ export class DashboardController extends BaseController {
     @Get('/promoteDiff')
     @OperationId('promoteDashboardDiff')
     async promoteDashboardDiff(
-        @Path() dashboardUuid: string,
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
         @Request() req: express.Request,
+        @Query() projectUuid?: UUID,
     ): Promise<ApiPromotionChangesResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getPromoteService()
-                .getPromoteDashboardDiff(req.user!, dashboardUuid),
+                .getPromoteDashboardDiff(
+                    toSessionUser(req.account),
+                    dashboardUuidOrSlug,
+                    { projectUuid },
+                ),
+        };
+    }
+
+    /**
+     * Edit a dashboard registry custom metric. Swaps the registry entry and
+     * re-versions every dashboard-owned chart that references it, atomically.
+     * With `dryRun` it only reports the charts that would change.
+     * @summary Update dashboard custom metric
+     * @param dashboardUuidOrSlug uuid or slug for the dashboard
+     * @param projectUuid project to resolve a slug in, required when the slug exists in multiple projects (e.g. preview projects)
+     * @param req express request
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+        requireOAuthScopeOperation(
+            'DashboardController.updateDashboardCustomMetric',
+        ),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Patch('/custom-metrics')
+    @OperationId('updateDashboardCustomMetric')
+    async updateDashboardCustomMetric(
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
+        @Body() body: UpdateDashboardCustomMetric,
+        @Request() req: express.Request,
+        @Query() projectUuid?: UUID,
+    ): Promise<ApiUpdateDashboardCustomMetricResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getDashboardService()
+                .updateCustomMetric(
+                    toSessionUser(req.account),
+                    dashboardUuidOrSlug,
+                    body,
+                    { projectUuid },
+                ),
+        };
+    }
+
+    /**
+     * Remove a custom metric from the dashboard registry. Charts keep their
+     * local snapshots — the metric just stops being offered to new charts.
+     * With `dryRun` it only reports the charts still using it.
+     * @summary Delete dashboard custom metric
+     * @param dashboardUuidOrSlug uuid or slug for the dashboard
+     * @param metricTable table of the registry metric to remove
+     * @param metricName name of the registry metric to remove
+     * @param dryRun report affected charts without writing
+     * @param projectUuid project to resolve a slug in, required when the slug exists in multiple projects (e.g. preview projects)
+     * @param req express request
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+        requireOAuthScopeOperation(
+            'DashboardController.deleteDashboardCustomMetric',
+        ),
+    ])
+    @SuccessResponse('200', 'Success')
+    @Delete('/custom-metrics/{metricTable}/{metricName}')
+    @OperationId('deleteDashboardCustomMetric')
+    async deleteDashboardCustomMetric(
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
+        @Path() metricTable: string,
+        @Path() metricName: string,
+        @Request() req: express.Request,
+        @Query() dryRun?: boolean,
+        @Query() projectUuid?: UUID,
+    ): Promise<ApiUpdateDashboardCustomMetricResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getDashboardService()
+                .deleteCustomMetric(
+                    toSessionUser(req.account),
+                    dashboardUuidOrSlug,
+                    metricTable,
+                    metricName,
+                    dryRun ?? false,
+                    { projectUuid },
+                ),
         };
     }
 
     /**
      * Get dashboard version history
      * @summary Get dashboard history
-     * @param dashboardUuid dashboardUuid for the dashboard
+     * @param dashboardUuidOrSlug uuid or slug for the dashboard
      * @param req express request
      */
     @Middlewares([allowApiKeyAuthentication, isAuthenticated])
@@ -94,22 +211,53 @@ export class DashboardController extends BaseController {
     @Get('/history')
     @OperationId('getDashboardHistory')
     async getDashboardHistory(
-        @Path() dashboardUuid: string,
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
         @Request() req: express.Request,
     ): Promise<ApiGetDashboardHistoryResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getDashboardService()
-                .getHistory(req.user!, dashboardUuid),
+                .getHistory(toSessionUser(req.account), dashboardUuidOrSlug),
+        };
+    }
+
+    /**
+     * Get specific dashboard version
+     * @summary Get dashboard version
+     * @param dashboardUuidOrSlug uuid or slug for the dashboard
+     * @param versionUuid versionUuid for the dashboard version
+     * @param req express request
+     */
+    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @SuccessResponse('200', 'Success')
+    @Get('/version/{versionUuid}')
+    @OperationId('getDashboardVersion')
+    async getDashboardVersion(
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
+        @Path() versionUuid: UUID,
+        @Request() req: express.Request,
+    ): Promise<ApiGetDashboardVersionResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getDashboardService()
+                .getVersion(
+                    toSessionUser(req.account),
+                    dashboardUuidOrSlug,
+                    versionUuid,
+                ),
         };
     }
 
     /**
      * Rollback dashboard to a previous version
      * @summary Rollback dashboard version
-     * @param dashboardUuid dashboardUuid for the dashboard
+     * @param dashboardUuidOrSlug uuid or slug for the dashboard
      * @param versionUuid versionUuid for the dashboard version to rollback to
      * @param req express request
      */
@@ -122,14 +270,19 @@ export class DashboardController extends BaseController {
     @Post('/rollback/{versionUuid}')
     @OperationId('postDashboardVersionRollback')
     async postDashboardVersionRollback(
-        @Path() dashboardUuid: string,
-        @Path() versionUuid: string,
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
+        @Path() versionUuid: UUID,
         @Request() req: express.Request,
     ): Promise<ApiSuccessEmpty> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         await this.services
             .getDashboardService()
-            .rollback(req.user!, dashboardUuid, versionUuid);
+            .rollback(
+                toSessionUser(req.account),
+                dashboardUuidOrSlug,
+                versionUuid,
+            );
         return {
             status: 'ok',
             results: undefined,
@@ -140,22 +293,27 @@ export class DashboardController extends BaseController {
      * Get schedulers for a dashboard
      * @summary List dashboard schedulers
      */
-    @Middlewares([allowApiKeyAuthentication, isAuthenticated])
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        getDeprecatedRouteMiddleware(new Date('2026-01-26')),
+        requireOAuthScopeOperation(
+            'DashboardController.getDashboardSchedulers',
+        ),
+    ])
     @SuccessResponse('200', 'Success')
     @Get('/schedulers')
     @OperationId('getDashboardSchedulers')
     @Deprecated()
     async getDashboardSchedulers(
-        @Path() dashboardUuid: string,
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
         @Request() req: express.Request,
     ): Promise<ApiDashboardSchedulersResponse> {
-        if (!req.user) {
-            throw new AuthorizationError('User session not found');
-        }
+        assertRegisteredAccount(req.account);
 
         const schedulers = await this.services
             .getDashboardService()
-            .getSchedulers(req.user, dashboardUuid);
+            .getSchedulers(toSessionUser(req.account), dashboardUuidOrSlug);
 
         this.setStatus(200);
 
@@ -178,15 +336,80 @@ export class DashboardController extends BaseController {
     @Post('/schedulers')
     @OperationId('createDashboardScheduler')
     async createDashboardScheduler(
-        @Path() dashboardUuid: string,
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
         @Request() req: express.Request,
     ): Promise<ApiCreateDashboardSchedulerResponse> {
+        assertRegisteredAccount(req.account);
         this.setStatus(200);
         return {
             status: 'ok',
             results: await this.services
                 .getDashboardService()
-                .createScheduler(req.user!, dashboardUuid, req.body),
+                .createScheduler(
+                    toSessionUser(req.account),
+                    dashboardUuidOrSlug,
+                    req.body,
+                ),
+        };
+    }
+
+    /**
+     * Verify a dashboard
+     * @summary Verify dashboard
+     * @param dashboardUuidOrSlug uuid or slug of the dashboard to verify
+     * @param req
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Post('verification')
+    @OperationId('verifyDashboard')
+    async verifyDashboard(
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
+        @Request() req: express.Request,
+    ): Promise<ApiContentVerificationResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        return {
+            status: 'ok',
+            results: await this.services
+                .getDashboardService()
+                .verifyDashboard(
+                    toSessionUser(req.account),
+                    dashboardUuidOrSlug,
+                ),
+        };
+    }
+
+    /**
+     * Remove verification from a dashboard
+     * @summary Unverify dashboard
+     * @param dashboardUuidOrSlug uuid or slug of the dashboard to unverify
+     * @param req
+     */
+    @Middlewares([
+        allowApiKeyAuthentication,
+        isAuthenticated,
+        unauthorisedInDemo,
+    ])
+    @SuccessResponse('200', 'Success')
+    @Delete('verification')
+    @OperationId('unverifyDashboard')
+    async unverifyDashboard(
+        @Path() dashboardUuidOrSlug: UuidOrSlug,
+        @Request() req: express.Request,
+    ): Promise<ApiContentVerificationDeleteResponse> {
+        assertRegisteredAccount(req.account);
+        this.setStatus(200);
+        await this.services
+            .getDashboardService()
+            .unverifyDashboard(toSessionUser(req.account), dashboardUuidOrSlug);
+        return {
+            status: 'ok',
+            results: undefined,
         };
     }
 }

@@ -1,5 +1,5 @@
 import { ChartSourceType } from '../types/content';
-import { type DashboardTile, DashboardTileTypes } from '../types/dashboard';
+import { DashboardTileTypes, type DashboardTile } from '../types/dashboard';
 import { ParameterError } from '../types/errors';
 import assertUnreachable from './assertUnreachable';
 
@@ -18,6 +18,33 @@ export const convertChartSourceTypeToDashboardTileType = (
             );
     }
 };
+
+/**
+ * Whether a tile should be rendered for the given tab selection.
+ *
+ * Includes orphan (legacy) tiles — tiles whose `tabUuid` is null/undefined —
+ * regardless of `selectedTabs`, mirroring the frontend behaviour that surfaces
+ * legacy tiles on the first tab. When `selectedTabs` is null, no filtering is
+ * applied. See PROD-2505.
+ */
+export const isTileInSelectedTabs = (
+    tile: { tabUuid?: string | null },
+    selectedTabs: (string | null)[] | null,
+): boolean =>
+    !selectedTabs || !tile.tabUuid || selectedTabs.includes(tile.tabUuid);
+
+/**
+ * Expands a null ("all tabs") selection into the explicit list the minimal
+ * dashboard render expects in its `selectedTabs` URL param: every tab UUID
+ * present on the tiles, plus a `null` sentinel for orphan (no-tab) tiles.
+ * Without the explicit list the minimal render falls back to showing only the
+ * active (first) tab. See PROD-2505.
+ */
+export const expandSelectedTabs = (
+    selectedTabs: string[] | null,
+    tiles: { tabUuid?: string | null }[],
+): (string | null)[] =>
+    selectedTabs ?? [...new Set(tiles.map((tile) => tile.tabUuid ?? null))];
 
 /**
  * Validates that selected tabs exist in the dashboard tiles.

@@ -1,13 +1,14 @@
 import {
-    TimeFrames,
     formatDate,
     getItemId,
+    getItemLabelWithoutTableName,
     isCustomDimension,
     isDateItem,
     isDimension,
     isField,
     isNumericItem,
     isTableCalculation,
+    TimeFrames,
     type CompiledDimension,
     type CustomDimension,
     type Field,
@@ -16,13 +17,15 @@ import {
 } from '@lightdash/common';
 import {
     Accordion,
-    Box,
+    Center,
     Checkbox,
     Group,
+    type MantineRadius,
+    type MantineSize,
     SegmentedControl,
     Stack,
-    Text,
     TextInput,
+    type TextInputProps,
 } from '@mantine/core';
 import {
     IconLayoutAlignLeft,
@@ -31,8 +34,6 @@ import {
 } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import { useCallback, useMemo, useState, type FC } from 'react';
-import { isCartesianVisualizationConfig } from '../../../LightdashVisualization/types';
-import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
 import FieldSelect from '../../../common/FieldSelect';
 import FilterDatePicker from '../../../common/Filters/FilterInputs/FilterDatePicker';
 import FilterMonthAndYearPicker from '../../../common/Filters/FilterInputs/FilterMonthAndYearPicker';
@@ -41,9 +42,12 @@ import FilterYearPicker from '../../../common/Filters/FilterInputs/FilterYearPic
 import { getFirstDayOfWeek } from '../../../common/Filters/utils/filterDateUtils';
 import MantineIcon from '../../../common/MantineIcon';
 import { type ReferenceLineField } from '../../../common/ReferenceLine';
+import { isCartesianVisualizationConfig } from '../../../LightdashVisualization/types';
+import { useVisualizationContext } from '../../../LightdashVisualization/useVisualizationContext';
 import ColorSelector from '../../ColorSelector';
 import { AccordionControl } from '../../common/AccordionControl';
 import { Config } from '../../common/Config';
+import classes from './ReferenceLine.module.css';
 
 type UpdateReferenceLineProps = {
     value?: string;
@@ -79,6 +83,9 @@ type ReferenceLineValueProps = {
     startOfWeek: WeekDay | undefined;
     disabled?: boolean;
     onChange: (value: string) => void;
+    label?: TextInputProps['label'];
+    size?: MantineSize;
+    radius?: MantineRadius;
 };
 
 const ReferenceLineValue: FC<ReferenceLineValueProps> = ({
@@ -87,7 +94,11 @@ const ReferenceLineValue: FC<ReferenceLineValueProps> = ({
     startOfWeek,
     disabled,
     onChange,
+    label,
+    size,
+    radius = 'md',
 }) => {
+    const inputProps = { label, size, radius };
     if (isCustomDimension(field)) return <></>;
     if (isDateItem(field)) {
         if (isDimension(field) && field.timeInterval) {
@@ -100,8 +111,8 @@ const ReferenceLineValue: FC<ReferenceLineValueProps> = ({
                 case TimeFrames.WEEK:
                     return (
                         <FilterWeekPicker
+                            {...inputProps}
                             disabled={disabled}
-                            size="xs"
                             value={parsedDate}
                             firstDayOfWeek={getFirstDayOfWeek(startOfWeek)}
                             onChange={(dateValue) => {
@@ -120,8 +131,8 @@ const ReferenceLineValue: FC<ReferenceLineValueProps> = ({
                 case TimeFrames.MONTH:
                     return (
                         <FilterMonthAndYearPicker
+                            {...inputProps}
                             disabled={disabled}
-                            size="xs"
                             value={parsedDate}
                             onChange={(dateValue: Date) => {
                                 onChange(
@@ -138,8 +149,8 @@ const ReferenceLineValue: FC<ReferenceLineValueProps> = ({
                 case TimeFrames.YEAR:
                     return (
                         <FilterYearPicker
+                            {...inputProps}
                             disabled={disabled}
-                            size="xs"
                             value={parsedDate}
                             onChange={(dateValue: Date) => {
                                 onChange(
@@ -156,8 +167,8 @@ const ReferenceLineValue: FC<ReferenceLineValueProps> = ({
 
             return (
                 <FilterDatePicker
+                    {...inputProps}
                     disabled={disabled}
-                    size="xs"
                     value={parsedDate}
                     firstDayOfWeek={getFirstDayOfWeek(startOfWeek)}
                     onChange={(newValue) => {
@@ -170,13 +181,14 @@ const ReferenceLineValue: FC<ReferenceLineValueProps> = ({
 
     return (
         <TextInput
+            {...inputProps}
+            size="xs"
             disabled={
                 (!isNumericItem(field) &&
                     // We treat untyped table calculations as numeric
                     !(field && isTableCalculation(field) && !field.type)) ||
                 disabled
             }
-            size="xs"
             title={
                 isNumericItem(field)
                     ? ''
@@ -303,6 +315,11 @@ export const ReferenceLine: FC<ReferenceLineProps> = ({
     const controlLabel = `Line ${index}`;
     const accordionValue = `${index}`;
 
+    const description = useMemo(() => {
+        if (!selectedField || !value) return undefined;
+        return `${getItemLabelWithoutTableName(selectedField)} is ${value}`;
+    }, [selectedField, value]);
+
     const onControlClick = useCallback(
         () =>
             isOpen ? removeItem(accordionValue) : addNewItem(accordionValue),
@@ -325,6 +342,7 @@ export const ReferenceLine: FC<ReferenceLineProps> = ({
         <Accordion.Item value={accordionValue}>
             <AccordionControl
                 label={label || controlLabel}
+                description={description}
                 onControlClick={onControlClick}
                 onRemove={() => removeReferenceLine(lineId)}
                 extraControlElements={
@@ -338,15 +356,10 @@ export const ReferenceLine: FC<ReferenceLineProps> = ({
             />
 
             <Accordion.Panel>
-                <Stack
-                    bg={'ldGray.0'}
-                    spacing="xs"
-                    sx={(theme) => ({
-                        borderRadius: theme.radius.sm,
-                    })}
-                >
+                <Stack gap="xs" className={classes.panelStack}>
                     <FieldSelect
-                        label="Field"
+                        size="xs"
+                        label={<Config.Label>Field</Config.Label>}
                         item={selectedField}
                         items={fieldsInAxes}
                         placeholder="Search field..."
@@ -361,31 +374,27 @@ export const ReferenceLine: FC<ReferenceLineProps> = ({
                         hasGrouping
                     />
 
-                    <Group noWrap grow align="baseline">
-                        <Box>
-                            <Text fz="xs" fw={500}>
-                                Value
-                            </Text>
-
-                            <ReferenceLineValue
-                                field={selectedField}
-                                startOfWeek={startOfWeek}
-                                value={value}
-                                disabled={useAverage && averageAvailable}
-                                onChange={(newValue: string) => {
-                                    setValue(newValue);
-                                    if (selectedField !== undefined)
-                                        updateReferenceLine({
-                                            ...currentLineConfig,
-                                            value: newValue,
-                                        });
-                                }}
-                            />
-                        </Box>
+                    <Group wrap="nowrap" grow align="baseline" gap="sm">
+                        <ReferenceLineValue
+                            label={<Config.Label>Value</Config.Label>}
+                            field={selectedField}
+                            size="xs"
+                            startOfWeek={startOfWeek}
+                            value={value}
+                            disabled={useAverage && averageAvailable}
+                            onChange={(newValue: string) => {
+                                setValue(newValue);
+                                if (selectedField !== undefined)
+                                    updateReferenceLine({
+                                        ...currentLineConfig,
+                                        value: newValue,
+                                    });
+                            }}
+                        />
                         <TextInput
-                            label="Label"
-                            // disabled={!value}
+                            label={<Config.Label>Label</Config.Label>}
                             value={label}
+                            size="xs"
                             placeholder={
                                 useAverage && averageAvailable
                                     ? (value ?? 'Average')
@@ -404,9 +413,13 @@ export const ReferenceLine: FC<ReferenceLineProps> = ({
                             }}
                         />
                     </Group>
-                    <Group noWrap position="apart">
+                    <Group wrap="nowrap">
                         <Checkbox
-                            label="Use series average"
+                            flex="1"
+                            size="xs"
+                            label={
+                                <Config.Label>Use series average</Config.Label>
+                            }
                             disabled={!averageAvailable}
                             checked={useAverage && averageAvailable}
                             onChange={(newState) => {
@@ -421,15 +434,20 @@ export const ReferenceLine: FC<ReferenceLineProps> = ({
                                 }
                             }}
                         />
-                        <Group noWrap>
-                            <Config.Label>Position</Config.Label>
+                        <Group wrap="nowrap" flex="1" gap="sm">
+                            <Config.Label className={classes.positionLabel}>
+                                Position
+                            </Config.Label>
                             <SegmentedControl
+                                w="100%"
                                 size="xs"
                                 id="label-position"
                                 value={labelPosition}
-                                onChange={(
-                                    newPosition: 'start' | 'middle' | 'end',
-                                ) => {
+                                onChange={(newValue) => {
+                                    const newPosition = newValue as
+                                        | 'start'
+                                        | 'middle'
+                                        | 'end';
                                     setLabelPosition(newPosition);
 
                                     updateReferenceLine({
@@ -441,25 +459,31 @@ export const ReferenceLine: FC<ReferenceLineProps> = ({
                                     {
                                         value: 'start',
                                         label: (
-                                            <MantineIcon
-                                                icon={IconLayoutAlignLeft}
-                                            />
+                                            <Center>
+                                                <MantineIcon
+                                                    icon={IconLayoutAlignLeft}
+                                                />
+                                            </Center>
                                         ),
                                     },
                                     {
                                         value: 'middle',
                                         label: (
-                                            <MantineIcon
-                                                icon={IconLayoutAlignTop}
-                                            />
+                                            <Center>
+                                                <MantineIcon
+                                                    icon={IconLayoutAlignTop}
+                                                />
+                                            </Center>
                                         ),
                                     },
                                     {
                                         value: 'end',
                                         label: (
-                                            <MantineIcon
-                                                icon={IconLayoutAlignRight}
-                                            />
+                                            <Center>
+                                                <MantineIcon
+                                                    icon={IconLayoutAlignRight}
+                                                />
+                                            </Center>
                                         ),
                                     },
                                 ]}

@@ -1,4 +1,6 @@
+import { subject } from '@casl/ability';
 import {
+    Account,
     ForbiddenError,
     NotFoundError,
     SessionUser,
@@ -98,16 +100,27 @@ export class SlackIntegrationService<
             hasRequiredScopes: this.slackClient.hasRequiredScopes(
                 installation.scopes,
             ),
+            features: this.slackClient.getFeatureAvailability(
+                installation.scopes,
+            ),
+            unfurlsEnabled: installation.unfurlsEnabled,
+            aiAgentsEnabled: installation.aiAgentsEnabled,
         };
 
         return response;
     }
 
-    async deleteInstallationFromOrganizationUuid(user: SessionUser) {
-        const organizationUuid = user?.organizationUuid;
+    async deleteInstallationFromOrganizationUuid(account: Account) {
+        const { organizationUuid } = account.organization;
         if (!organizationUuid) throw new ForbiddenError();
 
-        if (user.ability.cannot('manage', 'Organization')) {
+        const auditedAbility = this.createAuditedAbility(account);
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('Organization', { organizationUuid }),
+            )
+        ) {
             throw new ForbiddenError();
         }
 
@@ -117,7 +130,7 @@ export class SlackIntegrationService<
 
         this.analytics.track({
             event: 'share_slack.delete',
-            userId: user.userUuid,
+            userId: account.user.id,
             properties: {
                 organizationId: organizationUuid,
             },

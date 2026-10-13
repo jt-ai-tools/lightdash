@@ -46,7 +46,9 @@ models:
 | `count` | Count all rows | No |
 | `count_distinct` | Count unique values | No |
 | `sum` | Sum of values | No |
+| `sum_distinct` | Sum after de-duplicating rows by `distinct_keys` | No (needs `distinct_keys:`) |
 | `average` | Mean of values | No |
+| `average_distinct` | Mean (average) after de-duplicating rows by `distinct_keys` | No (needs `distinct_keys:`) |
 | `min` | Minimum value | No |
 | `max` | Maximum value | No |
 | `percentile` | Percentile value | No (needs `percentile:`) |
@@ -114,6 +116,55 @@ metrics:
     label: "P95 Response Time"
 ```
 
+### Distinct Aggregation Configuration
+
+`sum_distinct` and `average_distinct` aggregate a column **after de-duplicating rows by one or more dimensions**. Useful for wide tables where a value is repeated across multiple rows (e.g. an order total denormalized onto every line item) and you want to count it only once per `distinct_keys` value.
+
+`distinct_keys` accepts a single dimension reference or a list:
+
+```yaml
+columns:
+  - name: order_total
+    meta:
+      dimension:
+        type: number
+      metrics:
+        # Single key — sum each order_id once
+        revenue:
+          type: sum_distinct
+          distinct_keys: order_id
+
+        # Composite key — array form
+        revenue_by_order_and_currency:
+          type: sum_distinct
+          distinct_keys:
+            - order_id
+            - currency_code
+
+        # Same syntax for averages
+        average_order_value:
+          type: average_distinct
+          distinct_keys: order_id
+```
+
+Defined at the model level with `sql:` (not tied to a single column):
+
+```yaml
+models:
+  - name: order_lines
+    meta:
+      metrics:
+        revenue:
+          type: sum_distinct
+          sql: "${TABLE}.order_total"
+          distinct_keys: order_id
+
+        average_order_value:
+          type: average_distinct
+          sql: "${TABLE}.order_total"
+          distinct_keys: order_id
+```
+
 ### Metric Filters
 
 Apply filters to specific metrics:
@@ -140,6 +191,8 @@ metrics:
 - Multiple values: `["value1", "value2"]`
 - Null checks: `"null"`, `"!null"`
 - Date intervals: `"inThePast N days"`, `"inTheNext N months"` (supports: `days`, `weeks`, `months`, `years`)
+- Current period: `"inTheCurrent month"`, `"notInTheCurrent quarter"` (supports: `day`, `week`, `month`, `quarter`, `year`)
+- Current period to date: `"inTheCurrent month to date"`, `"inTheCurrent month to date excluding today"` (supports: `week`, `month`, `quarter`, `year`)
 
 **Date filter examples:**
 
@@ -154,9 +207,24 @@ metrics:
     type: count
     filters:
       - renewal_date: "inTheNext 7 days"
+
+  orders_this_month:
+    type: count
+    filters:
+      - created_at: "inTheCurrent month"
+
+  orders_month_to_date:
+    type: count
+    filters:
+      - created_at: "inTheCurrent month to date"
+
+  orders_month_to_date_full_days:
+    type: count
+    filters:
+      - created_at: "inTheCurrent month to date excluding today"
 ```
 
-**Important:** `inTheCurrent` is NOT a valid operator in metric definition filters. It is only available in chart and dashboard filters. If you need current-period logic in a metric, use custom SQL with date truncation instead.
+`inTheCurrent month` covers the whole calendar month, including future-dated rows. Add `to date` to end the range at today, and `excluding today` to end it at yesterday so the current partial day is left out. The `to date` suffix is only valid for `week`, `month`, `quarter` and `year`.
 
 ### Show Underlying Values
 
@@ -213,12 +281,33 @@ metrics:
 
 ### Access Control
 
+Metrics accept `required_attributes` and `any_attributes`.
+
+- **Model-level metrics** (under the model's `meta.metrics`) use only their own keys. They inherit nothing from the columns their `sql` references, so set the keys on the metric (or the table) to restrict them.
+- **Column-level metrics** (under a column's `meta.metrics`) inherit the parent dimension's `required_attributes` / `any_attributes`. Setting either key on the metric overrides that key; the other is still inherited.
+
 ```yaml
-metrics:
-  confidential_revenue:
-    type: sum
-    required_attributes:
-      role: "finance"
+# dbt v1.9
+meta:
+  metrics:
+    confidential_revenue:       # model-level: restricted by its own keys
+      type: sum
+      sql: ${TABLE}.revenue
+      required_attributes:
+        role: "finance"
+columns:
+  - name: salary
+    meta:
+      dimension:
+        required_attributes:
+          role: "hr"
+      metrics:
+        total_salary:           # inherits role: "hr"
+          type: sum
+        average_salary:         # overrides: visible to managers too
+          type: average
+          required_attributes:
+            role: ["hr", "manager"]
 ```
 
 ### AI Hints

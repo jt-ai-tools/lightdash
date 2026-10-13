@@ -6,7 +6,7 @@ import {
     Text,
     Tooltip,
     useMantineTheme,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconTrash } from '@tabler/icons-react';
 import { memo, type FC } from 'react';
 import { type useLogsFilters } from '../../features/scheduler/hooks/useLogsFilters';
@@ -21,26 +21,31 @@ type Scheduler = {
     name: string;
 };
 
-interface LogsTopToolbarProps
-    extends Pick<
-        ReturnType<typeof useLogsFilters>,
-        | 'search'
-        | 'setSearch'
-        | 'selectedStatuses'
-        | 'setSelectedStatuses'
-        | 'selectedCreatedByUserUuids'
-        | 'setSelectedCreatedByUserUuids'
-        | 'selectedDestinations'
-        | 'setSelectedDestinations'
-        | 'selectedSchedulerUuid'
-        | 'setSelectedSchedulerUuid'
-        | 'hasActiveFilters'
-        | 'resetFilters'
-    > {
+interface LogsTopToolbarProps extends Pick<
+    ReturnType<typeof useLogsFilters>,
+    | 'search'
+    | 'setSearch'
+    | 'selectedStatuses'
+    | 'setSelectedStatuses'
+    | 'selectedCreatedByUserUuids'
+    | 'setSelectedCreatedByUserUuids'
+    | 'selectedDestinations'
+    | 'setSelectedDestinations'
+    | 'selectedSchedulerUuid'
+    | 'setSelectedSchedulerUuid'
+    | 'hasActiveFilters'
+    | 'resetFilters'
+> {
     isFetching: boolean;
     currentResultsCount: number;
     availableSchedulers: Scheduler[];
     projectUuid?: string;
+    /** Hide the active-scheduler pill (when the view is already scheduler-scoped) */
+    hideSchedulerPill?: boolean;
+    /** Hide the "Created by" filter (less useful in resource-scoped views) */
+    hideCreatedByFilter?: boolean;
+    /** Hide the search-by-scheduler-name input (e.g. when the Name column is hidden) */
+    hideSearchFilter?: boolean;
 }
 
 export const LogsTopToolbar: FC<LogsTopToolbarProps> = memo(
@@ -59,6 +64,9 @@ export const LogsTopToolbar: FC<LogsTopToolbarProps> = memo(
         resetFilters,
         availableSchedulers,
         projectUuid,
+        hideSchedulerPill = false,
+        hideCreatedByFilter = false,
+        hideSearchFilter = false,
     }) => {
         const theme = useMantineTheme();
 
@@ -72,19 +80,19 @@ export const LogsTopToolbar: FC<LogsTopToolbarProps> = memo(
                 p={`${theme.spacing.sm} ${theme.spacing.md}`}
                 wrap="nowrap"
             >
-                <Group gap="xs" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
-                    <SearchFilter search={search} setSearch={setSearch} />
+                <Group gap="xs" wrap="nowrap" flex={1} miw={0}>
+                    {!hideSearchFilter && (
+                        <>
+                            <SearchFilter
+                                search={search}
+                                setSearch={setSearch}
+                            />
 
-                    <Divider
-                        orientation="vertical"
-                        w={1}
-                        h={20}
-                        style={{
-                            alignSelf: 'center',
-                        }}
-                    />
+                            <Divider orientation="vertical" w={1} h={20} />
+                        </>
+                    )}
 
-                    {selectedScheduler && (
+                    {!hideSchedulerPill && selectedScheduler && (
                         <>
                             <Text fz="sm" c="ldGray.7" fw={500}>
                                 Scheduler:
@@ -95,14 +103,7 @@ export const LogsTopToolbar: FC<LogsTopToolbarProps> = memo(
                             >
                                 {selectedScheduler.name}
                             </Pill>
-                            <Divider
-                                orientation="vertical"
-                                w={1}
-                                h={20}
-                                style={{
-                                    alignSelf: 'center',
-                                }}
-                            />
+                            <Divider orientation="vertical" w={1} h={20} />
                         </>
                     )}
 
@@ -111,13 +112,17 @@ export const LogsTopToolbar: FC<LogsTopToolbarProps> = memo(
                         setSelectedStatuses={setSelectedStatuses}
                     />
 
-                    <CreatedByFilter
-                        projectUuid={projectUuid}
-                        selectedCreatedByUserUuids={selectedCreatedByUserUuids}
-                        setSelectedCreatedByUserUuids={
-                            setSelectedCreatedByUserUuids
-                        }
-                    />
+                    {!hideCreatedByFilter && (
+                        <CreatedByFilter
+                            projectUuid={projectUuid}
+                            selectedCreatedByUserUuids={
+                                selectedCreatedByUserUuids
+                            }
+                            setSelectedCreatedByUserUuids={
+                                setSelectedCreatedByUserUuids
+                            }
+                        />
+                    )}
 
                     <DestinationFilter
                         selectedDestinations={selectedDestinations}
@@ -128,11 +133,9 @@ export const LogsTopToolbar: FC<LogsTopToolbarProps> = memo(
                 {hasActiveFilters && (
                     <Tooltip label="Clear all filters">
                         <ActionIcon
-                            variant="subtle"
                             size="sm"
-                            color="gray"
                             onClick={resetFilters}
-                            style={{ flexShrink: 0 }}
+                            flex="0 0 auto"
                         >
                             <MantineIcon icon={IconTrash} />
                         </ActionIcon>

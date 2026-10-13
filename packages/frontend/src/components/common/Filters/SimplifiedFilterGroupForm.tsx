@@ -34,18 +34,18 @@ const SimplifiedFilterGroupForm: FC<Props> = memo(
         );
 
         return (
-            <Stack style={{ flexGrow: 1 }}>
+            <Stack flex={1}>
                 <Tooltip
                     label="You can only use the 'and' operator when combining metrics & dimensions"
                     disabled={filterRules.length > 1}
                     arrowPosition="center"
                 >
-                    <Text color="dimmed" size="xs">
+                    <Text c="dimmed" fz="xs">
                         All of the following conditions match:
                     </Text>
                 </Tooltip>
 
-                <Stack spacing="sm">
+                <Stack gap="sm">
                     {filterRules.map((item, index) => (
                         <FilterRuleForm
                             isEditMode={isEditMode}

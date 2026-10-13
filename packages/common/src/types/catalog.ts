@@ -10,6 +10,7 @@ import {
     type FieldType,
     type Metric,
 } from './field';
+import { type MetricFilterRule } from './filter';
 import type { KnexPaginatedData } from './knex-paginate';
 import { type ChartSummary } from './savedCharts';
 import { type TraceTaskBase } from './scheduler';
@@ -89,11 +90,14 @@ export type CatalogField = Pick<
         tags?: string[]; // Tags from table, for filtering
         categories: Pick<Tag, 'name' | 'color' | 'tagUuid' | 'yamlReference'>[]; // Tags manually added by the user in the catalog
         chartUsage: number | undefined;
+        verifiedChartUsage?: number;
         icon: CatalogItemIcon | null;
         aiHints: string[] | null;
         searchRank?: number;
         spotlightFilterBy?: string[]; // dimension IDs allowlist (metrics only)
         spotlightSegmentBy?: string[]; // dimension IDs allowlist (metrics only)
+        spotlightDefaultSegment?: string; // default segment dimension name (metrics only)
+        spotlightDefaultFilter?: MetricFilterRule; // default filter (metrics only)
         owner: CatalogOwner | null; // resolved metric owner
     };
 
@@ -123,7 +127,7 @@ export type CatalogItem = CatalogField | CatalogTable;
 
 export type CatalogMetricsTreeNode = Pick<
     CatalogField,
-    'catalogSearchUuid' | 'name' | 'tableName'
+    'catalogSearchUuid' | 'name' | 'label' | 'tableName'
 >;
 
 export type MetricsTreeSource = 'ui' | 'yaml';
@@ -182,6 +186,7 @@ export type MetricsTreeNodePosition = {
 
 export type MetricsTreeNode = MetricsTreeNodePosition & {
     name: string;
+    label: string;
     tableName: string;
     source: MetricsTreeSource;
 };
@@ -332,6 +337,7 @@ export type CatalogAnalytics = {
     charts: (Pick<
         ChartSummary,
         | 'uuid'
+        | 'slug'
         | 'name'
         | 'description'
         | 'spaceUuid'
@@ -360,6 +366,7 @@ export const getBasicType = (field: CompiledDimension | CompiledMetric) => {
         case MetricType.COUNT_DISTINCT:
         case MetricType.SUM:
         case MetricType.SUM_DISTINCT:
+        case MetricType.AVERAGE_DISTINCT:
         case MetricType.MIN:
         case MetricType.MAX:
         case MetricType.PERCENT_OF_PREVIOUS:
@@ -397,6 +404,8 @@ export type CatalogItemSummary = Pick<
     cachedExploreUuid: string;
     tableName: string;
     fieldType: string | undefined;
+    label: string | null;
+    description: string | null;
 };
 
 export type CatalogItemWithTagUuids = CatalogItemSummary & {
@@ -458,6 +467,11 @@ export type ChartUsageIn = CatalogFieldWhere & {
 export type ApiMetricsWithAssociatedTimeDimensionResponse = {
     status: 'ok';
     results: MetricWithAssociatedTimeDimension[];
+};
+
+export type ApiPaginatedMetricsWithTimeDimensionResponse = {
+    status: 'ok';
+    results: KnexPaginatedData<CatalogField[]>;
 };
 
 export type ApiSegmentDimensionsResponse = {

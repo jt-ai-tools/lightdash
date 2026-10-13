@@ -4,19 +4,26 @@ import {
     Droppable,
     type DropResult,
 } from '@hello-pangea/dnd';
+import {
+    getGranularityMapFromItems,
+    getReadableTextColor,
+} from '@lightdash/common';
 import { Box, Stack } from '@mantine/core';
 import { useCallback, type FC } from 'react';
 import { isPieVisualizationConfig } from '../../LightdashVisualization/types';
 import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
+import { ColorPaletteSection } from '../common/ColorPaletteSection';
 import { Config } from '../common/Config';
 import { GroupItem } from './GroupItem';
 import { ValueOptions } from './ValueOptions';
 
 export const Series: FC = () => {
-    const { visualizationConfig, colorPalette, getGroupColor } =
+    const { visualizationConfig, colorPalette, getGroupColor, itemsMap } =
         useVisualizationContext();
 
     const isPieChartConfig = isPieVisualizationConfig(visualizationConfig);
+
+    const granularityFields = Object.keys(getGranularityMapFromItems(itemsMap));
 
     const handleDragEnd = useCallback(
         (result: DropResult) => {
@@ -39,6 +46,8 @@ export const Series: FC = () => {
         groupFieldIds,
         valueLabel,
         valueLabelChange,
+        valueLabelColor,
+        valueLabelColorChange,
         showValue,
         toggleShowValue,
         showPercentage,
@@ -56,8 +65,19 @@ export const Series: FC = () => {
         groupValueOptionChange,
     } = visualizationConfig.chartConfig;
 
+    const firstGroupLabel = sortedGroupLabels[0];
+    const firstGroupColor = firstGroupLabel
+        ? (groupColorOverrides[firstGroupLabel] ??
+          getGroupColor(groupFieldIds.join('_'), firstGroupLabel))
+        : colorPalette[0];
+    const automaticValueLabelColor =
+        valueLabel === 'inside' && firstGroupColor
+            ? getReadableTextColor(firstGroupColor)
+            : firstGroupColor;
+
     return (
         <Stack>
+            <ColorPaletteSection />
             <Config>
                 <Config.Section>
                     <Config.Group>
@@ -69,6 +89,10 @@ export const Series: FC = () => {
                         isShowPercentageOverriden={isShowPercentageOverriden}
                         valueLabel={valueLabel}
                         onValueLabelChange={valueLabelChange}
+                        valueLabelColor={valueLabelColor}
+                        defaultValueLabelColor={automaticValueLabelColor}
+                        swatches={colorPalette}
+                        onValueLabelColorChange={valueLabelColorChange}
                         showValue={showValue}
                         onToggleShowValue={toggleShowValue}
                         showPercentage={showPercentage}
@@ -116,6 +140,16 @@ export const Series: FC = () => {
                                                                     .draggableProps
                                                                     .style,
                                                                 top: 'auto',
+                                                                ...(draggableSnapshot.isDragging
+                                                                    ? {
+                                                                          backgroundColor:
+                                                                              'white',
+                                                                          borderRadius:
+                                                                              'var(--mantine-radius-sm)',
+                                                                          boxShadow:
+                                                                              'var(--mantine-shadow-sm)',
+                                                                      }
+                                                                    : {}),
                                                             }}
                                                             dragHandleProps={
                                                                 draggableProvided.dragHandleProps
@@ -124,21 +158,8 @@ export const Series: FC = () => {
                                                                 sortedGroupLabels.length ===
                                                                 1
                                                             }
-                                                            sx={(theme) =>
-                                                                draggableSnapshot.isDragging
-                                                                    ? {
-                                                                          backgroundColor:
-                                                                              'white',
-                                                                          borderRadius:
-                                                                              theme
-                                                                                  .radius
-                                                                                  .sm,
-                                                                          boxShadow:
-                                                                              theme
-                                                                                  .shadows
-                                                                                  .sm,
-                                                                      }
-                                                                    : {}
+                                                            granularityFields={
+                                                                granularityFields
                                                             }
                                                             swatches={
                                                                 colorPalette
@@ -185,6 +206,15 @@ export const Series: FC = () => {
                                                                 ]
                                                                     ?.showPercentage ??
                                                                 showPercentage
+                                                            }
+                                                            valueLabelColor={
+                                                                groupValueOptionOverrides[
+                                                                    groupLabel
+                                                                ]
+                                                                    ?.valueLabelColor
+                                                            }
+                                                            defaultValueLabelColor={
+                                                                valueLabelColor
                                                             }
                                                             onLabelChange={
                                                                 groupLabelChange

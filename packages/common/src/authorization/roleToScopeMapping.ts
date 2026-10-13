@@ -1,8 +1,11 @@
+import { AGENT_CAPABILITY_DEFAULTS } from '../types/agentPermissions';
 import {
     ProjectMemberRole,
     ProjectMemberRoleLabels,
 } from '../types/projectMemberRole';
 import type { RoleWithScopes } from '../types/roles';
+import { AGENT_CAPABILITY_SCOPES } from './agentCapabilityScopes';
+import { isOrganizationOnlyScope } from './scopes';
 
 /**
  * Utility functions to convert project member roles to equivalent scope sets
@@ -14,8 +17,12 @@ import type { RoleWithScopes } from '../types/roles';
  */
 const BASE_ROLE_SCOPES = {
     [ProjectMemberRole.VIEWER]: [
+        ...AGENT_CAPABILITY_DEFAULTS.map(
+            (capability) => AGENT_CAPABILITY_SCOPES[capability],
+        ),
         // Basic viewing permissions
         'view:Dashboard',
+        'view:Document',
         'view:JobStatus@self', // For viewing job status created by user
         'view:SavedChart',
         'view:Space',
@@ -25,10 +32,28 @@ const BASE_ROLE_SCOPES = {
         'view:Tags',
         'manage:ExportCsv',
 
+        // Org-context view scopes — every member-or-above can see the
+        // org's own metadata + the list of fellow members. Granted by
+        // `applyOrganizationMemberStaticAbilities.member` / `viewer`.
+        'view:Organization',
+        'view:Learn',
+        'view:OrganizationMemberProfile',
+
         // Enterprise scopes (when available)
         'view:MetricsTree',
         'view:SpotlightTableConfig',
         'view:AiAgentThread@self',
+        'view:OrganizationDesign',
+
+        // Embedded analytics controls
+        'view:EmbedDashboardFilters',
+        'view:EmbedDashboardFilterAddition',
+        'view:EmbedDashboardParameters',
+        'view:EmbedCsvExport',
+        'view:EmbedDashboardCsvExport',
+        'view:EmbedImageExport',
+        'view:EmbedPagePdfExport',
+        'view:EmbedDateZoom',
     ],
 
     [ProjectMemberRole.INTERACTIVE_VIEWER]: [
@@ -42,14 +67,38 @@ const BASE_ROLE_SCOPES = {
         'create:DashboardComments',
         'manage:GoogleSheets',
 
+        // Job tracking — orchestrating queries/exports/etc. Granted at
+        // `applyOrganizationMemberStaticAbilities.interactive_viewer`.
+        'create:Job',
+        'view:Job',
+        'view:Job@self',
+
         // Space-level content management (requires space admin/editor role)
         'manage:Dashboard@space', // Via space access
+        'manage:Document@space',
         'manage:SavedChart@space', // Via space access
+        'manage:SemanticViewer@space', // Via space access (paired w/ @space content)
+        'manage:DataApp@space', // Via space access
         'manage:Space@assigned', // Via space access (admin role)
 
         // Enterprise scopes
         'view:AiAgent',
+        'view:OrganizationAiAgent',
+        'view:AiAgentDocument',
+        'view:AiAgentSkill',
         'create:AiAgentThread',
+        'view:DataApp', // Project-wide + space-access view (parity with manage:Explore)
+        'view:DataApp@self', // Own personal apps (created before demotion / under older rules)
+        'manage:DataApp@self', // Own personal apps (created before demotion / under older rules)
+        'view:ExternalConnection', // Link admin-enabled connections when editing space apps
+        'view:ContentVerification', // Read-only discovery of verified content (manage stays developer-level)
+
+        // Embedded analytics controls
+        'view:EmbedExplore',
+        'view:EmbedUnderlyingData',
+        'view:EmbedDataApps',
+        'view:EmbedAiAgent',
+        'view:EmbedAiAgentDebug',
     ],
 
     [ProjectMemberRole.EDITOR]: [
@@ -61,45 +110,130 @@ const BASE_ROLE_SCOPES = {
         'manage:DashboardComments',
         'manage:Tags',
 
+        // Broad SemanticViewer mgmt — promoted from the @space variant
+        // when the user reaches editor tier. Granted at
+        // `applyOrganizationMemberStaticAbilities.editor`.
+        'manage:SemanticViewer',
+
+        // View-only access to org warehouse creds — needed before admin
+        // tier so editors can see what's already configured. Granted at
+        // `applyOrganizationMemberStaticAbilities.editor`.
+        'view:OrganizationWarehouseCredentials',
+
         // Enterprise scopes
         'manage:MetricsTree',
+        'manage:ExternalSource',
         'manage:AiAgentThread@self', // User's own threads
+        'view:ContentAsCode',
+        'create:ContentAsCode',
+        'create:DataApp',
     ],
 
     [ProjectMemberRole.DEVELOPER]: [
         // Developer-specific permissions
+        'manage:PreAggregation',
         'manage:VirtualView',
+        // Granular create/delete companions to manage:VirtualView. Both
+        // covered by the broader manage at runtime, but listed
+        // explicitly so the role-builder UI shows them ticked.
+        'create:VirtualView',
+        'delete:VirtualView',
         'manage:CustomSql',
+        'manage:CustomFields',
+        'view:CompiledSql',
+        'view:EmbedCompiledSql',
+        'manage:CustomSqlTableCalculations',
         'manage:SqlRunner',
         'manage:Validation',
         'manage:CompileProject',
+        'manage:DeployProject',
+        'manage:DeployProject@self',
+        'create:Job@self', // Jobs inside previews created by the user
         'create:Project@preview', // Preview projects
         'delete:Project@self', // Preview projects created by user
         'update:Project',
         'update:Project@self',
+        // Redundant for developers (covered by broader content manage
+        // scopes) but surfaced so cloned custom roles can drop production
+        // edit rights and keep editing inside previews the user created.
+        'manage:Dashboard@self',
+        'manage:SavedChart@self',
+        'manage:Space@self',
+        'manage:Explore@self',
+        'create:DataApp@preview',
+        'manage:DataApp@preview',
         'view:JobStatus', // All jobs in project
         'view:SourceCode',
         'manage:SourceCode',
 
+        // Promote to upstream project. Both broad + @space variants
+        // surface in `applyOrganizationMemberStaticAbilities.developer`.
+        'promote:Dashboard',
+        'promote:Dashboard@space',
+        'promote:SavedChart',
+        'promote:SavedChart@space',
+
         // Enterprise scopes
         'manage:SpotlightTableConfig',
         'manage:ContentAsCode',
+        // Redundant for developers (covered by the broad manage above) but
+        // surfaced so admin-cloned custom roles can drop full
+        // `manage:ContentAsCode` and keep self-preview write.
+        'manage:ContentAsCode@self',
         'manage:AiAgent',
+        'manage:OrganizationAiAgent',
+        'manage:AiAgentDocument',
+        'manage:AiAgentSkill',
         'manage:AiAgentThread@self', // User's own threads
+        'manage:ContentVerification',
+        // Edit lock for verified charts/dashboards — not on editor so
+        // custom roles can grant/withhold it independently of manage:Content.
+        'manage:VerifiedContent',
+        'create:AiDeepResearch',
     ],
 
     [ProjectMemberRole.ADMIN]: [
         // Admin-specific permissions
+        'manage:DataApp',
+        'manage:DataAppDependency', // Add custom npm deps (supply-chain capability)
+        'manage:ExternalConnection',
+        'manage:OrganizationDesign',
         'delete:Project', // Any project
         'view:Analytics',
         'manage:Dashboard', // All dashboards
+        'manage:Document',
         'manage:Space', // All spaces
         'manage:Project', // Required for managing non-private spaces
         'manage:SavedChart', // All saved charts
         'manage:DeletedContent', // Soft-deleted content management
+        'manage:ProjectHomepage', // Curated project homepages (EE)
         'view:AiAgentThread', // All threads in project
         'manage:AiAgentThread', // All threads in project
         'manage:ScheduledDeliveries',
+
+        // Organization-management scopes. These are no-ops at project
+        // assignment (CASL conditions match `organizationUuid`-keyed
+        // subjects only) but are necessary at the role's intended ORG
+        // assignment — service accounts with `roleUuid`, or any future
+        // org-level human assignment. See `docs/authentication-and-roles.md`
+        // → "Project vs organization assignment of custom roles".
+        // Granted at `applyOrganizationMemberStaticAbilities.admin`.
+        'manage:OrganizationMemberProfile',
+        'manage:Group',
+        'manage:InviteLink',
+        'manage:GitIntegration',
+        'manage:OrganizationWarehouseCredentials',
+        'manage:Organization',
+        'manage:OrganizationColorPalette',
+        'view:Roadmap',
+        'manage:Roadmap',
+        'impersonate:User',
+
+        // System roles take token access from the deployment config; listing
+        // it here surfaces the toggle in the role builder. Deployment config
+        // caps the scope, so a role can never grant tokens on a deployment
+        // that disabled them or excluded the role's tier.
+        'manage:PersonalAccessToken',
     ],
 } as const;
 
@@ -148,6 +282,106 @@ export const getAllScopesForRole = (role: ProjectMemberRole): string[] => [
 ];
 
 /**
+ * Scopes a training project never grants, on top of every organization-only
+ * scope (those are filtered by `isOrganizationOnlyScope`). Grouped by the
+ * reason each is left out. Everything else in the project-admin set is
+ * granted to every org member on the org's training project.
+ */
+export const TRAINING_PROJECT_EXCLUDED_SCOPES: readonly string[] = [
+    // Break-the-project: deleting it, changing its settings or connection,
+    // refreshing or redeploying dbt, pre-aggregation jobs. `manage:Project`
+    // goes too: CASL's `manage` implies every action, so keeping it would
+    // hand back `update` and `delete` on the project.
+    'manage:Project',
+    'delete:Project',
+    'delete:Project@self',
+    'update:Project',
+    'update:Project@self',
+    'manage:CompileProject',
+    'manage:DeployProject',
+    'manage:DeployProject@self',
+    'create:Job',
+    'create:Job@self',
+    'manage:Job',
+    'manage:PreAggregation',
+    // Outbound messaging: a viewer must not be able to email or Slack
+    // arbitrary recipients through the instance
+    'create:ScheduledDeliveries',
+    'manage:ScheduledDeliveries',
+    'manage:ScheduledDeliveries@self',
+    'manage:GoogleSheets',
+    // Egress and supply chain: custom npm deps, external connections and
+    // sources, git integration, source-code PRs, preview-project creation
+    'manage:DataAppDependency',
+    'manage:ExternalConnection',
+    'view:ExternalConnection',
+    'manage:ExternalSource',
+    'manage:GitIntegration',
+    'manage:SourceCode',
+    'view:SourceCode',
+    'create:Project@preview',
+    'create:DataApp@preview',
+    'manage:DataApp@preview',
+    // Other people's data: every learner's threads and the usage analytics of
+    // colleagues. A learner reads and manages their own threads (`@self`)
+    // only. Agent knowledge documents are not listed: in a training project
+    // or copy an agent only reaches documents of that project, never the
+    // organization's (AiAgentDocumentModel), so a learner sees the copy's own.
+    'view:AiAgentThread',
+    'manage:AiAgentThread',
+    'view:AiAgentSkill',
+    'manage:AiAgentSkill',
+    'view:Analytics',
+];
+
+/**
+ * The trainee scope set: project admin minus organization-only scopes minus
+ * `TRAINING_PROJECT_EXCLUDED_SCOPES`. Derived by rule so an addition to the
+ * admin set is granted on training projects unless it is org-only or
+ * explicitly excluded here.
+ */
+export const getTrainingProjectScopes = (): string[] =>
+    getAllScopesForRole(ProjectMemberRole.ADMIN).filter(
+        (scope) =>
+            !isOrganizationOnlyScope(scope) &&
+            !TRAINING_PROJECT_EXCLUDED_SCOPES.includes(scope),
+    );
+
+/**
+ * What every org member holds on the shared training project itself: a
+ * viewer's project scopes, so the seed can be browsed and the library opened
+ * but nothing written. Writing happens in the learner's own copy, which gets
+ * `getTrainingProjectScopes()`; a shared project anyone could write to would
+ * leak every learner's edits into everyone else's copies.
+ */
+/**
+ * Read-only views of the seeded Enterprise content a plain viewer would not
+ * have, so learners can look at the shared project's data app and agent
+ * before practising on their own copy. Still nothing written.
+ */
+const TRAINING_PROJECT_VIEWER_EXTRA_SCOPES = ['view:DataApp', 'view:AiAgent'];
+
+export const getTrainingProjectViewerScopes = (): string[] => [
+    ...getAllScopesForRole(ProjectMemberRole.VIEWER).filter(
+        (scope) =>
+            !isOrganizationOnlyScope(scope) &&
+            !TRAINING_PROJECT_EXCLUDED_SCOPES.includes(scope),
+    ),
+    ...TRAINING_PROJECT_VIEWER_EXTRA_SCOPES,
+];
+
+/**
+ * Extra scopes a learner holds on their own training copy so the Learn
+ * developer sandbox can deploy into it. Deliberately not part of the trainee
+ * set: they are excluded above for the shared project and for every other
+ * surface, and only the sandbox's copy provisioning re-grants them.
+ */
+export const LEARN_SANDBOX_SCOPES: readonly string[] = [
+    'manage:DeployProject@self',
+    'create:Job@self',
+];
+
+/**
  * Gets only the non-enterprise scopes for a role (filters out enterprise-only features)
  */
 export const getNonEnterpriseScopesForRole = (
@@ -159,12 +393,36 @@ export const getNonEnterpriseScopesForRole = (
         'view:SpotlightTableConfig',
         'manage:SpotlightTableConfig',
         'view:AiAgent',
+        'view:OrganizationAiAgent',
+        'view:AiAgentDocument',
+        'view:AiAgentSkill',
         'view:AiAgentThread',
         'create:AiAgentThread',
         'manage:AiAgent',
+        'manage:OrganizationAiAgent',
+        'manage:AiAgentDocument',
+        'manage:AiAgentSkill',
         'manage:AiAgentThread',
+        'view:ContentAsCode',
+        'create:ContentAsCode',
         'manage:ContentAsCode',
+        'manage:ContentAsCode@self',
+        'view:DataApp',
+        'manage:DataApp',
+        'manage:DataApp@space',
+        'create:DataApp',
+        'create:DataApp@preview',
+        'manage:DataApp@preview',
+        'view:DataApp@self',
+        'manage:DataApp@self',
+        'view:ExternalConnection',
+        'manage:ExternalConnection',
+        'view:OrganizationDesign',
+        'manage:OrganizationDesign',
+        'view:Roadmap',
+        'manage:Roadmap',
         'manage:PersonalAccessToken',
+        'manage:PreAggregation',
     ]);
 
     return PROJECT_ROLE_TO_SCOPES_MAP[role].filter(
@@ -178,6 +436,7 @@ export const getSystemRoles = (): RoleWithScopes[] =>
         name: ProjectMemberRoleLabels[role],
         description: ProjectMemberRoleLabels[role],
         ownerType: 'system',
+        level: 'project',
         scopes: getAllScopesForRole(role),
         organizationUuid: null,
         createdAt: null,

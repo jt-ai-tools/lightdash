@@ -2,15 +2,15 @@ import {
     render,
     renderHook,
     type Queries,
+    type queries,
     type RenderHookOptions,
     type RenderHookResult,
     type RenderOptions,
     type RenderResult,
-    type queries,
 } from '@testing-library/react';
 import { type FC, type PropsWithChildren, type ReactElement } from 'react';
 import { vi } from 'vitest';
-import Mantine8Provider from '../providers/Mantine8Provider';
+import MantineBaseProvider from '../providers/MantineBaseProvider';
 import MantineProvider from '../providers/MantineProvider';
 import ReactQueryProvider from '../providers/ReactQuery/ReactQueryProvider';
 import TrackingProvider from '../providers/Tracking/TrackingProvider';
@@ -22,15 +22,16 @@ vi.mock('src/providers/ReactQueryProvider');
 vi.mock('src/providers/TrackingProvider');
 
 const getMockedProviders = (appMocks?: AppProviderMockProps['mocks']) => {
+    // eslint-disable-next-line react/only-export-components -- test utility, not a real module for fast refresh
     const ProviderWrapper: FC<PropsWithChildren> = ({ children }) => {
         return (
             <ReactQueryProvider>
-                <MantineProvider>
-                    <Mantine8Provider>
+                <MantineProvider env="test">
+                    <MantineBaseProvider env="test">
                         <AppProviderMock mocks={appMocks}>
                             <TrackingProvider>{children}</TrackingProvider>
                         </AppProviderMock>
-                    </Mantine8Provider>
+                    </MantineBaseProvider>
                 </MantineProvider>
             </ReactQueryProvider>
         );

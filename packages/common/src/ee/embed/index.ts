@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import type { EmbedContent, OssEmbed } from '../../types/auth';
+import type { Dashboard } from '../../types/dashboard';
+import type { OrganizationColorPalette } from '../../types/organization';
 import assertUnreachable from '../../utils/assertUnreachable';
 
 /** @deprecated Use OssEmbed instead */
@@ -15,6 +17,7 @@ export type DecodedEmbed = Omit<Embed, 'encodedSecret'> & {
 export type CreateEmbedRequestBody = {
     dashboardUuids?: string[];
     chartUuids?: string[];
+    appUuids?: string[];
 };
 
 export type UpdateEmbed = {
@@ -23,6 +26,12 @@ export type UpdateEmbed = {
     // TODO: Make these required in Settings UI PR
     chartUuids?: string[];
     allowAllCharts?: boolean;
+    allowAllApps?: boolean;
+    appUuids?: string[];
+};
+
+export type GetEmbedDashboardRequest = {
+    paletteUuid?: string;
 };
 
 export enum FilterInteractivityValues {
@@ -42,6 +51,9 @@ export const DashboardFilterInteractivityOptionsSchema = z.object({
     // Nullish because we have python clients that serialize None to null
     allowedFilters: z.array(z.string()).nullish(),
     hidden: z.boolean().optional(),
+    // Lets embed viewers add their own temporary filters via the filter bar.
+    // Only effective when filter interactivity is enabled.
+    canAddFilters: z.boolean().optional(),
 });
 
 export type DashboardFilterInteractivityOptions = z.infer<
@@ -56,19 +68,43 @@ export type ParameterInteractivityOptions = z.infer<
     typeof ParameterInteractivityOptionsSchema
 >;
 
+/** Legacy capability flags remain supported; new permissions must use embed scopes. */
 export const InteractivityOptionsSchema = z.object({
     dashboardFiltersInteractivity:
         DashboardFilterInteractivityOptionsSchema.optional(),
     parameterInteractivity: ParameterInteractivityOptionsSchema.optional(),
     canExportCsv: z.boolean().optional(),
+    // Dashboard-level "Export all" (CSV/XLSX ZIP of every tile). Off by
+    // default and independent from the per-tile canExportCsv.
+    canExportDashboardCsv: z.boolean().optional(),
     canExportImages: z.boolean().optional(),
     canExportPagePdf: z.boolean().optional(),
     canDateZoom: z.boolean().optional(),
     canExplore: z.boolean().optional(),
     canViewUnderlyingData: z.boolean().optional(),
+    // Authorizes embed users to view data app tiles on the dashboard.
+    // Off by default — without it, data app tiles render as a placeholder.
+    // Setting it grants the embed JWT the broader CASL abilities a data app
+    // needs (view:DataApp + view:Explore project-wide) so it can mint a
+    // preview token, run its arbitrary metric queries, and use external
+    // connections that an admin linked to the app. Mirrors canExplore: an
+    // explicit decision to widen the embed beyond pre-built chart queries.
+    canViewDataApps: z.boolean().optional(),
+    // Pins tabs and the filter bar to the top while scrolling. Off by default.
+    stickyHeader: z.boolean().optional(),
 });
 
 export type InteractivityOptions = z.infer<typeof InteractivityOptionsSchema>;
+
+export type EmbedSelectedColorPalette = Pick<
+    OrganizationColorPalette,
+    'colors' | 'darkColors'
+>;
+
+export type EmbedDashboard = Dashboard &
+    InteractivityOptions & {
+        selectedPalette?: EmbedSelectedColorPalette | null;
+    };
 
 export const ChartInteractivityOptionsSchema = z.object({
     scopes: z.array(z.string()).optional(),
@@ -81,9 +117,42 @@ export type ChartInteractivityOptions = z.infer<
     typeof ChartInteractivityOptionsSchema
 >;
 
+export const EMBED_MAX_SOURCE_SPACE_UUIDS = 100;
+
+export const EmbedSourceSpaceUuidsSchema = z
+    .array(z.string().uuid())
+    .max(EMBED_MAX_SOURCE_SPACE_UUIDS);
+
+export type EmbedWriteActions = {
+    serviceAccountUserUuid?: string;
+    userUuid?: string;
+    spaceUuid: string;
+    /** Extra spaces whose charts dashboards may reference; the write actor still needs view access. */
+    sourceSpaceUuids?: string[];
+    /** Use scopes instead of dashboard flags; AI additionally requires EmbedAiAgent. */
+    permissionsMode?: 'default' | 'roles';
+};
+
+export const EmbedWriteActionsSchema: z.ZodType<EmbedWriteActions> = z
+    .object({
+        serviceAccountUserUuid: z.string().uuid().optional(),
+        userUuid: z.string().uuid().optional(),
+        spaceUuid: z.string().uuid(),
+        sourceSpaceUuids: EmbedSourceSpaceUuidsSchema.optional(),
+        permissionsMode: z.enum(['default', 'roles']).optional(),
+    })
+    .refine(
+        ({ serviceAccountUserUuid, userUuid }) =>
+            serviceAccountUserUuid !== undefined || userUuid !== undefined,
+        {
+            message:
+                'Either serviceAccountUserUuid or userUuid is required for write actions',
+        },
+    );
+
 export const EmbedJwtSchema = z
     .object({
-        userAttributes: z.record(z.unknown()).optional(),
+        userAttributes: z.record(z.string(), z.unknown()).optional(),
         user: z
             .object({
                 externalId: z.string().nullish(),
@@ -115,7 +184,31 @@ export const EmbedJwtSchema = z
                     isPreview: z.boolean().optional(),
                 })
                 .merge(ChartInteractivityOptionsSchema),
+            z.object({
+                type: z.literal('dataApp'),
+                projectUuid: z.string().optional(),
+                appUuid: z.string(),
+                isPreview: z.boolean().optional(),
+            }),
+            z.object({
+                type: z.literal('aiAgent'),
+                projectUuid: z.string().optional(),
+                agentUuid: z.string(),
+                canExplore: z.boolean().optional(),
+                canViewDebugInfo: z.boolean().optional(),
+            }),
+            z.object({
+                type: z.literal('metricsCatalog'),
+                projectUuid: z.string().optional(),
+                canExplore: z.boolean().optional(),
+            }),
+            z.object({
+                type: z.literal('apiAccess'),
+                projectUuid: z.string().optional(),
+                serviceAccountUserUuid: z.string().uuid(),
+            }),
         ]),
+        writeActions: EmbedWriteActionsSchema.optional(),
         iat: z.number().optional(),
         exp: z.number(),
     })
@@ -135,16 +228,22 @@ export type CommonEmbedJwtContent = {
         allowedFilters?: string[] | null;
         // Should the filters be rendered hidden or visible in the UI
         hidden?: boolean;
+        // Lets embed viewers add their own temporary filters via the filter bar.
+        // Only effective when filter interactivity is enabled.
+        canAddFilters?: boolean;
     };
     parameterInteractivity?: {
         enabled: boolean;
     };
     canExportCsv?: boolean;
+    canExportDashboardCsv?: boolean;
     canExportImages?: boolean;
     canDateZoom?: boolean;
     canExportPagePdf?: boolean;
     canExplore?: boolean;
     canViewUnderlyingData?: boolean;
+    canViewDataApps?: boolean;
+    stickyHeader?: boolean;
 };
 
 type CommonChartEmbedJwtContent = {
@@ -171,11 +270,53 @@ export type EmbedJwtContentChart = CommonChartEmbedJwtContent & {
     contentId: string;
 };
 
+// A standalone data app embed: the JWT names a single app and self-authorizes
+// it (no dashboard). v1 carries no interactivity flags — filters/export are out
+// of scope. `dashboardFiltersInteractivity`/`parameterInteractivity` are typed
+// as `undefined` so the shared `fromJwt` reads stay assignable (matches chart).
+type CommonDataAppEmbedJwtContent = {
+    type: 'dataApp';
+    projectUuid?: string;
+    isPreview?: boolean;
+    dashboardFiltersInteractivity?: undefined;
+    parameterInteractivity?: undefined;
+};
+
+export type EmbedJwtContentDataApp = CommonDataAppEmbedJwtContent & {
+    appUuid: string;
+};
+
+export type EmbedJwtContentAiAgent = {
+    type: 'aiAgent';
+    projectUuid?: string;
+    agentUuid: string;
+    canExplore?: boolean;
+    /** Shows agent debug information. Ignored in roles mode, where view:EmbedAiAgentDebug decides. */
+    canViewDebugInfo?: boolean;
+};
+
+export type EmbedJwtContentMetricsCatalog = {
+    type: 'metricsCatalog';
+    projectUuid?: string;
+    canExplore?: boolean;
+};
+
+export type EmbedJwtContentApiAccess = {
+    type: 'apiAccess';
+    projectUuid?: string;
+    serviceAccountUserUuid: string;
+};
+
 export type CreateEmbedJwt = {
     content:
         | EmbedJwtContentDashboardUuid
         | EmbedJwtContentDashboardSlug
-        | EmbedJwtContentChart;
+        | EmbedJwtContentChart
+        | EmbedJwtContentDataApp
+        | EmbedJwtContentAiAgent
+        | EmbedJwtContentMetricsCatalog
+        | EmbedJwtContentApiAccess;
+    writeActions?: EmbedWriteActions;
     userAttributes?: { [key: string]: string };
     user?: {
         email?: string;
@@ -202,6 +343,12 @@ export function isChartContent(
     content: CreateEmbedJwt['content'],
 ): content is EmbedJwtContentChart {
     return content.type === 'chart';
+}
+
+export function isAiAgentContent(
+    content: CreateEmbedJwt['content'],
+): content is EmbedJwtContentAiAgent {
+    return content.type === 'aiAgent';
 }
 
 export function isDashboardContent(
@@ -252,6 +399,15 @@ export function isFilterInteractivityEnabled(
                 `Unknown FilterInteractivityValue ${filterInteractivityValue}`,
             );
     }
+}
+
+export function canAddDashboardFiltersInEmbed(
+    filterInteractivityOptions?: DashboardFilterInteractivityOptions,
+): boolean {
+    return (
+        !!isFilterInteractivityEnabled(filterInteractivityOptions) &&
+        filterInteractivityOptions?.canAddFilters === true
+    );
 }
 
 export function isParameterInteractivityEnabled(

@@ -1,15 +1,10 @@
-import {
-    AnyType,
-    CommercialFeatureFlags,
-    FeatureFlags,
-} from '@lightdash/common';
+import { CommercialFeatureFlags } from '@lightdash/common';
 import { Knex } from 'knex';
 import { LightdashConfig } from '../../config/parseConfig';
 import {
     FeatureFlagLogicArgs,
     FeatureFlagModel,
 } from '../../models/FeatureFlagModel/FeatureFlagModel';
-import { isFeatureFlagEnabled } from '../../postHog';
 
 export class CommercialFeatureFlagModel extends FeatureFlagModel {
     constructor(args: { database: Knex; lightdashConfig: LightdashConfig }) {
@@ -17,147 +12,46 @@ export class CommercialFeatureFlagModel extends FeatureFlagModel {
         this.featureFlagHandlers = {
             ...this.featureFlagHandlers, // Inherit parent handlers
             // Add new commercial handlers
-            [CommercialFeatureFlags.Embedding]:
-                this.getEmbeddingFlag.bind(this),
-            [CommercialFeatureFlags.Scim]: this.getScimFlag.bind(this),
             [CommercialFeatureFlags.AiCopilot]:
                 this.getAiCopilotFlag.bind(this),
-            [CommercialFeatureFlags.AgentReasoning]:
-                CommercialFeatureFlagModel.getAgentReasoningFlag.bind(this),
-            [CommercialFeatureFlags.MultiAgentChannel]:
-                this.getMultiAgentChannelFlag.bind(this),
+            [CommercialFeatureFlags.HomepageBuilder]:
+                this.getHomepageBuilderFlag.bind(this),
         };
     }
 
-    private async getEmbeddingFlag({
-        user,
+    // Default-off; enabled per-org via DB-backed overrides.
+    private async getHomepageBuilderFlag({
         featureFlagId,
+        user,
     }: FeatureFlagLogicArgs) {
-        const enabled =
-            this.lightdashConfig.embedding.enabled ||
-            (user
-                ? await isFeatureFlagEnabled(
-                      CommercialFeatureFlags.Embedding as AnyType as FeatureFlags,
-                      {
-                          userUuid: user.userUuid,
-                          organizationUuid: user.organizationUuid,
-                          organizationName: user.organizationName,
-                      },
-                      {
-                          throwOnTimeout: false,
-                      },
-                  )
-                : false);
-        return {
-            id: featureFlagId,
-            enabled,
-        };
-    }
-
-    private async getScimFlag({ user, featureFlagId }: FeatureFlagLogicArgs) {
-        const enabled =
-            this.lightdashConfig.scim.enabled ||
-            (user
-                ? await isFeatureFlagEnabled(
-                      CommercialFeatureFlags.Scim as AnyType as FeatureFlags,
-                      {
-                          userUuid: user.userUuid,
-                          organizationUuid: user.organizationUuid,
-                      },
-                      {
-                          throwOnTimeout: false,
-                      },
-                  )
-                : false);
-        return {
-            id: featureFlagId,
-            enabled,
-        };
+        if (!user) {
+            return { id: featureFlagId, enabled: false };
+        }
+        const dbResult = await this.tryGetFromDatabase({ user, featureFlagId });
+        return dbResult ?? { id: featureFlagId, enabled: false };
     }
 
     private async getAiCopilotFlag({
         featureFlagId,
         user,
     }: FeatureFlagLogicArgs) {
-        let enabled = false;
+        const { enabled: copilotConfigEnabled, requiresFeatureFlag } =
+            this.lightdashConfig.ai.copilot;
 
-        if (
-            this.lightdashConfig.ai.copilot.enabled &&
-            this.lightdashConfig.ai.copilot.requiresFeatureFlag
-        ) {
-            if (!user) {
-                throw new Error(
-                    'User is required to check if AI copilot is enabled',
-                );
-            }
-
-            enabled = await isFeatureFlagEnabled(
-                CommercialFeatureFlags.AiCopilot as AnyType as FeatureFlags,
-                {
-                    userUuid: user.userUuid,
-                    organizationUuid: user.organizationUuid,
-                    organizationName: user.organizationName,
-                },
-            );
-        } else {
-            enabled = this.lightdashConfig.ai.copilot.enabled;
+        // Dedicated instances (per the AI Copilot tenant docs) bypass the
+        // flag system entirely. Shared tenants (app/eu1) set
+        // requiresFeatureFlag=true and gate per-org via DB-backed overrides.
+        if (!copilotConfigEnabled || !requiresFeatureFlag) {
+            return { id: featureFlagId, enabled: copilotConfigEnabled };
         }
 
-        return {
-            id: featureFlagId,
-            enabled,
-        };
-    }
-
-    private static async getAgentReasoningFlag({
-        user,
-        featureFlagId,
-    }: FeatureFlagLogicArgs) {
-        const enabled = user
-            ? await isFeatureFlagEnabled(
-                  CommercialFeatureFlags.AgentReasoning as AnyType as FeatureFlags,
-                  {
-                      userUuid: user.userUuid,
-                      organizationUuid: user.organizationUuid,
-                      organizationName: user.organizationName,
-                  },
-                  {
-                      throwOnTimeout: false,
-                  },
-              )
-            : false;
-        return {
-            id: featureFlagId,
-            enabled,
-        };
-    }
-
-    private async getMultiAgentChannelFlag({
-        user,
-        featureFlagId,
-    }: FeatureFlagLogicArgs) {
-        let enabled = false;
-        if (this.lightdashConfig.slack?.multiAgentChannelEnabled) {
-            enabled = true;
-        } else {
-            enabled = user
-                ? await isFeatureFlagEnabled(
-                      CommercialFeatureFlags.MultiAgentChannel as AnyType as FeatureFlags,
-                      {
-                          userUuid: user.userUuid,
-                          organizationUuid: user.organizationUuid,
-                          organizationName: user.organizationName,
-                      },
-                      {
-                          throwOnTimeout: false,
-                      },
-                  )
-                : false;
+        // The endpoint allows anonymous callers, so fail closed like the
+        // other commercial flags instead of erroring.
+        if (!user) {
+            return { id: featureFlagId, enabled: false };
         }
 
-        return {
-            id: featureFlagId,
-            enabled,
-        };
+        const dbResult = await this.tryGetFromDatabase({ user, featureFlagId });
+        return dbResult ?? { id: featureFlagId, enabled: false };
     }
 }

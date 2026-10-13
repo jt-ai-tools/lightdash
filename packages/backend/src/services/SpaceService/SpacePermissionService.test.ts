@@ -1,69 +1,293 @@
+import { Ability, subject } from '@casl/ability';
 import {
     DirectSpaceAccessOrigin,
+    getUserAbilityBuilder,
     NotFoundError,
+    OrganizationMemberRole,
+    ParameterError,
+    ProjectMemberRole,
     ProjectSpaceAccessOrigin,
     SpaceMemberRole,
     type DirectSpaceAccess,
-    type OrganizationMemberRole,
-    type OrganizationSpaceAccess,
-    type ProjectMemberRole,
-    type ProjectSpaceAccess,
+    type PossibleAbilities,
+    type SessionUser,
+    type SpaceAccess,
     type SpaceInheritanceChain,
 } from '@lightdash/common';
-import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
+import { type Knex } from 'knex';
+import { type DashboardAccessModel } from '../../models/DashboardAccessModel';
 import { SpaceModel } from '../../models/SpaceModel';
-import { SpacePermissionModel } from '../../models/SpacePermissionModel';
-import { SpacePermissionService } from './SpacePermissionService';
+import {
+    SpacePermissionModel,
+    type OrganizationSpaceAccessWithCustomRole,
+    type ProjectSpaceAccessWithCustomRole,
+} from '../../models/SpacePermissionModel';
+import { type DirectAccessFeatureGate } from '../DirectAccess/DirectAccessFeatureGate';
+import {
+    SpacePermissionService,
+    type SpaceAccessContextForCasl,
+} from './SpacePermissionService';
 
 const createMockSpacePermissionModel = () => ({
-    getInheritanceChains: jest.fn<
-        Promise<Record<string, SpaceInheritanceChain>>,
-        [string[]]
-    >(),
-    getDirectSpaceAccess: jest.fn<
-        Promise<Record<string, DirectSpaceAccess[]>>,
-        [string[], { userUuid?: string }?]
-    >(),
-    getProjectSpaceAccess: jest.fn<
-        Promise<Record<string, ProjectSpaceAccess[]>>,
-        [string[], { userUuid?: string }?]
-    >(),
-    getOrganizationSpaceAccess: jest.fn<
-        Promise<Record<string, OrganizationSpaceAccess[]>>,
-        [string[], { userUuid?: string }?]
-    >(),
-    getSpaceInfo: jest.fn<
-        Promise<
-            Record<
-                string,
-                {
-                    isPrivate: boolean;
-                    projectUuid: string;
-                    organizationUuid: string;
-                }
+    getInheritanceChains:
+        vi.fn<
+            (
+                spaceUuids: string[],
+                options?: { trx?: Knex },
+            ) => Promise<Record<string, SpaceInheritanceChain>>
+        >(),
+    getDirectSpaceAccess:
+        vi.fn<
+            (
+                spaceUuids: string[],
+                filters?: { userUuid?: string; userUuids?: string[] },
+                options?: { trx?: Knex },
+            ) => Promise<Record<string, DirectSpaceAccess[]>>
+        >(),
+    getProjectSpaceAccess:
+        vi.fn<
+            (
+                spaceUuids: string[],
+                filters?: { userUuid?: string; userUuids?: string[] },
+                options?: { trx?: Knex },
+            ) => Promise<Record<string, ProjectSpaceAccessWithCustomRole[]>>
+        >(),
+    getRoleScopes:
+        vi.fn<
+            (
+                roleUuids: string[],
+                options?: { trx?: Knex },
+            ) => Promise<Record<string, string[]>>
+        >(),
+    getOrganizationSpaceAccess:
+        vi.fn<
+            (
+                spaceUuids: string[],
+                filters?: { userUuid?: string; userUuids?: string[] },
+                options?: { trx?: Knex },
+            ) => Promise<
+                Record<string, OrganizationSpaceAccessWithCustomRole[]>
             >
-        >,
-        [string[]]
-    >(),
-    getGroupAccess: jest.fn(),
-    getUserMetadataByUuids: jest.fn(),
+        >(),
+    getSpaceInfo:
+        vi.fn<
+            (
+                spaceUuids: string[],
+                options?: { trx?: Knex },
+            ) => Promise<
+                Record<
+                    string,
+                    {
+                        projectUuid: string;
+                        organizationUuid: string;
+                    }
+                >
+            >
+        >(),
+    getGroupAccess: vi.fn(),
+    getUserMetadataByUuids: vi.fn(),
+    getPaginatedUserMetadata: vi.fn(),
 });
 
 describe('SpacePermissionService', () => {
     const mockPermissionModel = createMockSpacePermissionModel();
-    const service = new SpacePermissionService(
-        {
-            get: async () => ({
-                id: 'nested-spaces-permissions',
-                enabled: true,
-            }),
-        } as unknown as FeatureFlagModel,
-        {} as SpaceModel,
-        mockPermissionModel as unknown as SpacePermissionModel,
-    );
+    const dashboardAccessModel = {
+        getUserAccess: vi.fn(async () => ({})),
+    };
+    const directAccessFeatureGate = {
+        isEnabledForUser: vi.fn(async () => false),
+    };
+    const service = new SpacePermissionService({
+        documentAccessModel: {
+            getUserAccess: vi.fn().mockResolvedValue({}),
+        } as never,
+        featureFlagModel: {
+            get: vi.fn().mockResolvedValue({ enabled: true }),
+        } as never,
+        spaceModel: {} as SpaceModel,
+        spacePermissionModel:
+            mockPermissionModel as unknown as SpacePermissionModel,
+        appAccessModel: {
+            getUserAccess: vi.fn(async () => ({})),
+        } as never,
+        dashboardAccessModel:
+            dashboardAccessModel as unknown as DashboardAccessModel,
+        savedChartAccessModel: {
+            getUserAccess: vi.fn(async () => ({})),
+        } as never,
+        savedSqlAccessModel: {
+            getUserAccess: vi.fn(async () => ({})),
+        } as never,
+        directAccessFeatureGate:
+            directAccessFeatureGate as unknown as DirectAccessFeatureGate,
+    });
 
     afterEach(() => {
-        jest.resetAllMocks();
+        vi.resetAllMocks();
+    });
+
+    test('fails closed when any requested space has no access context', async () => {
+        mockPermissionModel.getInheritanceChains.mockResolvedValue({});
+        mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({});
+        mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({});
+        mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue({});
+        mockPermissionModel.getSpaceInfo.mockResolvedValue({});
+        const user = {
+            userUuid: 'user-uuid',
+            ability: new Ability<PossibleAbilities>([
+                { action: 'manage', subject: 'Space' },
+            ]),
+        } as unknown as SessionUser;
+
+        await expect(
+            service.can('manage', user, 'missing-space'),
+        ).resolves.toBe(false);
+    });
+
+    describe('space deletion during access resolution', () => {
+        const survivingSpaceUuid = 'surviving-space';
+        const deletedSpaceUuid = 'deleted-space';
+        const deniedSpaceUuid = 'denied-space';
+        const spaceUuids = [
+            survivingSpaceUuid,
+            deletedSpaceUuid,
+            deniedSpaceUuid,
+        ];
+        const user = {
+            userUuid: 'user-uuid',
+            ability: new Ability<PossibleAbilities>([
+                {
+                    action: 'view',
+                    subject: 'Space',
+                    conditions: { projectUuid: 'allowed-project' },
+                },
+            ]),
+        } as unknown as SessionUser;
+
+        beforeEach(() => {
+            mockPermissionModel.getInheritanceChains.mockResolvedValue(
+                Object.fromEntries(
+                    spaceUuids.map((spaceUuid) => [
+                        spaceUuid,
+                        {
+                            chain: [
+                                {
+                                    spaceUuid,
+                                    spaceName: spaceUuid,
+                                    inheritParentPermissions: true,
+                                },
+                            ],
+                            inheritsFromOrgOrProject: true,
+                        },
+                    ]),
+                ),
+            );
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({});
+            mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({});
+            mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue(
+                {},
+            );
+            // The deleted space disappeared after the inheritance-chain read.
+            mockPermissionModel.getSpaceInfo.mockResolvedValue({
+                [survivingSpaceUuid]: {
+                    projectUuid: 'allowed-project',
+                    organizationUuid: 'organization-uuid',
+                },
+                [deniedSpaceUuid]: {
+                    projectUuid: 'other-project',
+                    organizationUuid: 'organization-uuid',
+                },
+            });
+        });
+
+        test('lists surviving spaces while respecting project access', async () => {
+            await expect(
+                service.getAccessibleSpaceUuids('view', user, spaceUuids),
+            ).resolves.toEqual([survivingSpaceUuid]);
+        });
+
+        test.each([
+            { requestedSpaceUuids: [deletedSpaceUuid] },
+            { requestedSpaceUuids: [survivingSpaceUuid, deletedSpaceUuid] },
+        ])(
+            'denies access when $requestedSpaceUuids includes a deleted space',
+            async ({ requestedSpaceUuids }) => {
+                await expect(
+                    service.can('view', user, requestedSpaceUuids),
+                ).resolves.toBe(false);
+            },
+        );
+
+        test('direct access-context lookups still reject the deleted space', async () => {
+            await expect(
+                service.getAllSpaceAccessContext(deletedSpaceUuid),
+            ).rejects.toThrow(NotFoundError);
+            await expect(
+                service.resolveAccess(user.userUuid, {
+                    type: 'space',
+                    spaceUuid: deletedSpaceUuid,
+                }),
+            ).rejects.toThrow(NotFoundError);
+        });
+    });
+
+    test('uses the provided transaction for every access-context query', async () => {
+        const spaceUuid = 'space-uuid';
+        const userUuid = 'user-uuid';
+        const trx = {} as Knex;
+        mockPermissionModel.getInheritanceChains.mockResolvedValue({
+            [spaceUuid]: {
+                chain: [
+                    {
+                        spaceUuid,
+                        spaceName: 'Space',
+                        inheritParentPermissions: true,
+                    },
+                ],
+                inheritsFromOrgOrProject: true,
+            },
+        });
+        mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({});
+        mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({});
+        mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue({});
+        mockPermissionModel.getSpaceInfo.mockResolvedValue({
+            [spaceUuid]: {
+                projectUuid: 'project-uuid',
+                organizationUuid: 'organization-uuid',
+            },
+        });
+        const user = {
+            userUuid,
+            ability: new Ability<PossibleAbilities>([
+                { action: 'manage', subject: 'Space' },
+            ]),
+        } as unknown as SessionUser;
+
+        await expect(
+            service.can('manage', user, spaceUuid, { trx }),
+        ).resolves.toBe(true);
+
+        expect(mockPermissionModel.getInheritanceChains).toHaveBeenCalledWith(
+            [spaceUuid],
+            { trx },
+        );
+        expect(mockPermissionModel.getDirectSpaceAccess).toHaveBeenCalledWith(
+            [spaceUuid],
+            { userUuid },
+            { trx },
+        );
+        expect(mockPermissionModel.getProjectSpaceAccess).toHaveBeenCalledWith(
+            [spaceUuid],
+            { userUuid },
+            { trx },
+        );
+        expect(
+            mockPermissionModel.getOrganizationSpaceAccess,
+        ).toHaveBeenCalledWith([spaceUuid], { userUuid }, { trx });
+        expect(mockPermissionModel.getSpaceInfo).toHaveBeenCalledWith(
+            [spaceUuid],
+            { trx },
+        );
     });
 
     describe('getSpacesCaslContext (via getAllSpaceAccessContext)', () => {
@@ -94,6 +318,8 @@ describe('SpacePermissionService', () => {
                         userUuid,
                         spaceUuid: 'root-space',
                         role: 'editor' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
                         from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
                     },
                 ],
@@ -104,12 +330,13 @@ describe('SpacePermissionService', () => {
                         userUuid,
                         spaceUuid: 'root-space',
                         role: 'member' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
                     },
                 ],
             });
             mockPermissionModel.getSpaceInfo.mockResolvedValue({
                 [spaceUuid]: {
-                    isPrivate: false,
                     projectUuid,
                     organizationUuid,
                 },
@@ -117,15 +344,211 @@ describe('SpacePermissionService', () => {
 
             const result = await service.getAllSpaceAccessContext(spaceUuid);
 
-            expect(result.isPrivate).toBe(false);
+            expect(result.inheritsFromOrgOrProject).toBe(true);
             expect(result.projectUuid).toBe(projectUuid);
             // Project access was fetched for the root space
             expect(
                 mockPermissionModel.getProjectSpaceAccess,
-            ).toHaveBeenCalledWith(['root-space'], undefined);
+            ).toHaveBeenCalledWith(['root-space'], undefined, {
+                trx: undefined,
+            });
             expect(
                 mockPermissionModel.getOrganizationSpaceAccess,
-            ).toHaveBeenCalledWith(['root-space'], undefined);
+            ).toHaveBeenCalledWith(['root-space'], undefined, {
+                trx: undefined,
+            });
+            // System-role access needs no scope lookup
+            expect(mockPermissionModel.getRoleScopes).not.toHaveBeenCalled();
+        });
+
+        test('custom-role holders get the space role derived from their scopes, not the placeholder role column', async () => {
+            const spaceUuid = 'root-space';
+            const customRoleUuid = 'custom-role-uuid';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                'root-space': {
+                    chain: [
+                        {
+                            spaceUuid: 'root-space',
+                            spaceName: 'Root',
+                            inheritParentPermissions: true,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: true,
+                },
+            });
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({});
+            // Custom-role assignments persist `role: viewer` as a placeholder
+            mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({
+                'root-space': [
+                    {
+                        userUuid,
+                        spaceUuid: 'root-space',
+                        role: 'viewer' as ProjectMemberRole,
+                        roleUuid: customRoleUuid,
+                        extraRoleUuids: [],
+                        from: ProjectSpaceAccessOrigin.GROUP_MEMBERSHIP,
+                    },
+                ],
+            });
+            mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue({
+                'root-space': [
+                    {
+                        userUuid,
+                        spaceUuid: 'root-space',
+                        role: 'member' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                    },
+                ],
+            });
+            mockPermissionModel.getSpaceInfo.mockResolvedValue({
+                [spaceUuid]: {
+                    projectUuid,
+                    organizationUuid,
+                },
+            });
+            mockPermissionModel.getRoleScopes.mockResolvedValue({
+                [customRoleUuid]: [
+                    'manage:Space@public',
+                    'manage:Dashboard@space',
+                    'manage:SavedChart@space',
+                ],
+            });
+
+            const result = await service.getAllSpaceAccessContext(spaceUuid);
+
+            expect(mockPermissionModel.getRoleScopes).toHaveBeenCalledWith(
+                [customRoleUuid],
+                { trx: undefined },
+            );
+            expect(result.access).toEqual([
+                expect.objectContaining({
+                    userUuid,
+                    role: SpaceMemberRole.EDITOR,
+                }),
+            ]);
+        });
+
+        test('extra custom roles are unioned with the system role for inherited space access', async () => {
+            const spaceUuid = 'root-space';
+            const extraRoleUuid = 'extra-role-uuid';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                'root-space': {
+                    chain: [
+                        {
+                            spaceUuid: 'root-space',
+                            spaceName: 'Root',
+                            inheritParentPermissions: true,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: true,
+                },
+            });
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({});
+            // System viewer slot + an extra custom role granting manage:Space
+            mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({
+                'root-space': [
+                    {
+                        userUuid,
+                        spaceUuid: 'root-space',
+                        role: 'viewer' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [extraRoleUuid],
+                        from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
+                    },
+                ],
+            });
+            mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue({
+                'root-space': [
+                    {
+                        userUuid,
+                        spaceUuid: 'root-space',
+                        role: 'member' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                    },
+                ],
+            });
+            mockPermissionModel.getSpaceInfo.mockResolvedValue({
+                [spaceUuid]: { projectUuid, organizationUuid },
+            });
+            mockPermissionModel.getRoleScopes.mockResolvedValue({
+                [extraRoleUuid]: ['manage:Space'],
+            });
+
+            const result = await service.getAllSpaceAccessContext(spaceUuid);
+
+            expect(mockPermissionModel.getRoleScopes).toHaveBeenCalledWith(
+                [extraRoleUuid],
+                { trx: undefined },
+            );
+            expect(result.access).toEqual([
+                expect.objectContaining({
+                    userUuid,
+                    role: SpaceMemberRole.ADMIN,
+                }),
+            ]);
+        });
+
+        test('org-level custom-role holders get the space role derived from their scopes, not the member placeholder', async () => {
+            const spaceUuid = 'root-space';
+            const orgCustomRoleUuid = 'org-custom-role-uuid';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                'root-space': {
+                    chain: [
+                        {
+                            spaceUuid: 'root-space',
+                            spaceName: 'Root',
+                            inheritParentPermissions: true,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: true,
+                },
+            });
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({});
+            // No project membership — access comes from the org layer only
+            mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({});
+            // Org custom-role assignments persist `role: member` as a placeholder
+            mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue({
+                'root-space': [
+                    {
+                        userUuid,
+                        spaceUuid: 'root-space',
+                        role: 'member' as OrganizationMemberRole,
+                        roleUuid: orgCustomRoleUuid,
+                        extraRoleUuids: [],
+                    },
+                ],
+            });
+            mockPermissionModel.getSpaceInfo.mockResolvedValue({
+                [spaceUuid]: {
+                    projectUuid,
+                    organizationUuid,
+                },
+            });
+            mockPermissionModel.getRoleScopes.mockResolvedValue({
+                [orgCustomRoleUuid]: [
+                    'manage:Space@public',
+                    'manage:Dashboard@space',
+                    'manage:SavedChart@space',
+                ],
+            });
+
+            const result = await service.getAllSpaceAccessContext(spaceUuid);
+
+            expect(mockPermissionModel.getRoleScopes).toHaveBeenCalledWith(
+                [orgCustomRoleUuid],
+                { trx: undefined },
+            );
+            expect(result.access).toEqual([
+                expect.objectContaining({
+                    userUuid,
+                    role: SpaceMemberRole.EDITOR,
+                }),
+            ]);
         });
 
         test('space with inherit=false is treated as private, direct access user gets role', async () => {
@@ -150,12 +573,14 @@ describe('SpacePermissionService', () => {
                         userUuid,
                         spaceUuid: 'private-space',
                         role: SpaceMemberRole.EDITOR,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.USER_ACCESS,
                     },
                     {
                         userUuid,
                         spaceUuid: 'private-space',
                         role: SpaceMemberRole.VIEWER,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.GROUP_ACCESS,
                     },
                 ],
@@ -166,6 +591,8 @@ describe('SpacePermissionService', () => {
                         userUuid,
                         spaceUuid: 'private-space',
                         role: 'viewer' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
                         from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
                     },
                 ],
@@ -176,12 +603,13 @@ describe('SpacePermissionService', () => {
                         userUuid,
                         spaceUuid: 'private-space',
                         role: 'member' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
                     },
                 ],
             });
             mockPermissionModel.getSpaceInfo.mockResolvedValue({
                 [spaceUuid]: {
-                    isPrivate: true,
                     projectUuid,
                     organizationUuid,
                 },
@@ -189,13 +617,13 @@ describe('SpacePermissionService', () => {
 
             const result = await service.getAllSpaceAccessContext(spaceUuid);
 
-            expect(result.isPrivate).toBe(true);
+            expect(result.inheritsFromOrgOrProject).toBe(false);
             expect(result.access).toHaveLength(1);
             expect(result.access[0].userUuid).toBe(userUuid);
             expect(result.access[0].role).toBe(SpaceMemberRole.EDITOR);
         });
 
-        test('org admin gets ADMIN on non-inheriting space even without direct access', async () => {
+        test('org admin without direct access is NOT in access list (CASL handles admin permissions)', async () => {
             const spaceUuid = 'private-space';
             const adminUuid = 'admin-user';
 
@@ -220,6 +648,8 @@ describe('SpacePermissionService', () => {
                         userUuid: adminUuid,
                         spaceUuid: 'private-space',
                         role: 'admin' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
                         from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
                     },
                 ],
@@ -230,12 +660,13 @@ describe('SpacePermissionService', () => {
                         userUuid: adminUuid,
                         spaceUuid: 'private-space',
                         role: 'admin' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
                     },
                 ],
             });
             mockPermissionModel.getSpaceInfo.mockResolvedValue({
                 [spaceUuid]: {
-                    isPrivate: true,
                     projectUuid,
                     organizationUuid,
                 },
@@ -243,10 +674,10 @@ describe('SpacePermissionService', () => {
 
             const result = await service.getAllSpaceAccessContext(spaceUuid);
 
-            // Admin should always get access, even on private/non-inheriting spaces
-            expect(result.access).toHaveLength(1);
-            expect(result.access[0].userUuid).toBe(adminUuid);
-            expect(result.access[0].role).toBe(SpaceMemberRole.ADMIN);
+            // Admin is not in the access list — CASL grants admin users
+            // blanket can('manage', 'Space') at the org/project ability level,
+            // so the resolver doesn't need to include them explicitly.
+            expect(result.access).toHaveLength(0);
         });
 
         test('nested space aggregates direct access from all ancestors in chain', async () => {
@@ -281,12 +712,14 @@ describe('SpacePermissionService', () => {
                         userUuid: userA,
                         spaceUuid: 'child-space',
                         role: SpaceMemberRole.VIEWER,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.USER_ACCESS,
                     },
                     {
                         userUuid: userA,
                         spaceUuid: 'child-space',
                         role: SpaceMemberRole.VIEWER,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.GROUP_ACCESS,
                     },
                 ],
@@ -295,12 +728,14 @@ describe('SpacePermissionService', () => {
                         userUuid: userB,
                         spaceUuid: 'parent-space',
                         role: SpaceMemberRole.EDITOR,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.USER_ACCESS,
                     },
                     {
                         userUuid: userB,
                         spaceUuid: 'parent-space',
                         role: SpaceMemberRole.EDITOR,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.GROUP_ACCESS,
                     },
                 ],
@@ -311,7 +746,6 @@ describe('SpacePermissionService', () => {
             );
             mockPermissionModel.getSpaceInfo.mockResolvedValue({
                 [spaceUuid]: {
-                    isPrivate: true,
                     projectUuid,
                     organizationUuid,
                 },
@@ -332,6 +766,7 @@ describe('SpacePermissionService', () => {
             ).toHaveBeenCalledWith(
                 expect.arrayContaining(['child-space', 'parent-space']),
                 undefined,
+                { trx: undefined },
             );
         });
 
@@ -368,6 +803,8 @@ describe('SpacePermissionService', () => {
                         userUuid,
                         spaceUuid: 'root-space',
                         role: 'editor' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
                         from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
                     },
                 ],
@@ -377,7 +814,6 @@ describe('SpacePermissionService', () => {
             );
             mockPermissionModel.getSpaceInfo.mockResolvedValue({
                 [spaceUuid]: {
-                    isPrivate: false,
                     projectUuid,
                     organizationUuid,
                 },
@@ -385,11 +821,13 @@ describe('SpacePermissionService', () => {
 
             const result = await service.getAllSpaceAccessContext(spaceUuid);
 
-            expect(result.isPrivate).toBe(false);
+            expect(result.inheritsFromOrgOrProject).toBe(true);
             // Project access fetched for the root space (last in chain)
             expect(
                 mockPermissionModel.getProjectSpaceAccess,
-            ).toHaveBeenCalledWith(['root-space'], undefined);
+            ).toHaveBeenCalledWith(['root-space'], undefined, {
+                trx: undefined,
+            });
             // User gets access via project membership
             expect(result.access).toHaveLength(1);
             expect(result.access[0].userUuid).toBe(userUuid);
@@ -422,6 +860,7 @@ describe('SpacePermissionService', () => {
                         userUuid,
                         spaceUuid: 'middle-space',
                         role: SpaceMemberRole.ADMIN,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.GROUP_ACCESS,
                     },
                 ],
@@ -432,7 +871,6 @@ describe('SpacePermissionService', () => {
             );
             mockPermissionModel.getSpaceInfo.mockResolvedValue({
                 [spaceUuid]: {
-                    isPrivate: true,
                     projectUuid,
                     organizationUuid,
                 },
@@ -440,7 +878,7 @@ describe('SpacePermissionService', () => {
 
             const result = await service.getAllSpaceAccessContext(spaceUuid);
 
-            expect(result.isPrivate).toBe(true);
+            expect(result.inheritsFromOrgOrProject).toBe(false);
             // User gets admin via parent's group access
             expect(result.access).toHaveLength(1);
             expect(result.access[0].role).toBe(SpaceMemberRole.ADMIN);
@@ -473,12 +911,14 @@ describe('SpacePermissionService', () => {
                         userUuid,
                         spaceUuid: 'child-space',
                         role: SpaceMemberRole.VIEWER,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.USER_ACCESS,
                     },
                     {
                         userUuid,
                         spaceUuid: 'child-space',
                         role: SpaceMemberRole.VIEWER,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.GROUP_ACCESS,
                     },
                 ],
@@ -487,12 +927,14 @@ describe('SpacePermissionService', () => {
                         userUuid,
                         spaceUuid: 'parent-space',
                         role: SpaceMemberRole.EDITOR,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.USER_ACCESS,
                     },
                     {
                         userUuid,
                         spaceUuid: 'parent-space',
                         role: SpaceMemberRole.EDITOR,
+                        groupUuid: null,
                         from: DirectSpaceAccessOrigin.GROUP_ACCESS,
                     },
                 ],
@@ -503,7 +945,6 @@ describe('SpacePermissionService', () => {
             );
             mockPermissionModel.getSpaceInfo.mockResolvedValue({
                 [spaceUuid]: {
-                    isPrivate: true,
                     projectUuid,
                     organizationUuid,
                 },
@@ -543,5 +984,2257 @@ describe('SpacePermissionService', () => {
                 service.getAllSpaceAccessContext(spaceUuid),
             ).rejects.toThrow(NotFoundError);
         });
+
+        test('returns admins extracted from project and org access, org wins over project on dedup', async () => {
+            const spaceUuid = 'private-space';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [spaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid,
+                            spaceName: 'Private',
+                            inheritParentPermissions: false,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: false,
+                },
+            });
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({});
+            mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid: 'project-admin',
+                        spaceUuid,
+                        role: 'admin' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                        from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
+                    },
+                    {
+                        userUuid: 'dual-admin',
+                        spaceUuid,
+                        role: 'admin' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                        from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
+                    },
+                    {
+                        userUuid: 'editor-user',
+                        spaceUuid,
+                        role: 'editor' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                        from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
+                    },
+                ],
+            });
+            mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid: 'org-admin',
+                        spaceUuid,
+                        role: 'admin' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                    },
+                    {
+                        userUuid: 'dual-admin',
+                        spaceUuid,
+                        role: 'admin' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                    },
+                    {
+                        userUuid: 'org-member',
+                        spaceUuid,
+                        role: 'member' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                    },
+                ],
+            });
+            mockPermissionModel.getSpaceInfo.mockResolvedValue({
+                [spaceUuid]: { projectUuid, organizationUuid },
+            });
+
+            const result = await service.getAllSpaceAccessContext(spaceUuid);
+
+            // dual-admin is in both lists; org source wins
+            expect(result.admins).toEqual(
+                expect.arrayContaining([
+                    { userUuid: 'org-admin', source: 'organization' },
+                    { userUuid: 'dual-admin', source: 'organization' },
+                    { userUuid: 'project-admin', source: 'project' },
+                ]),
+            );
+            expect(result.admins).toHaveLength(3);
+            expect(
+                result.admins.find((a) => a.userUuid === 'dual-admin')?.source,
+            ).toBe('organization');
+        });
     });
+
+    describe('getInheritedPermissionsToCopy', () => {
+        const projectUuid = 'project-uuid';
+        const organizationUuid = 'org-uuid';
+
+        test('returns user and group entries from ancestor spaces', async () => {
+            const childSpaceUuid = 'child-space';
+            const parentSpaceUuid = 'parent-space';
+            const userOnParent = 'user-on-parent';
+
+            // Chain: child → parent (root, inherits from org/project)
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [childSpaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid: childSpaceUuid,
+                            spaceName: 'Child',
+                            inheritParentPermissions: true,
+                        },
+                        {
+                            spaceUuid: parentSpaceUuid,
+                            spaceName: 'Parent',
+                            inheritParentPermissions: true,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: true,
+                },
+            });
+
+            // Parent has user access and group access
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({
+                [parentSpaceUuid]: [
+                    {
+                        userUuid: userOnParent,
+                        spaceUuid: parentSpaceUuid,
+                        groupUuid: null,
+                        role: SpaceMemberRole.EDITOR,
+                        from: DirectSpaceAccessOrigin.USER_ACCESS,
+                    },
+                    {
+                        userUuid: userOnParent,
+                        spaceUuid: parentSpaceUuid,
+                        groupUuid: 'group-1',
+                        role: SpaceMemberRole.EDITOR,
+                        from: DirectSpaceAccessOrigin.GROUP_ACCESS,
+                    },
+                ],
+            });
+
+            const result =
+                await service.getInheritedPermissionsToCopy(childSpaceUuid);
+
+            // User entry from parent
+            expect(result.userAccessEntries).toHaveLength(1);
+            expect(result.userAccessEntries[0]).toEqual({
+                userUuid: userOnParent,
+                role: SpaceMemberRole.EDITOR,
+            });
+
+            // Group entry from parent
+            expect(result.groupAccessEntries).toHaveLength(1);
+            expect(result.groupAccessEntries[0]).toEqual({
+                groupUuid: 'group-1',
+                role: SpaceMemberRole.EDITOR,
+            });
+        });
+
+        test('includes ancestor entries regardless of leaf access', async () => {
+            const childSpaceUuid = 'child-space';
+            const parentSpaceUuid = 'parent-space';
+            const directUser = 'direct-user';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [childSpaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid: childSpaceUuid,
+                            spaceName: 'Child',
+                            inheritParentPermissions: true,
+                        },
+                        {
+                            spaceUuid: parentSpaceUuid,
+                            spaceName: 'Parent',
+                            inheritParentPermissions: false,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: false,
+                },
+            });
+
+            // Only ancestor (parent) entries are returned — leaf entries are excluded
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({
+                [parentSpaceUuid]: [
+                    {
+                        userUuid: directUser,
+                        spaceUuid: parentSpaceUuid,
+                        groupUuid: null,
+                        role: SpaceMemberRole.EDITOR,
+                        from: DirectSpaceAccessOrigin.USER_ACCESS,
+                    },
+                ],
+            });
+
+            const result =
+                await service.getInheritedPermissionsToCopy(childSpaceUuid);
+
+            // Ancestor user entry is included (DB-level ON CONFLICT MERGE
+            // handles dedup with any existing leaf access)
+            expect(result.userAccessEntries).toHaveLength(1);
+            expect(result.userAccessEntries[0]).toEqual({
+                userUuid: directUser,
+                role: SpaceMemberRole.EDITOR,
+            });
+        });
+
+        test('only includes entries from ancestors, not the leaf space', async () => {
+            const childSpaceUuid = 'child-space';
+            const parentSpaceUuid = 'parent-space';
+            const directUser = 'direct-user';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [childSpaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid: childSpaceUuid,
+                            spaceName: 'Child',
+                            inheritParentPermissions: true,
+                        },
+                        {
+                            spaceUuid: parentSpaceUuid,
+                            spaceName: 'Parent',
+                            inheritParentPermissions: false,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: false,
+                },
+            });
+
+            // No ancestor entries — parent has no direct access
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({});
+
+            const result =
+                await service.getInheritedPermissionsToCopy(childSpaceUuid);
+
+            // Nothing from ancestors to copy
+            expect(result.userAccessEntries).toHaveLength(0);
+            expect(result.groupAccessEntries).toHaveLength(0);
+        });
+
+        test('includes all ancestor group entries (DB handles dedup)', async () => {
+            const childSpaceUuid = 'child-space';
+            const parentSpaceUuid = 'parent-space';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [childSpaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid: childSpaceUuid,
+                            spaceName: 'Child',
+                            inheritParentPermissions: true,
+                        },
+                        {
+                            spaceUuid: parentSpaceUuid,
+                            spaceName: 'Parent',
+                            inheritParentPermissions: false,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: false,
+                },
+            });
+
+            // Parent has two groups
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({
+                [parentSpaceUuid]: [
+                    {
+                        userUuid: 'user-in-group-1',
+                        spaceUuid: parentSpaceUuid,
+                        groupUuid: 'group-1',
+                        role: SpaceMemberRole.EDITOR,
+                        from: DirectSpaceAccessOrigin.GROUP_ACCESS,
+                    },
+                    {
+                        userUuid: 'user-in-group-2',
+                        spaceUuid: parentSpaceUuid,
+                        groupUuid: 'group-2',
+                        role: SpaceMemberRole.VIEWER,
+                        from: DirectSpaceAccessOrigin.GROUP_ACCESS,
+                    },
+                ],
+            });
+
+            const result =
+                await service.getInheritedPermissionsToCopy(childSpaceUuid);
+
+            // Both ancestor groups are included; ON CONFLICT MERGE at DB
+            // level handles any duplicates with existing child groups
+            expect(result.groupAccessEntries).toHaveLength(2);
+            expect(result.groupAccessEntries).toEqual(
+                expect.arrayContaining([
+                    { groupUuid: 'group-1', role: SpaceMemberRole.EDITOR },
+                    { groupUuid: 'group-2', role: SpaceMemberRole.VIEWER },
+                ]),
+            );
+        });
+
+        test('returns empty when no inherited users or ancestor groups', async () => {
+            const rootSpaceUuid = 'root-space';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [rootSpaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid: rootSpaceUuid,
+                            spaceName: 'Root',
+                            inheritParentPermissions: true,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: true,
+                },
+            });
+
+            // Root has no ancestors, so getDirectSpaceAccess is called with []
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({});
+
+            const result =
+                await service.getInheritedPermissionsToCopy(rootSpaceUuid);
+
+            expect(result.userAccessEntries).toHaveLength(0);
+            expect(result.groupAccessEntries).toHaveLength(0);
+        });
+
+        test('deduplicates same group across ancestors, keeping highest role', async () => {
+            const childSpaceUuid = 'child-space';
+            const parentSpaceUuid = 'parent-space';
+            const grandparentSpaceUuid = 'grandparent-space';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [childSpaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid: childSpaceUuid,
+                            spaceName: 'Child',
+                            inheritParentPermissions: true,
+                        },
+                        {
+                            spaceUuid: parentSpaceUuid,
+                            spaceName: 'Parent',
+                            inheritParentPermissions: true,
+                        },
+                        {
+                            spaceUuid: grandparentSpaceUuid,
+                            spaceName: 'Grandparent',
+                            inheritParentPermissions: false,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: false,
+                },
+            });
+
+            // Same group on parent (VIEWER) and grandparent (EDITOR)
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({
+                [parentSpaceUuid]: [
+                    {
+                        userUuid: 'user-in-group',
+                        spaceUuid: parentSpaceUuid,
+                        groupUuid: 'group-1',
+                        role: SpaceMemberRole.VIEWER,
+                        from: DirectSpaceAccessOrigin.GROUP_ACCESS,
+                    },
+                ],
+                [grandparentSpaceUuid]: [
+                    {
+                        userUuid: 'user-in-group',
+                        spaceUuid: grandparentSpaceUuid,
+                        groupUuid: 'group-1',
+                        role: SpaceMemberRole.EDITOR,
+                        from: DirectSpaceAccessOrigin.GROUP_ACCESS,
+                    },
+                ],
+            });
+
+            const result =
+                await service.getInheritedPermissionsToCopy(childSpaceUuid);
+
+            // Same group appears on two ancestors — deduplicated to one entry
+            // with the highest role (EDITOR > VIEWER)
+            expect(result.groupAccessEntries).toHaveLength(1);
+            expect(result.groupAccessEntries[0]).toEqual({
+                groupUuid: 'group-1',
+                role: SpaceMemberRole.EDITOR,
+            });
+        });
+
+        test('deduplicates same user across ancestors, keeping highest role', async () => {
+            const childSpaceUuid = 'child-space';
+            const parentSpaceUuid = 'parent-space';
+            const grandparentSpaceUuid = 'grandparent-space';
+            const duplicateUser = 'duplicate-user';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [childSpaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid: childSpaceUuid,
+                            spaceName: 'Child',
+                            inheritParentPermissions: true,
+                        },
+                        {
+                            spaceUuid: parentSpaceUuid,
+                            spaceName: 'Parent',
+                            inheritParentPermissions: true,
+                        },
+                        {
+                            spaceUuid: grandparentSpaceUuid,
+                            spaceName: 'Grandparent',
+                            inheritParentPermissions: false,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: false,
+                },
+            });
+
+            // Same user on parent (VIEWER) and grandparent (ADMIN)
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({
+                [parentSpaceUuid]: [
+                    {
+                        userUuid: duplicateUser,
+                        spaceUuid: parentSpaceUuid,
+                        groupUuid: null,
+                        role: SpaceMemberRole.VIEWER,
+                        from: DirectSpaceAccessOrigin.USER_ACCESS,
+                    },
+                ],
+                [grandparentSpaceUuid]: [
+                    {
+                        userUuid: duplicateUser,
+                        spaceUuid: grandparentSpaceUuid,
+                        groupUuid: null,
+                        role: SpaceMemberRole.ADMIN,
+                        from: DirectSpaceAccessOrigin.USER_ACCESS,
+                    },
+                ],
+            });
+
+            const result =
+                await service.getInheritedPermissionsToCopy(childSpaceUuid);
+
+            // Same user appears on two ancestors — deduplicated to one entry
+            // with the highest role (ADMIN > VIEWER)
+            expect(result.userAccessEntries).toHaveLength(1);
+            expect(result.userAccessEntries[0]).toEqual({
+                userUuid: duplicateUser,
+                role: SpaceMemberRole.ADMIN,
+            });
+            expect(result.groupAccessEntries).toHaveLength(0);
+        });
+    });
+
+    describe('getPaginatedSpaceAccess', () => {
+        const spaceUuid = 'space-uuid';
+        const projectUuid = 'project-uuid';
+        const organizationUuid = 'organization-uuid';
+
+        beforeEach(() => {
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [spaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid,
+                            spaceName: 'Space',
+                            inheritParentPermissions: false,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: false,
+                },
+            });
+            mockPermissionModel.getSpaceInfo.mockResolvedValue({
+                [spaceUuid]: { projectUuid, organizationUuid },
+            });
+        });
+
+        test('passes pagination and user filters while merging admins in metadata order', async () => {
+            const userUuids = ['direct-user', 'project-admin', 'org-admin'];
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid: 'direct-user',
+                        spaceUuid,
+                        groupUuid: null,
+                        role: SpaceMemberRole.EDITOR,
+                        from: DirectSpaceAccessOrigin.USER_ACCESS,
+                    },
+                ],
+            });
+            mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid: 'direct-user',
+                        spaceUuid,
+                        role: 'viewer' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                        from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
+                    },
+                    {
+                        userUuid: 'project-admin',
+                        spaceUuid,
+                        role: 'admin' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                        from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
+                    },
+                ],
+            });
+            mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid: 'org-admin',
+                        spaceUuid,
+                        role: 'admin' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                    },
+                ],
+            });
+            mockPermissionModel.getPaginatedUserMetadata.mockResolvedValue({
+                data: [
+                    {
+                        userUuid: 'org-admin',
+                        firstName: 'A',
+                        lastName: 'Admin',
+                        email: 'a@example.com',
+                        isInternal: false,
+                        avatarUrl: null,
+                        avatarGradient: null,
+                    },
+                    {
+                        userUuid: 'direct-user',
+                        firstName: 'D',
+                        lastName: 'User',
+                        email: 'd@example.com',
+                        isInternal: false,
+                        avatarUrl: null,
+                        avatarGradient: null,
+                    },
+                    {
+                        userUuid: 'project-admin',
+                        firstName: 'P',
+                        lastName: 'Admin',
+                        email: 'p@example.com',
+                        isInternal: false,
+                        avatarUrl: null,
+                        avatarGradient: null,
+                    },
+                ],
+                pagination: {
+                    page: 2,
+                    pageSize: 3,
+                    totalPageCount: 2,
+                    totalResults: 6,
+                },
+            });
+
+            const result = await service.getPaginatedSpaceAccess(spaceUuid, {
+                paginateArgs: { page: 2, pageSize: 3 },
+                filters: { searchQuery: 'admin', userUuids },
+                currentUserUuid: 'org-admin',
+            });
+
+            expect(
+                mockPermissionModel.getDirectSpaceAccess,
+            ).toHaveBeenCalledWith(
+                [spaceUuid],
+                { userUuids },
+                { trx: undefined },
+            );
+            expect(
+                mockPermissionModel.getProjectSpaceAccess,
+            ).toHaveBeenCalledWith(
+                [spaceUuid],
+                { userUuids },
+                { trx: undefined },
+            );
+            expect(
+                mockPermissionModel.getOrganizationSpaceAccess,
+            ).toHaveBeenCalledWith(
+                [spaceUuid],
+                { userUuids },
+                { trx: undefined },
+            );
+            expect(
+                mockPermissionModel.getPaginatedUserMetadata,
+            ).toHaveBeenCalledWith(
+                ['direct-user', 'project-admin', 'org-admin'],
+                { page: 2, pageSize: 3 },
+                {
+                    searchQuery: 'admin',
+                    currentUserUuidFirst: 'org-admin',
+                },
+            );
+            expect(result.pagination).toEqual({
+                page: 2,
+                pageSize: 3,
+                totalPageCount: 2,
+                totalResults: 6,
+            });
+            expect(result.data.map(({ userUuid }) => userUuid)).toEqual([
+                'org-admin',
+                'direct-user',
+                'project-admin',
+            ]);
+            expect(result.data[0]).toEqual(
+                expect.objectContaining({
+                    userUuid: 'org-admin',
+                    role: SpaceMemberRole.ADMIN,
+                    inheritedFrom: 'organization',
+                    firstName: 'A',
+                }),
+            );
+            expect(result.data[2]).toEqual(
+                expect.objectContaining({
+                    userUuid: 'project-admin',
+                    role: SpaceMemberRole.ADMIN,
+                    inheritedFrom: 'project',
+                    firstName: 'P',
+                }),
+            );
+        });
+
+        test('directOnly keeps direct user and space group access', async () => {
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [spaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid,
+                            spaceName: 'Space',
+                            inheritParentPermissions: true,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: true,
+                },
+            });
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid: 'direct-user',
+                        spaceUuid,
+                        groupUuid: null,
+                        role: SpaceMemberRole.EDITOR,
+                        from: DirectSpaceAccessOrigin.USER_ACCESS,
+                    },
+                    {
+                        userUuid: 'group-user',
+                        spaceUuid,
+                        groupUuid: 'group-uuid',
+                        role: SpaceMemberRole.VIEWER,
+                        from: DirectSpaceAccessOrigin.GROUP_ACCESS,
+                    },
+                ],
+            });
+            mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid: 'direct-user',
+                        spaceUuid,
+                        role: 'viewer' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                        from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
+                    },
+                    {
+                        userUuid: 'inherited-user',
+                        spaceUuid,
+                        role: 'viewer' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                        from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
+                    },
+                ],
+            });
+            mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue(
+                {},
+            );
+            mockPermissionModel.getPaginatedUserMetadata.mockResolvedValue({
+                data: [],
+            });
+
+            await service.getPaginatedSpaceAccess(spaceUuid, {
+                filters: { directOnly: true },
+            });
+
+            expect(
+                mockPermissionModel.getPaginatedUserMetadata,
+            ).toHaveBeenCalledWith(['direct-user', 'group-user'], undefined, {
+                searchQuery: undefined,
+                currentUserUuidFirst: undefined,
+            });
+        });
+
+        test('directOnly excludes direct users whose effective role comes from a parent space', async () => {
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [spaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid,
+                            spaceName: 'Leaf',
+                            inheritParentPermissions: true,
+                        },
+                        {
+                            spaceUuid: 'parent-space',
+                            spaceName: 'Parent',
+                            inheritParentPermissions: false,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: false,
+                },
+            });
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid: 'direct-user',
+                        spaceUuid,
+                        groupUuid: null,
+                        role: SpaceMemberRole.VIEWER,
+                        from: DirectSpaceAccessOrigin.USER_ACCESS,
+                    },
+                ],
+                'parent-space': [
+                    {
+                        userUuid: 'direct-user',
+                        spaceUuid: 'parent-space',
+                        groupUuid: null,
+                        role: SpaceMemberRole.EDITOR,
+                        from: DirectSpaceAccessOrigin.USER_ACCESS,
+                    },
+                ],
+            });
+            mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({
+                'parent-space': [
+                    {
+                        userUuid: 'direct-user',
+                        spaceUuid: 'parent-space',
+                        role: 'viewer' as ProjectMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                        from: ProjectSpaceAccessOrigin.PROJECT_MEMBERSHIP,
+                    },
+                ],
+            });
+            mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue(
+                {},
+            );
+            mockPermissionModel.getPaginatedUserMetadata.mockResolvedValue({
+                data: [],
+            });
+
+            const context = await service.getAllSpaceAccessContext(spaceUuid);
+            expect(context.access).toEqual([
+                expect.objectContaining({
+                    userUuid: 'direct-user',
+                    role: SpaceMemberRole.EDITOR,
+                    hasDirectAccess: true,
+                    inheritedFrom: 'parent_space',
+                }),
+            ]);
+
+            await service.getPaginatedSpaceAccess(spaceUuid, {
+                filters: { directOnly: true },
+            });
+
+            expect(
+                mockPermissionModel.getPaginatedUserMetadata,
+            ).toHaveBeenCalledWith([], undefined, {
+                searchQuery: undefined,
+                currentUserUuidFirst: undefined,
+            });
+        });
+    });
+
+    describe('project member access role (via space column)', () => {
+        // When a space has project_member_access_role set, the DB query
+        // returns expanded project members as GROUP_ACCESS entries in
+        // getDirectSpaceAccess. These tests verify the service passes
+        // them through correctly.
+
+        const projectUuid = 'project-uuid';
+        const organizationUuid = 'org-uuid';
+
+        test('project member with GROUP_ACCESS on private space gets access', async () => {
+            const spaceUuid = 'restricted-space';
+            const userUuid = 'project-member';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [spaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid,
+                            spaceName: 'Restricted',
+                            inheritParentPermissions: false,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: false,
+                },
+            });
+
+            // The UNION expansion returns this user as GROUP_ACCESS
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid,
+                        spaceUuid,
+                        groupUuid: null,
+                        role: SpaceMemberRole.VIEWER,
+                        from: DirectSpaceAccessOrigin.GROUP_ACCESS,
+                    },
+                ],
+            });
+
+            mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({});
+            mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid,
+                        spaceUuid,
+                        role: 'viewer' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                    },
+                ],
+            });
+            mockPermissionModel.getSpaceInfo.mockResolvedValue({
+                [spaceUuid]: { projectUuid, organizationUuid },
+            });
+
+            const result = await service.getAllSpaceAccessContext(spaceUuid);
+
+            expect(result.inheritsFromOrgOrProject).toBe(false);
+            const userAccess = result.access.find(
+                (a) => a.userUuid === userUuid,
+            );
+            expect(userAccess).toBeDefined();
+            expect(userAccess?.role).toBe(SpaceMemberRole.VIEWER);
+            expect(userAccess?.hasDirectAccess).toBe(true);
+        });
+
+        test('user without project member access on private space has no access', async () => {
+            const spaceUuid = 'restricted-space';
+            const userUuid = 'non-member';
+
+            mockPermissionModel.getInheritanceChains.mockResolvedValue({
+                [spaceUuid]: {
+                    chain: [
+                        {
+                            spaceUuid,
+                            spaceName: 'Restricted',
+                            inheritParentPermissions: false,
+                        },
+                    ],
+                    inheritsFromOrgOrProject: false,
+                },
+            });
+
+            // No direct access — project_member_access_role is not set
+            mockPermissionModel.getDirectSpaceAccess.mockResolvedValue({});
+            mockPermissionModel.getProjectSpaceAccess.mockResolvedValue({});
+            mockPermissionModel.getOrganizationSpaceAccess.mockResolvedValue({
+                [spaceUuid]: [
+                    {
+                        userUuid,
+                        spaceUuid,
+                        role: 'viewer' as OrganizationMemberRole,
+                        roleUuid: null,
+                        extraRoleUuids: [],
+                    },
+                ],
+            });
+            mockPermissionModel.getSpaceInfo.mockResolvedValue({
+                [spaceUuid]: { projectUuid, organizationUuid },
+            });
+
+            const result = await service.getAllSpaceAccessContext(spaceUuid);
+
+            // Non-admin on private space without direct access = excluded
+            const userAccess = result.access.find(
+                (a) => a.userUuid === userUuid,
+            );
+            expect(userAccess).toBeUndefined();
+        });
+    });
+});
+
+// Boundary-crossing operations must receive contexts free of synthesized
+// grant rows; assert it wherever a space-only context is expected.
+const expectNoGrantRows = (context: { access: SpaceAccess[] }) => {
+    expect(
+        context.access.filter((row) => row.grantedVia !== undefined),
+    ).toEqual([]);
+};
+
+type SpaceContextResolver = {
+    getSpacesCaslContext: (
+        spaceUuids: string[],
+        filters?: { userUuid?: string; userUuids?: string[] },
+        options?: { trx?: Knex },
+    ) => Promise<Record<string, SpaceAccessContextForCasl>>;
+};
+
+const mockSpaceContexts = (
+    service: SpacePermissionService,
+    contexts: Record<string, SpaceAccessContextForCasl>,
+) =>
+    vi
+        .spyOn(
+            service as unknown as SpaceContextResolver,
+            'getSpacesCaslContext',
+        )
+        .mockResolvedValue(contexts);
+
+describe('resolveAccess', () => {
+    const spaceContext: SpaceAccessContextForCasl = {
+        organizationUuid: 'organization-uuid',
+        projectUuid: 'project-uuid',
+        inheritsFromOrgOrProject: false,
+        access: [],
+        admins: [],
+    };
+    const dashboardTarget = {
+        type: 'dashboard' as const,
+        dashboardUuid: 'dashboard-uuid',
+        spaceUuid: 'space-uuid',
+    };
+
+    const createService = ({
+        enabled,
+        grants = {},
+        appGrants = {},
+        context = spaceContext,
+    }: {
+        enabled: boolean;
+        grants?: Record<string, unknown>;
+        appGrants?: Record<string, unknown>;
+        context?: typeof spaceContext;
+    }) => {
+        const dashboardAccessModel = {
+            getUserAccess: vi.fn(async () => grants),
+        };
+        const appAccessModel = {
+            getUserAccess: vi.fn(async () => appGrants),
+        };
+        const directAccessFeatureGate = {
+            isEnabledForUser: vi.fn(async () => enabled),
+        };
+        const service = new SpacePermissionService({
+            documentAccessModel: {
+                getUserAccess: vi.fn().mockResolvedValue({}),
+            } as never,
+            featureFlagModel: {
+                get: vi.fn().mockResolvedValue({ enabled: true }),
+            } as never,
+            spaceModel: {} as SpaceModel,
+            spacePermissionModel: {} as unknown as SpacePermissionModel,
+            appAccessModel: appAccessModel as never,
+            dashboardAccessModel:
+                dashboardAccessModel as unknown as DashboardAccessModel,
+            savedChartAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            savedSqlAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            directAccessFeatureGate:
+                directAccessFeatureGate as unknown as DirectAccessFeatureGate,
+        });
+        mockSpaceContexts(service, { 'space-uuid': context });
+        return {
+            service,
+            appAccessModel,
+            dashboardAccessModel,
+            directAccessFeatureGate,
+        };
+    };
+
+    test('returns the plain space context while the feature is off', async () => {
+        const { service, dashboardAccessModel } = createService({
+            enabled: false,
+        });
+
+        await expect(
+            service.resolveAccess('user-uuid', dashboardTarget),
+        ).resolves.toEqual({ ...spaceContext, directOnly: false });
+        expect(dashboardAccessModel.getUserAccess).not.toHaveBeenCalled();
+    });
+
+    test('returns the plain space context without a grant', async () => {
+        const { service } = createService({ enabled: true });
+
+        await expect(
+            service.resolveAccess('user-uuid', dashboardTarget),
+        ).resolves.toEqual({ ...spaceContext, directOnly: false });
+    });
+
+    test('appends grant rows and marks grant-only readers', async () => {
+        const { service, dashboardAccessModel } = createService({
+            enabled: true,
+            grants: {
+                'dashboard-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'space-uuid',
+                    userRole: SpaceMemberRole.VIEWER,
+                    groupRoles: [SpaceMemberRole.EDITOR],
+                },
+            },
+        });
+
+        await expect(
+            service.resolveAccess('user-uuid', dashboardTarget),
+        ).resolves.toEqual({
+            ...spaceContext,
+            access: [
+                {
+                    userUuid: 'user-uuid',
+                    role: SpaceMemberRole.VIEWER,
+                    hasDirectAccess: true,
+                    projectRole: undefined,
+                    inheritedRole: undefined,
+                    inheritedFrom: undefined,
+                    grantedVia: 'dashboard',
+                    grantSourceUuid: 'dashboard-uuid',
+                },
+                {
+                    userUuid: 'user-uuid',
+                    role: SpaceMemberRole.EDITOR,
+                    hasDirectAccess: true,
+                    projectRole: undefined,
+                    inheritedRole: undefined,
+                    inheritedFrom: undefined,
+                    grantedVia: 'dashboard',
+                    grantSourceUuid: 'dashboard-uuid',
+                },
+            ],
+            directOnly: true,
+        });
+        expect(dashboardAccessModel.getUserAccess).toHaveBeenCalledWith(
+            ['dashboard-uuid'],
+            'user-uuid',
+            { organizationUuid: 'organization-uuid' },
+        );
+    });
+
+    test('does not mark space members or admins as grant-only', async () => {
+        const memberContext = {
+            ...spaceContext,
+            access: [
+                {
+                    userUuid: 'user-uuid',
+                    role: SpaceMemberRole.VIEWER,
+                    hasDirectAccess: true,
+                    projectRole: undefined,
+                    inheritedRole: undefined,
+                    inheritedFrom: undefined,
+                },
+            ],
+        };
+        const { service } = createService({
+            enabled: true,
+            context: memberContext,
+            grants: {
+                'dashboard-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'space-uuid',
+                    userRole: SpaceMemberRole.EDITOR,
+                    groupRoles: [],
+                },
+            },
+        });
+
+        await expect(
+            service.resolveAccess('user-uuid', dashboardTarget),
+        ).resolves.toMatchObject({ directOnly: false });
+
+        const adminContext: SpaceAccessContextForCasl = {
+            ...spaceContext,
+            admins: [
+                { userUuid: 'user-uuid', source: 'organization' as const },
+            ],
+        };
+        const { service: adminService } = createService({
+            enabled: true,
+            context: adminContext,
+            grants: {
+                'dashboard-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'space-uuid',
+                    userRole: SpaceMemberRole.EDITOR,
+                    groupRoles: [],
+                },
+            },
+        });
+        await expect(
+            adminService.resolveAccess('user-uuid', dashboardTarget),
+        ).resolves.toMatchObject({ directOnly: false });
+    });
+
+    test('a space target returns the space-only context without any grant lookup', async () => {
+        const { service, dashboardAccessModel, directAccessFeatureGate } =
+            createService({ enabled: true });
+
+        const result = await service.resolveAccess('user-uuid', {
+            type: 'space',
+            spaceUuid: 'space-uuid',
+        });
+
+        expect(result).toEqual({ ...spaceContext, directOnly: false });
+        expectNoGrantRows(result);
+        expect(directAccessFeatureGate.isEnabledForUser).not.toHaveBeenCalled();
+        expect(dashboardAccessModel.getUserAccess).not.toHaveBeenCalled();
+    });
+
+    test('throws when the granted dashboard does not belong to the given space', async () => {
+        const { service } = createService({
+            enabled: true,
+            grants: {
+                'dashboard-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'another-space-uuid',
+                    userRole: SpaceMemberRole.EDITOR,
+                    groupRoles: [],
+                },
+            },
+        });
+
+        await expect(
+            service.resolveAccess('user-uuid', dashboardTarget),
+        ).rejects.toThrow(ParameterError);
+    });
+
+    test.each([
+        { label: 'personal', spaceUuid: null },
+        { label: 'space-backed', spaceUuid: 'space-uuid' },
+    ])('appends direct app grants for $label apps', async ({ spaceUuid }) => {
+        const { service, appAccessModel } = createService({
+            enabled: true,
+            appGrants: {
+                'app-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid,
+                    userRole: SpaceMemberRole.VIEWER,
+                    groupRoles: [SpaceMemberRole.EDITOR],
+                },
+            },
+        });
+
+        const result = await service.resolveAccess('user-uuid', {
+            type: 'app',
+            appUuid: 'app-uuid',
+            organizationUuid: 'organization-uuid',
+            projectUuid: 'project-uuid',
+            spaceUuid,
+        });
+
+        expect(result).toMatchObject({
+            organizationUuid: 'organization-uuid',
+            projectUuid: 'project-uuid',
+            directOnly: true,
+            access: [
+                {
+                    userUuid: 'user-uuid',
+                    role: SpaceMemberRole.VIEWER,
+                    grantedVia: 'app',
+                    grantSourceUuid: 'app-uuid',
+                },
+                {
+                    userUuid: 'user-uuid',
+                    role: SpaceMemberRole.EDITOR,
+                    grantedVia: 'app',
+                    grantSourceUuid: 'app-uuid',
+                },
+            ],
+        });
+        expect(appAccessModel.getUserAccess).toHaveBeenCalledWith(
+            ['app-uuid'],
+            'user-uuid',
+            { organizationUuid: 'organization-uuid' },
+        );
+    });
+
+    test('keeps personal app grants inert while direct access is disabled', async () => {
+        const { service, appAccessModel } = createService({
+            enabled: false,
+            appGrants: {
+                'app-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: null,
+                    userRole: SpaceMemberRole.VIEWER,
+                    groupRoles: [],
+                },
+            },
+        });
+
+        await expect(
+            service.resolveAccess('user-uuid', {
+                type: 'app',
+                appUuid: 'app-uuid',
+                organizationUuid: 'organization-uuid',
+                projectUuid: 'project-uuid',
+                spaceUuid: null,
+            }),
+        ).resolves.toEqual({
+            organizationUuid: 'organization-uuid',
+            projectUuid: 'project-uuid',
+            inheritsFromOrgOrProject: false,
+            access: [],
+            admins: [],
+            directOnly: false,
+        });
+        expect(appAccessModel.getUserAccess).not.toHaveBeenCalled();
+    });
+
+    describe('personal Documents', () => {
+        const creatorUuid = 'creator-uuid';
+        const otherUuid = 'other-uuid';
+        const personalDocument = {
+            type: 'personalDocument' as const,
+            organizationUuid: 'organization-uuid',
+            projectUuid: 'project-uuid',
+            createdByUserUuid: creatorUuid,
+            spaceUuid: null,
+        };
+        const abilityFor = (userUuid: string, role: ProjectMemberRole) =>
+            getUserAbilityBuilder({
+                user: {
+                    userUuid,
+                    organizationUuid: 'organization-uuid',
+                    role: OrganizationMemberRole.MEMBER,
+                },
+                projectProfiles: [
+                    {
+                        projectUuid: 'project-uuid',
+                        userUuid,
+                        role,
+                        roleUuid: undefined,
+                    },
+                ],
+                permissionsConfig: {
+                    pat: { enabled: false, allowedOrgRoles: [] },
+                },
+            }).builder.build();
+
+        test('act as a private space owned by the creator, without grant lookups', async () => {
+            const { service, directAccessFeatureGate } = createService({
+                enabled: true,
+            });
+
+            await expect(
+                service.resolveAccess(otherUuid, personalDocument),
+            ).resolves.toEqual({
+                organizationUuid: 'organization-uuid',
+                projectUuid: 'project-uuid',
+                inheritsFromOrgOrProject: false,
+                access: [
+                    {
+                        userUuid: creatorUuid,
+                        role: SpaceMemberRole.ADMIN,
+                        hasDirectAccess: true,
+                        projectRole: undefined,
+                        inheritedRole: undefined,
+                        inheritedFrom: undefined,
+                    },
+                ],
+                admins: [],
+                directOnly: false,
+            });
+            expect(
+                directAccessFeatureGate.isEnabledForUser,
+            ).not.toHaveBeenCalled();
+        });
+
+        test('leave only admins with access once the creator is gone', async () => {
+            const { service } = createService({ enabled: false });
+
+            await expect(
+                service.resolveAccess(otherUuid, {
+                    ...personalDocument,
+                    createdByUserUuid: null,
+                }),
+            ).resolves.toMatchObject({ access: [] });
+        });
+
+        test.each([
+            {
+                name: 'the interactive viewer who created it can edit it',
+                userUuid: creatorUuid,
+                role: ProjectMemberRole.INTERACTIVE_VIEWER,
+                canView: true,
+                canManage: true,
+            },
+            {
+                name: 'a viewer who created it can only read it',
+                userUuid: creatorUuid,
+                role: ProjectMemberRole.VIEWER,
+                canView: true,
+                canManage: false,
+            },
+            {
+                name: 'another editor cannot see it',
+                userUuid: otherUuid,
+                role: ProjectMemberRole.EDITOR,
+                canView: false,
+                canManage: false,
+            },
+            {
+                name: 'a project admin can manage it',
+                userUuid: otherUuid,
+                role: ProjectMemberRole.ADMIN,
+                canView: true,
+                canManage: true,
+            },
+        ])('$name', async ({ userUuid, role, canView, canManage }) => {
+            const { service } = createService({ enabled: false });
+            const context = await service.resolveAccess(
+                userUuid,
+                personalDocument,
+            );
+            const ability = abilityFor(userUuid, role);
+
+            expect(ability.can('view', subject('Document', context))).toBe(
+                canView,
+            );
+            expect(ability.can('manage', subject('Document', context))).toBe(
+                canManage,
+            );
+        });
+    });
+
+    test('rejects app references whose resolved location does not match', async () => {
+        const { service } = createService({
+            enabled: true,
+            appGrants: {
+                'app-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: null,
+                    userRole: SpaceMemberRole.VIEWER,
+                    groupRoles: [],
+                },
+            },
+        });
+
+        await expect(
+            service.resolveAccess('user-uuid', {
+                type: 'app',
+                appUuid: 'app-uuid',
+                organizationUuid: 'organization-uuid',
+                projectUuid: 'project-uuid',
+                spaceUuid: 'space-uuid',
+            }),
+        ).rejects.toThrow(ParameterError);
+    });
+});
+
+describe('resolveAccessBatch', () => {
+    const baseContext: SpaceAccessContextForCasl = {
+        organizationUuid: 'organization-uuid',
+        projectUuid: 'project-uuid',
+        inheritsFromOrgOrProject: false,
+        access: [],
+        admins: [],
+    };
+
+    const createService = ({
+        enabled,
+        grants = {},
+        contexts,
+    }: {
+        enabled: boolean;
+        grants?: Record<string, unknown>;
+        contexts: Record<string, SpaceAccessContextForCasl>;
+    }) => {
+        const dashboardAccessModel = {
+            getUserAccess: vi.fn(async () => grants),
+        };
+        const savedChartAccessModel = {
+            getUserAccess: vi.fn(async () => ({})),
+        };
+        const directAccessFeatureGate = {
+            isEnabledForUser: vi.fn(async () => enabled),
+        };
+        const service = new SpacePermissionService({
+            documentAccessModel: {
+                getUserAccess: vi.fn().mockResolvedValue({}),
+            } as never,
+            featureFlagModel: {
+                get: vi.fn().mockResolvedValue({ enabled: true }),
+            } as never,
+            spaceModel: {} as SpaceModel,
+            spacePermissionModel: {} as unknown as SpacePermissionModel,
+            appAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            dashboardAccessModel:
+                dashboardAccessModel as unknown as DashboardAccessModel,
+            savedChartAccessModel: savedChartAccessModel as never,
+            savedSqlAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            directAccessFeatureGate:
+                directAccessFeatureGate as unknown as DirectAccessFeatureGate,
+        });
+        const spaceContextResolver = mockSpaceContexts(service, contexts);
+        return {
+            service,
+            dashboardAccessModel,
+            savedChartAccessModel,
+            directAccessFeatureGate,
+            spaceContextResolver,
+        };
+    };
+
+    test('an empty batch performs no resolution work', async () => {
+        const { service, spaceContextResolver, directAccessFeatureGate } =
+            createService({ enabled: true, contexts: {} });
+
+        await expect(
+            service.resolveAccessBatch('user-uuid', []),
+        ).resolves.toEqual([]);
+        expect(spaceContextResolver).not.toHaveBeenCalled();
+        expect(directAccessFeatureGate.isEnabledForUser).not.toHaveBeenCalled();
+    });
+
+    test('space targets return space-only contexts with no gate or grant lookup', async () => {
+        const { service, dashboardAccessModel, directAccessFeatureGate } =
+            createService({
+                enabled: true,
+                contexts: { 'space-a': baseContext },
+            });
+
+        const firstTarget = { type: 'space' as const, spaceUuid: 'space-a' };
+        const duplicateTarget = {
+            type: 'space' as const,
+            spaceUuid: 'space-a',
+        };
+        const result = await service.resolveAccessBatch('user-uuid', [
+            firstTarget,
+            duplicateTarget,
+        ]);
+
+        expect(result).toEqual([
+            {
+                target: firstTarget,
+                context: { ...baseContext, directOnly: false },
+            },
+            {
+                target: duplicateTarget,
+                context: { ...baseContext, directOnly: false },
+            },
+        ]);
+        expect(result[0].target).toBe(firstTarget);
+        expect(result[1].target).toBe(duplicateTarget);
+        result.forEach(({ context }) => {
+            if (context) expectNoGrantRows(context);
+        });
+        expect(directAccessFeatureGate.isEnabledForUser).not.toHaveBeenCalled();
+        expect(dashboardAccessModel.getUserAccess).not.toHaveBeenCalled();
+    });
+
+    test('duplicate granted targets resolve through the grant path with one deduped lookup, identities kept', async () => {
+        const { service, dashboardAccessModel } = createService({
+            enabled: true,
+            contexts: { 'space-a': baseContext },
+            grants: {
+                'dash-a': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'space-a',
+                    userRole: SpaceMemberRole.EDITOR,
+                    groupRoles: [],
+                },
+            },
+        });
+        const firstTarget = {
+            type: 'dashboard' as const,
+            dashboardUuid: 'dash-a',
+            spaceUuid: 'space-a',
+        };
+        const duplicateTarget = {
+            type: 'dashboard' as const,
+            dashboardUuid: 'dash-a',
+            spaceUuid: 'space-a',
+        };
+
+        const result = await service.resolveAccessBatch('user-uuid', [
+            firstTarget,
+            duplicateTarget,
+        ]);
+
+        expect(result[0].target).toBe(firstTarget);
+        expect(result[1].target).toBe(duplicateTarget);
+        result.forEach(({ context }) => {
+            expect(context?.access).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({ grantedVia: 'dashboard' }),
+                ]),
+            );
+        });
+        expect(dashboardAccessModel.getUserAccess).toHaveBeenCalledTimes(1);
+        expect(dashboardAccessModel.getUserAccess).toHaveBeenCalledWith(
+            ['dash-a'],
+            'user-uuid',
+            { organizationUuid: 'organization-uuid' },
+        );
+    });
+
+    test('an unresolvable target stays aligned as undefined amid resolved neighbours', async () => {
+        const { service } = createService({
+            enabled: true,
+            contexts: { 'space-a': baseContext },
+            grants: {
+                'dash-a': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'space-a',
+                    userRole: SpaceMemberRole.VIEWER,
+                    groupRoles: [],
+                },
+            },
+        });
+
+        const targets = [
+            {
+                type: 'dashboard' as const,
+                dashboardUuid: 'dash-a',
+                spaceUuid: 'space-a',
+            },
+            { type: 'space' as const, spaceUuid: 'ghost-space' },
+            { type: 'space' as const, spaceUuid: 'space-a' },
+        ];
+        const result = await service.resolveAccessBatch('user-uuid', targets);
+
+        expect(result).toHaveLength(3);
+        result.forEach(({ target }, index) => {
+            expect(target).toBe(targets[index]);
+        });
+        expect(result[0].context?.access).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({ grantedVia: 'dashboard' }),
+            ]),
+        );
+        expect(result[1].context).toBeUndefined();
+        expect(result[2].context).toEqual({
+            ...baseContext,
+            directOnly: false,
+        });
+    });
+
+    test('feature off returns space-only for every ref without a grant lookup', async () => {
+        const {
+            service,
+            dashboardAccessModel,
+            savedChartAccessModel,
+            directAccessFeatureGate,
+            spaceContextResolver,
+        } = createService({
+            enabled: false,
+            contexts: { 'space-a': baseContext },
+        });
+
+        const result = await service.resolveAccessBatch('user-uuid', [
+            { type: 'space', spaceUuid: 'space-a' },
+            {
+                type: 'dashboard',
+                dashboardUuid: 'dash-1',
+                spaceUuid: 'space-a',
+            },
+            {
+                type: 'chart',
+                chartUuid: 'chart-1',
+                dashboardUuid: null,
+                spaceUuid: 'space-a',
+            },
+        ]);
+
+        expect(result.map(({ context }) => context)).toEqual([
+            { ...baseContext, directOnly: false },
+            { ...baseContext, directOnly: false },
+            { ...baseContext, directOnly: false },
+        ]);
+        expect(spaceContextResolver).toHaveBeenCalledTimes(1);
+        expect(directAccessFeatureGate.isEnabledForUser).toHaveBeenCalledTimes(
+            1,
+        );
+        expect(dashboardAccessModel.getUserAccess).not.toHaveBeenCalled();
+        expect(savedChartAccessModel.getUserAccess).not.toHaveBeenCalled();
+    });
+
+    test('rejects a batch whose grant targets span organizations before any gate or grant work', async () => {
+        // Every caller is project-scoped, so a cross-organization batch is a
+        // caller bug or a probing attempt; the resolver refuses to service it.
+        const organizationBContext = {
+            ...baseContext,
+            organizationUuid: 'organization-b',
+            projectUuid: 'project-b',
+        };
+        const { service, dashboardAccessModel, directAccessFeatureGate } =
+            createService({
+                enabled: true,
+                contexts: {
+                    'space-a': baseContext,
+                    'space-b': organizationBContext,
+                },
+            });
+
+        await expect(
+            service.resolveAccessBatch('user-uuid', [
+                {
+                    type: 'dashboard',
+                    dashboardUuid: 'dash-a',
+                    spaceUuid: 'space-a',
+                },
+                {
+                    type: 'dashboard',
+                    dashboardUuid: 'dash-b',
+                    spaceUuid: 'space-b',
+                },
+            ]),
+        ).rejects.toThrow(
+            'Access targets must belong to a single organization',
+        );
+        expect(directAccessFeatureGate.isEnabledForUser).not.toHaveBeenCalled();
+        expect(dashboardAccessModel.getUserAccess).not.toHaveBeenCalled();
+    });
+
+    test('a cross-organization space-only batch still resolves (no grant machinery involved)', async () => {
+        const organizationBContext = {
+            ...baseContext,
+            organizationUuid: 'organization-b',
+            projectUuid: 'project-b',
+        };
+        const { service, directAccessFeatureGate } = createService({
+            enabled: true,
+            contexts: {
+                'space-a': baseContext,
+                'space-b': organizationBContext,
+            },
+        });
+
+        const result = await service.resolveAccessBatch('user-uuid', [
+            { type: 'space', spaceUuid: 'space-a' },
+            { type: 'space', spaceUuid: 'space-b' },
+        ]);
+
+        expect(result[0]?.context?.organizationUuid).toBe('organization-uuid');
+        expect(result[1]?.context?.organizationUuid).toBe('organization-b');
+        expect(directAccessFeatureGate.isEnabledForUser).not.toHaveBeenCalled();
+    });
+
+    test('forwards a transaction to space and grant resolution', async () => {
+        const { service, dashboardAccessModel, spaceContextResolver } =
+            createService({
+                enabled: true,
+                contexts: { 'space-a': baseContext },
+            });
+        const trx = {} as Knex;
+
+        await service.resolveAccess(
+            'user-uuid',
+            {
+                type: 'dashboard',
+                dashboardUuid: 'dash-a',
+                spaceUuid: 'space-a',
+            },
+            { trx },
+        );
+
+        expect(spaceContextResolver).toHaveBeenCalledWith(
+            ['space-a'],
+            { userUuid: 'user-uuid' },
+            { trx },
+        );
+        expect(dashboardAccessModel.getUserAccess).toHaveBeenCalledWith(
+            ['dash-a'],
+            'user-uuid',
+            { organizationUuid: 'organization-uuid', trx },
+        );
+    });
+
+    test('appends tagged grant rows per granted dashboard from one batched lookup, aligned with input order', async () => {
+        const { service, dashboardAccessModel } = createService({
+            enabled: true,
+            contexts: { 'space-a': baseContext, 'space-b': baseContext },
+            grants: {
+                'dash-1': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'space-a',
+                    userRole: SpaceMemberRole.VIEWER,
+                    groupRoles: [],
+                },
+            },
+        });
+
+        const result = await service.resolveAccessBatch('user-uuid', [
+            {
+                type: 'dashboard',
+                dashboardUuid: 'dash-2',
+                spaceUuid: 'space-b',
+            },
+            {
+                type: 'dashboard',
+                dashboardUuid: 'dash-1',
+                spaceUuid: 'space-a',
+            },
+        ]);
+
+        // Order preserved: dash-2 (no grant) first, dash-1 (grant) second.
+        expect(result[0]).toEqual({
+            target: {
+                type: 'dashboard',
+                dashboardUuid: 'dash-2',
+                spaceUuid: 'space-b',
+            },
+            context: { ...baseContext, directOnly: false },
+        });
+        expect(result[1]?.context?.access).toEqual([
+            expect.objectContaining({
+                userUuid: 'user-uuid',
+                role: SpaceMemberRole.VIEWER,
+                grantedVia: 'dashboard',
+            }),
+        ]);
+        expect(result[1]?.context?.directOnly).toBe(true);
+        expect(dashboardAccessModel.getUserAccess).toHaveBeenCalledTimes(1);
+        expect(dashboardAccessModel.getUserAccess).toHaveBeenCalledWith(
+            ['dash-2', 'dash-1'],
+            'user-uuid',
+            { organizationUuid: 'organization-uuid' },
+        );
+    });
+
+    test('degrades to space-only when the grant does not belong to the given space', async () => {
+        const { service } = createService({
+            enabled: true,
+            contexts: { 'space-a': baseContext },
+            grants: {
+                'dash-1': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'another-space',
+                    userRole: SpaceMemberRole.EDITOR,
+                    groupRoles: [],
+                },
+            },
+        });
+
+        const result = await service.resolveAccessBatch('user-uuid', [
+            {
+                type: 'dashboard',
+                dashboardUuid: 'dash-1',
+                spaceUuid: 'space-a',
+            },
+        ]);
+
+        expect(result[0].context).toEqual({
+            ...baseContext,
+            directOnly: false,
+        });
+        expectNoGrantRows(result[0].context!);
+    });
+
+    test('unresolvable spaces map to undefined', async () => {
+        const { service } = createService({ enabled: true, contexts: {} });
+
+        const result = await service.resolveAccessBatch('user-uuid', [
+            {
+                type: 'dashboard',
+                dashboardUuid: 'dash-1',
+                spaceUuid: 'missing-space',
+            },
+        ]);
+
+        expect(result).toEqual([
+            {
+                target: {
+                    type: 'dashboard',
+                    dashboardUuid: 'dash-1',
+                    spaceUuid: 'missing-space',
+                },
+                context: undefined,
+            },
+        ]);
+    });
+});
+
+describe('resolveAccess space-saved chart target', () => {
+    const spaceContext: SpaceAccessContextForCasl = {
+        organizationUuid: 'organization-uuid',
+        projectUuid: 'project-uuid',
+        inheritsFromOrgOrProject: false,
+        access: [],
+        admins: [],
+    };
+    const savedChartTarget = {
+        type: 'chart' as const,
+        chartUuid: 'chart-uuid',
+        dashboardUuid: null,
+        spaceUuid: 'space-uuid',
+    };
+
+    const createService = ({
+        enabled,
+        grants = {},
+    }: {
+        enabled: boolean;
+        grants?: Record<string, unknown>;
+    }) => {
+        const savedChartAccessModel = {
+            getUserAccess: vi.fn(async () => grants),
+        };
+        const service = new SpacePermissionService({
+            documentAccessModel: {
+                getUserAccess: vi.fn().mockResolvedValue({}),
+            } as never,
+            featureFlagModel: {
+                get: vi.fn().mockResolvedValue({ enabled: true }),
+            } as never,
+            spaceModel: {} as SpaceModel,
+            spacePermissionModel: {} as unknown as SpacePermissionModel,
+            appAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            dashboardAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            savedChartAccessModel: savedChartAccessModel as never,
+            savedSqlAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            directAccessFeatureGate: {
+                isEnabledForUser: vi.fn(async () => enabled),
+            } as unknown as DirectAccessFeatureGate,
+        });
+        mockSpaceContexts(service, { 'space-uuid': spaceContext });
+        return { service, savedChartAccessModel };
+    };
+
+    test('space target returns the space-only context with no grant lookup', async () => {
+        const { service, savedChartAccessModel } = createService({
+            enabled: true,
+        });
+        const result = await service.resolveAccess('user-uuid', {
+            type: 'space',
+            spaceUuid: 'space-uuid',
+        });
+        expect(result).toEqual({ ...spaceContext, directOnly: false });
+        expectNoGrantRows(result);
+        expect(savedChartAccessModel.getUserAccess).not.toHaveBeenCalled();
+    });
+
+    test('appends a grant row tagged saved_chart and marks grant-only', async () => {
+        const { service } = createService({
+            enabled: true,
+            grants: {
+                'chart-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'space-uuid',
+                    userRole: SpaceMemberRole.EDITOR,
+                    groupRoles: [],
+                },
+            },
+        });
+        const result = await service.resolveAccess(
+            'user-uuid',
+            savedChartTarget,
+        );
+        expect(result.access).toEqual([
+            expect.objectContaining({
+                userUuid: 'user-uuid',
+                role: SpaceMemberRole.EDITOR,
+                grantedVia: 'saved_chart',
+                grantSourceUuid: 'chart-uuid',
+            }),
+        ]);
+        expect(result.directOnly).toBe(true);
+    });
+
+    test('throws when the grant does not belong to the given space', async () => {
+        const { service } = createService({
+            enabled: true,
+            grants: {
+                'chart-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'another-space',
+                    userRole: SpaceMemberRole.EDITOR,
+                    groupRoles: [],
+                },
+            },
+        });
+        await expect(
+            service.resolveAccess('user-uuid', savedChartTarget),
+        ).rejects.toThrow(ParameterError);
+    });
+});
+
+describe('resolveAccess saved SQL chart target', () => {
+    const spaceContext: SpaceAccessContextForCasl = {
+        organizationUuid: 'organization-uuid',
+        projectUuid: 'project-uuid',
+        inheritsFromOrgOrProject: false,
+        access: [],
+        admins: [],
+    };
+    const sqlChartTarget = {
+        type: 'sqlChart' as const,
+        savedSqlUuid: 'saved-sql-uuid',
+        spaceUuid: 'space-uuid',
+    };
+
+    const createService = ({
+        enabled,
+        grants = {},
+    }: {
+        enabled: boolean;
+        grants?: Record<string, unknown>;
+    }) => {
+        const savedSqlAccessModel = {
+            getUserAccess: vi.fn(async () => grants),
+        };
+        const service = new SpacePermissionService({
+            documentAccessModel: {
+                getUserAccess: vi.fn().mockResolvedValue({}),
+            } as never,
+            featureFlagModel: {
+                get: vi.fn().mockResolvedValue({ enabled: true }),
+            } as never,
+            spaceModel: {} as SpaceModel,
+            spacePermissionModel: {} as unknown as SpacePermissionModel,
+            appAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            dashboardAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            savedChartAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            savedSqlAccessModel: savedSqlAccessModel as never,
+            directAccessFeatureGate: {
+                isEnabledForUser: vi.fn(async () => enabled),
+            } as unknown as DirectAccessFeatureGate,
+        });
+        mockSpaceContexts(service, { 'space-uuid': spaceContext });
+        return { service, savedSqlAccessModel };
+    };
+
+    test('returns the plain space context while the feature is off', async () => {
+        const { service, savedSqlAccessModel } = createService({
+            enabled: false,
+        });
+
+        await expect(
+            service.resolveAccess('user-uuid', sqlChartTarget),
+        ).resolves.toEqual({ ...spaceContext, directOnly: false });
+        expect(savedSqlAccessModel.getUserAccess).not.toHaveBeenCalled();
+    });
+
+    test('appends a grant row tagged sql_chart and marks grant-only', async () => {
+        const { service, savedSqlAccessModel } = createService({
+            enabled: true,
+            grants: {
+                'saved-sql-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'space-uuid',
+                    userRole: SpaceMemberRole.VIEWER,
+                    groupRoles: [],
+                },
+            },
+        });
+
+        const result = await service.resolveAccess('user-uuid', sqlChartTarget);
+
+        expect(result.access).toEqual([
+            expect.objectContaining({
+                userUuid: 'user-uuid',
+                role: SpaceMemberRole.VIEWER,
+                grantedVia: 'sql_chart',
+                grantSourceUuid: 'saved-sql-uuid',
+            }),
+        ]);
+        expect(result.directOnly).toBe(true);
+        expect(savedSqlAccessModel.getUserAccess).toHaveBeenCalledWith(
+            ['saved-sql-uuid'],
+            'user-uuid',
+            { organizationUuid: 'organization-uuid' },
+        );
+    });
+
+    test('throws when the grant does not belong to the given space', async () => {
+        const { service } = createService({
+            enabled: true,
+            grants: {
+                'saved-sql-uuid': {
+                    organizationUuid: 'organization-uuid',
+                    projectUuid: 'project-uuid',
+                    spaceUuid: 'another-space',
+                    userRole: SpaceMemberRole.EDITOR,
+                    groupRoles: [],
+                },
+            },
+        });
+
+        await expect(
+            service.resolveAccess('user-uuid', sqlChartTarget),
+        ).rejects.toThrow(ParameterError);
+    });
+});
+
+describe('resolveAccess chart ownership routing', () => {
+    const baseContext: SpaceAccessContextForCasl = {
+        organizationUuid: 'organization-uuid',
+        projectUuid: 'project-uuid',
+        inheritsFromOrgOrProject: false,
+        access: [],
+        admins: [],
+    };
+
+    const editorGrant = (spaceUuid: string) => ({
+        organizationUuid: 'organization-uuid',
+        projectUuid: 'project-uuid',
+        spaceUuid,
+        userRole: SpaceMemberRole.EDITOR,
+        groupRoles: [],
+    });
+
+    const createService = ({
+        dashboardGrants = {},
+        chartGrants = {},
+        contexts,
+    }: {
+        dashboardGrants?: Record<string, unknown>;
+        chartGrants?: Record<string, unknown>;
+        contexts: Record<string, SpaceAccessContextForCasl>;
+    }) => {
+        const dashboardAccessModel = {
+            getUserAccess: vi.fn(async () => dashboardGrants),
+        };
+        const savedChartAccessModel = {
+            getUserAccess: vi.fn(async () => chartGrants),
+        };
+        const service = new SpacePermissionService({
+            documentAccessModel: {
+                getUserAccess: vi.fn().mockResolvedValue({}),
+            } as never,
+            featureFlagModel: {
+                get: vi.fn().mockResolvedValue({ enabled: true }),
+            } as never,
+            spaceModel: {} as SpaceModel,
+            spacePermissionModel: {} as unknown as SpacePermissionModel,
+            appAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            dashboardAccessModel: dashboardAccessModel as never,
+            savedChartAccessModel: savedChartAccessModel as never,
+            savedSqlAccessModel: {
+                getUserAccess: vi.fn(async () => ({})),
+            } as never,
+            directAccessFeatureGate: {
+                isEnabledForUser: vi.fn(async () => true),
+            } as unknown as DirectAccessFeatureGate,
+        });
+        const spaceContextResolver = mockSpaceContexts(service, contexts);
+        return {
+            service,
+            dashboardAccessModel,
+            savedChartAccessModel,
+            spaceContextResolver,
+        };
+    };
+
+    test('an owned chart resolves through its dashboard grant, never the chart grant', async () => {
+        const { service, dashboardAccessModel, savedChartAccessModel } =
+            createService({
+                contexts: { 'space-uuid': baseContext },
+                dashboardGrants: {
+                    'dashboard-uuid': editorGrant('space-uuid'),
+                },
+            });
+
+        const result = await service.resolveAccess('user-uuid', {
+            type: 'chart',
+            chartUuid: 'chart-uuid',
+            dashboardUuid: 'dashboard-uuid',
+            spaceUuid: 'space-uuid',
+        });
+
+        expect(result.access).toEqual([
+            expect.objectContaining({
+                grantedVia: 'dashboard',
+                grantSourceUuid: 'dashboard-uuid',
+            }),
+        ]);
+        expect(dashboardAccessModel.getUserAccess).toHaveBeenCalledWith(
+            ['dashboard-uuid'],
+            'user-uuid',
+            { organizationUuid: 'organization-uuid' },
+        );
+        expect(savedChartAccessModel.getUserAccess).not.toHaveBeenCalled();
+    });
+
+    test('a space chart resolves through its own chart grant, never a dashboard grant', async () => {
+        const { service, dashboardAccessModel, savedChartAccessModel } =
+            createService({
+                contexts: { 'space-uuid': baseContext },
+                chartGrants: { 'chart-uuid': editorGrant('space-uuid') },
+            });
+
+        const result = await service.resolveAccess('user-uuid', {
+            type: 'chart',
+            chartUuid: 'chart-uuid',
+            dashboardUuid: null,
+            spaceUuid: 'space-uuid',
+        });
+
+        expect(result.access).toEqual([
+            expect.objectContaining({ grantedVia: 'saved_chart' }),
+        ]);
+        expect(savedChartAccessModel.getUserAccess).toHaveBeenCalledWith(
+            ['chart-uuid'],
+            'user-uuid',
+            { organizationUuid: 'organization-uuid' },
+        );
+        expect(dashboardAccessModel.getUserAccess).not.toHaveBeenCalled();
+    });
+
+    test('batched routing stays aligned across a mixed owned/space set', async () => {
+        const {
+            service,
+            dashboardAccessModel,
+            savedChartAccessModel,
+            spaceContextResolver,
+        } = createService({
+            contexts: { 'space-a': baseContext, 'space-b': baseContext },
+            dashboardGrants: { 'dashboard-uuid': editorGrant('space-a') },
+            chartGrants: { 'chart-b': editorGrant('space-b') },
+        });
+
+        const result = await service.resolveAccessBatch('user-uuid', [
+            {
+                type: 'chart',
+                chartUuid: 'chart-a',
+                dashboardUuid: 'dashboard-uuid',
+                spaceUuid: 'space-a',
+            },
+            {
+                type: 'chart',
+                chartUuid: 'chart-b',
+                dashboardUuid: null,
+                spaceUuid: 'space-b',
+            },
+        ]);
+
+        expect(result[0]?.context?.access).toEqual([
+            expect.objectContaining({ grantedVia: 'dashboard' }),
+        ]);
+        expect(result[1]?.context?.access).toEqual([
+            expect.objectContaining({ grantedVia: 'saved_chart' }),
+        ]);
+        expect(spaceContextResolver).toHaveBeenCalledTimes(1);
+        expect(dashboardAccessModel.getUserAccess).toHaveBeenCalledTimes(1);
+        expect(savedChartAccessModel.getUserAccess).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('Document access boundaries', () => {
+    test.each([
+        { licensed: true, documents: true },
+        { licensed: false, documents: true },
+        { licensed: true, documents: false },
+    ])(
+        'document grants remain resource-scoped with gates %j',
+        async ({ licensed, documents }) => {
+            const documentAccessModel = {
+                getUserAccess: vi.fn().mockResolvedValue({
+                    doc: {
+                        organizationUuid: 'org',
+                        projectUuid: 'project',
+                        spaceUuid: 'space',
+                        userRole: SpaceMemberRole.VIEWER,
+                        groupRoles: [SpaceMemberRole.EDITOR],
+                    },
+                }),
+            };
+            const service = new SpacePermissionService({
+                spaceModel: {} as never,
+                spacePermissionModel: {} as never,
+                appAccessModel: {} as never,
+                dashboardAccessModel: {} as never,
+                savedChartAccessModel: {} as never,
+                savedSqlAccessModel: {} as never,
+                documentAccessModel: documentAccessModel as never,
+                featureFlagModel: {
+                    get: vi.fn().mockResolvedValue({ enabled: documents }),
+                } as never,
+                directAccessFeatureGate: {
+                    isEnabledForUser: vi.fn().mockResolvedValue(licensed),
+                } as never,
+            });
+            mockSpaceContexts(service, {
+                space: {
+                    organizationUuid: 'org',
+                    projectUuid: 'project',
+                    inheritsFromOrgOrProject: false,
+                    access: [],
+                    admins: [],
+                },
+            });
+            const results = await service.resolveAccessBatch('reader', [
+                { type: 'document', documentUuid: 'doc', spaceUuid: 'space' },
+                {
+                    type: 'document',
+                    documentUuid: 'sibling',
+                    spaceUuid: 'space',
+                },
+                { type: 'space', spaceUuid: 'space' },
+            ]);
+            expect(results[1].context?.access).toEqual([]);
+            expect(results[2].context?.access).toEqual([]);
+            const deleteContext = await service.getDocumentDeleteAccessContext(
+                'reader',
+                { type: 'document', documentUuid: 'doc', spaceUuid: 'space' },
+            );
+            expect(deleteContext.access).toEqual([]);
+            if (licensed && documents) {
+                expect(results[0].context?.access).toEqual([
+                    expect.objectContaining({
+                        userUuid: 'reader',
+                        role: SpaceMemberRole.VIEWER,
+                        grantedVia: 'document',
+                        grantSourceUuid: 'doc',
+                    }),
+                    expect.objectContaining({
+                        userUuid: 'reader',
+                        role: SpaceMemberRole.EDITOR,
+                        grantedVia: 'document',
+                        grantSourceUuid: 'doc',
+                    }),
+                ]);
+                expect(results[0].context?.directOnly).toBe(true);
+            } else {
+                expect(results[0].context?.access).toEqual([]);
+                expect(
+                    documentAccessModel.getUserAccess,
+                ).not.toHaveBeenCalled();
+            }
+        },
+    );
 });

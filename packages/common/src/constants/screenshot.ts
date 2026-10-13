@@ -16,6 +16,25 @@
 export const SCREENSHOT_READY_INDICATOR_ID = 'lightdash-ready-indicator';
 
 /**
+ * ID of an element that is always mounted on minimal pages and exposes the
+ * current screenshot progress: which tiles are expected, ready, and errored.
+ *
+ * Unlike SCREENSHOT_READY_INDICATOR_ID, this element exists from first paint
+ * so the UnfurlService can read it on timeout to identify which tile UUIDs
+ * are still unaccounted for.
+ *
+ * Data attributes:
+ * - data-tiles-expected: JSON array of tile UUIDs expected to render
+ * - data-tiles-ready:    JSON array of tile UUIDs that called markTileScreenshotReady
+ * - data-tiles-errored:  JSON array of tile UUIDs that called markTileScreenshotErrored
+ *
+ * Usage:
+ * - Frontend: Rendered by ScreenshotProgressIndicator on minimal pages
+ * - Backend:  Read by UnfurlService when waitForSelector(READY_INDICATOR) times out
+ */
+export const SCREENSHOT_PROGRESS_INDICATOR_ID = 'lightdash-screenshot-progress';
+
+/**
  * Class name for tile loading skeleton overlays.
  * The UnfurlService waits for these elements to be hidden (loading complete).
  *
@@ -46,14 +65,67 @@ export const LOADING_CHART_CLASS = 'loading_chart';
 export const MARKDOWN_TILE_CLASS = 'markdown-tile';
 
 /**
- * Class name for the dashboard grid layout container.
- * This is the screenshot target for dashboard screenshots.
+ * Attribute set on a custom chart type (`DATA_APP_VIZ`) tile that reported
+ * screenshot-ready through the fallback timer because its bundle never
+ * acknowledged the render (`viz-rendered`). The value is
+ * `<dataAppVizUuid>@<version>`.
  *
  * Usage:
- * - Frontend: Applied to ResponsiveGridLayout in MinimalDashboard
+ * - Frontend: Set by DataAppVizRenderer when the render-ack fallback fires
+ * - Backend: Counted by UnfurlService.saveScreenshot() after the ready wait
+ */
+export const CUSTOM_CHART_READY_FALLBACK_ATTRIBUTE =
+    'data-custom-chart-ready-fallback';
+
+/**
+ * Class name for the dashboard screenshot/PDF target wrapper.
+ * Wraps the dashboard's grid(s) so the backend can measure and screenshot a
+ * single deterministic element. When a multi-tab PDF export is rendered we
+ * stack one <ResponsiveGridLayout> per tab; this wrapper encompasses all of
+ * them so getBoundingClientRect / locator.screenshot capture every tab.
+ *
+ * Note: do NOT use `react-grid-layout` here — that class is also applied by
+ * the third-party grid library to every grid instance, so a multi-grid render
+ * would yield multiple matches and the backend would only see the first one.
+ *
+ * Usage:
+ * - Frontend: Applied to the wrapper <div> in MinimalDashboardContent
  * - Backend: Screenshot selector in UnfurlService.saveScreenshot()
  */
-export const DASHBOARD_GRID_CLASS = 'react-grid-layout';
+export const DASHBOARD_GRID_CLASS = 'lightdash-dashboard-screenshot-target';
+
+/**
+ * Class name for a single tab's page container in the css-paged PDF export.
+ * The frontend wraps each exported tab in this class; the backend measures
+ * these containers to derive a uniform PDF page height and the print CSS
+ * forces a page break before each one.
+ *
+ * Usage:
+ * - Frontend: Applied per tab group in MinimalDashboardContent (paged export)
+ * - Backend: Measured by UnfurlService.unfurlPdfCssPaged / generatePdf
+ */
+export const EXPORT_TAB_PAGE_CLASS = 'lightdash-export-tab-page';
+
+/**
+ * Class name for the root of a Document's print layout. The backend measures
+ * it before printing the Document to paginated PDF.
+ *
+ * Usage:
+ * - Frontend: Applied by MinimalDocument
+ * - Backend: Screenshot selector in UnfurlService.saveScreenshot()
+ */
+export const DOCUMENT_EXPORT_CLASS = 'lightdash-document-export';
+
+/**
+ * `data-status` of the ready indicator when the page itself could not load
+ * (e.g. the Document is gone or no longer viewable). Unlike
+ * `completed-with-errors`, nothing on the page is worth capturing.
+ *
+ * Usage:
+ * - Frontend: Rendered by ScreenshotReadyIndicator with `failed`
+ * - Backend: UnfurlService fails the export instead of capturing the page
+ */
+export const SCREENSHOT_FAILED_STATUS = 'failed';
 
 /**
  * ID of the element rendered by the error boundary fallback.
@@ -82,6 +154,8 @@ export const LOGIN_PAGE_ID = 'lightdash-login-page';
 export const SCREENSHOT_SELECTORS = {
     /** ID selector: #lightdash-ready-indicator */
     READY_INDICATOR: `#${SCREENSHOT_READY_INDICATOR_ID}`,
+    /** ID selector: #lightdash-screenshot-progress */
+    PROGRESS_INDICATOR: `#${SCREENSHOT_PROGRESS_INDICATOR_ID}`,
     /** Class selector: .loading_chart_overlay */
     LOADING_OVERLAY: `.${LOADING_CHART_OVERLAY_CLASS}`,
     /** Class selector: .loading_chart */
@@ -90,6 +164,10 @@ export const SCREENSHOT_SELECTORS = {
     MARKDOWN_TILE: `.${MARKDOWN_TILE_CLASS}`,
     /** Class selector: .react-grid-layout */
     DASHBOARD_GRID: `.${DASHBOARD_GRID_CLASS}`,
+    /** Class selector: .lightdash-document-export */
+    DOCUMENT_EXPORT: `.${DOCUMENT_EXPORT_CLASS}`,
+    /** Attribute selector: [data-custom-chart-ready-fallback] */
+    CUSTOM_CHART_READY_FALLBACK: `[${CUSTOM_CHART_READY_FALLBACK_ATTRIBUTE}]`,
     /** ID selector: #lightdash-error-boundary */
     ERROR_BOUNDARY: `#${ERROR_BOUNDARY_ID}`,
     /** ID selector: #lightdash-login-page */

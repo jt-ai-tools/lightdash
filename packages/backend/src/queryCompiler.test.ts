@@ -1,14 +1,29 @@
 import {
+    BinType,
+    CompiledDimension,
     CompiledMetricQuery,
     CompileError,
     CustomDimensionType,
     DimensionType,
+    FieldType,
+    FilterOperator,
     MetricType,
     TableCalculation,
     TableCalculationTemplateType,
+    UnitOfTime,
+    VizIndexType,
     WindowFunctionType,
+    type AdditionalMetric,
+    type CustomDimension,
+    type CustomSqlDimension,
+    type Explore,
+    type FormulaTableCalculation,
+    type PivotConfiguration,
 } from '@lightdash/common';
-import { compileMetricQuery } from './queryCompiler';
+import {
+    compileMetricQuery,
+    compilePostCalculationMetric,
+} from './queryCompiler';
 import {
     EXPLORE,
     METRIC_QUERY_DUPLICATE_NAME,
@@ -21,7 +36,184 @@ import {
     METRIC_QUERY_WITH_ADDITIONAL_METRICS_COMPILED,
     METRIC_QUERY_WITH_INVALID_ADDITIONAL_METRIC,
 } from './queryCompiler.mock';
-import { warehouseClientMock } from './utils/QueryBuilder/MetricQueryBuilder.mock';
+import { MetricQueryBuilder } from './utils/QueryBuilder/MetricQueryBuilder';
+import {
+    emptyTable,
+    warehouseClientMock,
+} from './utils/QueryBuilder/MetricQueryBuilder.mock';
+
+describe('custom metrics referencing dimensions', () => {
+    const explore: Explore = {
+        ...EXPLORE,
+        name: 'table1',
+        label: 'Table 1',
+        baseTable: 'table1',
+        joinedTables: [],
+        tags: [],
+    };
+    const dimension: CustomSqlDimension = {
+        id: 'adjusted',
+        name: 'Adjusted',
+        table: 'table1',
+        type: CustomDimensionType.SQL,
+        dimensionType: DimensionType.NUMBER,
+        sql: '${table1.dim_1} * 2',
+    };
+    const metric: AdditionalMetric = {
+        name: 'adjusted_total',
+        label: 'Adjusted total',
+        table: 'table1',
+        type: MetricType.SUM,
+        sql: '${table1.adjusted}',
+    };
+    const compile = (
+        customDimensions: CustomDimension[] = [dimension],
+        additionalMetric = metric,
+        currentExplore = explore,
+    ) =>
+        compileMetricQuery({
+            explore: currentExplore,
+            metricQuery: {
+                ...METRIC_QUERY_NO_CALCS,
+                dimensions: [],
+                metrics: [`table1_${additionalMetric.name}`],
+                customDimensions,
+                additionalMetrics: [additionalMetric],
+            },
+            warehouseSqlBuilder: warehouseClientMock,
+            availableParameters: [],
+        });
+
+    it('uses the current custom dimension SQL even when the dimension is not selected', () => {
+        const before = compile();
+        const after = compile([
+            {
+                ...dimension,
+                name: 'Renamed dimension',
+                sql: '${table1.dim_1} * 3',
+            },
+        ]);
+        expect(before.compiledAdditionalMetrics[0].compiledSql).toContain(
+            '* 2',
+        );
+        expect(after.compiledAdditionalMetrics[0].compiledSql).toContain('* 3');
+        const { query } = new MetricQueryBuilder({
+            explore,
+            compiledMetricQuery: after,
+            warehouseSqlBuilder: warehouseClientMock,
+            intrinsicUserAttributes: {},
+            parameterDefinitions: {},
+            timezone: 'UTC',
+        }).compileQuery();
+        expect(query).toContain('SUM(((`some`.`table1`.`dim_1`) * 3))');
+        expect(explore.tables.table1.dimensions.adjusted).toBeUndefined();
+    });
+
+    it('rejects a deleted custom dimension with the metric and reference in the error', () => {
+        expect(() => compile([])).toThrow(/adjusted_total.*table1.adjusted/);
+    });
+
+    it('does not allow bin dimensions as metric SQL references', () => {
+        expect(() =>
+            compile([
+                {
+                    id: 'adjusted',
+                    name: 'Bins',
+                    table: 'table1',
+                    type: CustomDimensionType.BIN,
+                    dimensionId: 'table1_dim_1',
+                    binType: BinType.FIXED_NUMBER,
+                    binNumber: 5,
+                },
+            ]),
+        ).toThrow(/adjusted_total.*table1.adjusted/);
+    });
+
+    it('tracks multiple custom dimensions and their joined table dependencies', () => {
+        const joinedExplore = {
+            ...explore,
+            tables: {
+                ...explore.tables,
+                other: {
+                    ...emptyTable('other'),
+                    dimensions: {
+                        amount: {
+                            ...explore.tables.table1.dimensions.dim_1,
+                            name: 'amount',
+                            table: 'other',
+                            compiledSql: '"other".amount',
+                            tablesReferences: ['other'],
+                        },
+                    },
+                },
+            },
+        };
+        const result = compile(
+            [
+                dimension,
+                {
+                    ...dimension,
+                    id: 'other_amount',
+                    table: 'other',
+                    sql: '${other.amount}',
+                },
+            ],
+            { ...metric, sql: '${table1.adjusted} + ${other.other_amount}' },
+            joinedExplore,
+        );
+        expect(result.compiledAdditionalMetrics[0].tablesReferences).toEqual(
+            expect.arrayContaining(['table1', 'other']),
+        );
+        expect(result.compiledAdditionalMetrics[0].compiledSql).toContain(
+            '"other".amount',
+        );
+    });
+
+    it('keeps model dimension precedence when a custom dimension has the same name', () => {
+        const result = compile([{ ...dimension, id: 'dim_1', sql: '999' }], {
+            ...metric,
+            sql: '${table1.dim_1}',
+            baseDimensionName: 'dim_1',
+        });
+        expect(result.compiledAdditionalMetrics[0].compiledSql).toBe(
+            'SUM((`some`.`table1`.`dim_1`))',
+        );
+    });
+
+    it('follows model SQL changes for references while preserving legacy copied SQL', () => {
+        const updatedExplore = {
+            ...explore,
+            tables: {
+                table1: {
+                    ...explore.tables.table1,
+                    dimensions: {
+                        dim_1: {
+                            ...explore.tables.table1.dimensions.dim_1,
+                            sql: '${TABLE}.dim_1 * 2',
+                            compiledSql: '"table1".dim_1 * 2',
+                        },
+                    },
+                },
+            },
+        };
+        const referenced = compile(
+            [],
+            { ...metric, baseDimensionName: 'dim_1', sql: '${table1.dim_1}' },
+            updatedExplore,
+        );
+        const legacy = compile(
+            [],
+            { ...metric, baseDimensionName: 'dim_1', sql: '${TABLE}.dim_1' },
+            updatedExplore,
+        );
+        expect(referenced.compiledAdditionalMetrics[0].compiledSql).toBe(
+            'SUM(("table1".dim_1 * 2))',
+        );
+        expect(legacy.compiledAdditionalMetrics[0].compiledSql).toBe(
+            'SUM("table1".dim_1)',
+        );
+    });
+});
 
 test('Should compile without table calculations', () => {
     const expected: CompiledMetricQuery = {
@@ -38,6 +230,34 @@ test('Should compile without table calculations', () => {
             availableParameters: [],
         }),
     ).toStrictEqual(expected);
+});
+
+test('Should compile custom SQL dimension referencing a reserved parameter', () => {
+    // Reserved parameters must be available even when the caller passes none.
+    const metricQuery = {
+        ...METRIC_QUERY_NO_CALCS,
+        dimensions: ['table1_dim_1'],
+        metrics: [],
+        customDimensions: [
+            {
+                id: 'my_date_zoom',
+                name: 'My date zoom',
+                table: 'table1',
+                type: CustomDimensionType.SQL,
+                sql: '${ld.parameters.date_zoom}',
+                dimensionType: DimensionType.STRING,
+            } as const,
+        ],
+    };
+
+    expect(() =>
+        compileMetricQuery({
+            explore: EXPLORE,
+            metricQuery,
+            warehouseSqlBuilder: warehouseClientMock,
+            availableParameters: [],
+        }),
+    ).not.toThrow();
 });
 
 test('Should compile table calculations', () => {
@@ -434,6 +654,31 @@ test('Should compile table calculations that reference additional metrics', () =
     );
 });
 
+test('Should compile a SQL-less custom metric from its base dimension', () => {
+    const compileWithSql = (sql: string) =>
+        compileMetricQuery({
+            explore: EXPLORE,
+            metricQuery: {
+                ...METRIC_QUERY_VALID_REFERENCES,
+                additionalMetrics: [
+                    {
+                        name: 'custom_metric_1',
+                        table: 'table1',
+                        type: MetricType.SUM,
+                        sql,
+                        baseDimensionName: 'dim_1',
+                    },
+                ],
+            },
+            warehouseSqlBuilder: warehouseClientMock,
+            availableParameters: [],
+        }).compiledAdditionalMetrics[0].compiledSql;
+
+    expect(compileWithSql('')).toBe(
+        compileWithSql(EXPLORE.tables.table1.dimensions.dim_1.sql),
+    );
+});
+
 test('Should compile table calculations that reference both custom dimensions and additional metrics', () => {
     const metricQueryWithBoth = {
         ...METRIC_QUERY_VALID_REFERENCES,
@@ -554,6 +799,39 @@ test('Should compile PERCENT_OF_COLUMN_TOTAL template without partitionBy', () =
     expect(percentOfTotal?.compiledSql).toBe(
         '(CAST("table_3_metric_1" AS FLOAT) / CAST(NULLIF(SUM("table_3_metric_1") OVER(), 0) AS FLOAT))',
     );
+});
+
+test('Should compile DIFFERENCE_FROM_PREVIOUS template with partitionBy', () => {
+    const tableCalculation: TableCalculation = {
+        name: 'difference_by_category',
+        displayName: 'Difference by Category',
+        template: {
+            type: TableCalculationTemplateType.DIFFERENCE_FROM_PREVIOUS,
+            fieldId: 'table_3_metric_1',
+            orderBy: [{ fieldId: 'table3_dim_3', order: 'asc' }],
+            partitionBy: ['table1_dim_1'],
+        },
+    };
+
+    const result = compileMetricQuery({
+        explore: EXPLORE,
+        metricQuery: {
+            ...METRIC_QUERY_VALID_REFERENCES,
+            dimensions: ['table1_dim_1', 'table3_dim_3'],
+            tableCalculations: [tableCalculation],
+        },
+        warehouseSqlBuilder: warehouseClientMock,
+        availableParameters: [],
+    });
+
+    const difference = result.compiledTableCalculations.find(
+        (c) => c.name === tableCalculation.name,
+    );
+
+    expect(difference?.compiledSql).toBe(
+        '"table_3_metric_1" - LAG("table_3_metric_1") OVER(PARTITION BY "table1_dim_1" ORDER BY "table3_dim_3" ASC )',
+    );
+    expect(difference?.dependsOn).toEqual([]);
 });
 
 test('Should compile PERCENT_CHANGE_FROM_PREVIOUS template with partitionBy', () => {
@@ -961,4 +1239,668 @@ test('Should compile WINDOW_FUNCTION template with RANGE frame type', () => {
     expect(rangeSum?.compiledSql).toBe(
         'SUM("table_3_metric_1") OVER (ORDER BY "table1_dim_1" ASC RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)',
     );
+});
+
+test('Should compile template table calculations using _order for custom bin dimensions', () => {
+    const metricQueryWithCustomBin = {
+        ...METRIC_QUERY_VALID_REFERENCES,
+        dimensions: ['table1_dim_1', 'age_range'],
+        sorts: [{ fieldId: 'age_range', descending: false }],
+        customDimensions: [
+            {
+                id: 'age_range',
+                name: 'Age range',
+                type: CustomDimensionType.BIN as const,
+                dimensionId: 'table1_dim_1',
+                table: 'table1',
+                binType: BinType.FIXED_WIDTH as const,
+                binWidth: 10,
+            },
+        ],
+        tableCalculations: [
+            {
+                name: 'running_total_over_bins',
+                displayName: 'Running total over bins',
+                template: {
+                    type: TableCalculationTemplateType.RUNNING_TOTAL,
+                    fieldId: 'table_3_metric_1',
+                    orderBy: [{ fieldId: 'age_range', order: 'asc' }],
+                },
+            } as TableCalculation,
+            {
+                name: 'row_number_over_bins',
+                displayName: 'Row number over bins',
+                template: {
+                    type: TableCalculationTemplateType.WINDOW_FUNCTION,
+                    windowFunction: WindowFunctionType.ROW_NUMBER,
+                    fieldId: null,
+                    orderBy: [{ fieldId: 'age_range', order: 'asc' }],
+                    partitionBy: [],
+                },
+            } as TableCalculation,
+        ],
+    };
+
+    const result = compileMetricQuery({
+        explore: EXPLORE,
+        metricQuery: metricQueryWithCustomBin,
+        warehouseSqlBuilder: warehouseClientMock,
+        availableParameters: [],
+    });
+
+    expect(
+        result.compiledTableCalculations.find(
+            (c) => c.name === 'running_total_over_bins',
+        )?.compiledSql,
+    ).toBe(
+        'SUM("table_3_metric_1") OVER (ORDER BY "age_range_order" ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)',
+    );
+
+    expect(
+        result.compiledTableCalculations.find(
+            (c) => c.name === 'row_number_over_bins',
+        )?.compiledSql,
+    ).toBe('ROW_NUMBER() OVER (ORDER BY "age_range_order" ASC)');
+});
+
+// --- Formula table calculation tests ---
+
+test('Should compile a basic formula table calculation', () => {
+    const metricQuery = {
+        ...METRIC_QUERY_NO_CALCS,
+        tableCalculations: [
+            {
+                name: 'formula_calc',
+                displayName: 'Formula Calc',
+                formula: '=table1_dim_1',
+            } satisfies FormulaTableCalculation,
+        ],
+    };
+
+    const result = compileMetricQuery({
+        explore: EXPLORE,
+        metricQuery,
+        warehouseSqlBuilder: warehouseClientMock,
+        availableParameters: [],
+    });
+
+    const formulaCalc = result.compiledTableCalculations.find(
+        (c) => c.name === 'formula_calc',
+    );
+
+    expect(formulaCalc?.compiledSql).toBe('"table1_dim_1"');
+    expect(formulaCalc?.dependsOn).toEqual([]);
+});
+
+test('Should compile a formula with arithmetic and function calls', () => {
+    const metricQuery = {
+        ...METRIC_QUERY_NO_CALCS,
+        tableCalculations: [
+            {
+                name: 'formula_calc',
+                displayName: 'Formula Calc',
+                formula: '=IF(table_3_metric_1 > 100, table_3_metric_1 * 2, 0)',
+            } satisfies FormulaTableCalculation,
+        ],
+    };
+
+    const result = compileMetricQuery({
+        explore: EXPLORE,
+        metricQuery,
+        warehouseSqlBuilder: warehouseClientMock,
+        availableParameters: [],
+    });
+
+    const formulaCalc = result.compiledTableCalculations.find(
+        (c) => c.name === 'formula_calc',
+    );
+
+    expect(formulaCalc?.compiledSql).toBe(
+        'CASE WHEN ("table_3_metric_1" > 100) THEN ("table_3_metric_1" * 2) ELSE 0 END',
+    );
+});
+
+test('Should throw error when formula references unknown column', () => {
+    const metricQuery = {
+        ...METRIC_QUERY_NO_CALCS,
+        tableCalculations: [
+            {
+                name: 'bad_formula',
+                displayName: 'Bad Formula',
+                formula: '=nonexistent_field + 1',
+            } satisfies FormulaTableCalculation,
+        ],
+    };
+
+    expect(() =>
+        compileMetricQuery({
+            explore: EXPLORE,
+            metricQuery,
+            warehouseSqlBuilder: warehouseClientMock,
+            availableParameters: [],
+        }),
+    ).toThrow();
+});
+
+test('Should compile a formula that references another table calculation', () => {
+    const metricQuery = {
+        ...METRIC_QUERY_NO_CALCS,
+        tableCalculations: [
+            {
+                name: 'base_calc',
+                displayName: 'Base Calc',
+                sql: '${table_3.metric_1} + 10',
+            },
+            {
+                name: 'formula_on_calc',
+                displayName: 'Formula on Calc',
+                formula: '=base_calc * 2',
+            } satisfies FormulaTableCalculation,
+        ],
+    };
+
+    const result = compileMetricQuery({
+        explore: EXPLORE,
+        metricQuery,
+        warehouseSqlBuilder: warehouseClientMock,
+        availableParameters: [],
+    });
+
+    const formulaCalc = result.compiledTableCalculations.find(
+        (c) => c.name === 'formula_on_calc',
+    );
+
+    expect(formulaCalc?.compiledSql).toBe('("base_calc" * 2)');
+    expect(formulaCalc?.dependsOn).toEqual(['base_calc']);
+});
+
+test('Should compile a formula aggregate as a window aggregate', () => {
+    const metricQuery = {
+        ...METRIC_QUERY_NO_CALCS,
+        tableCalculations: [
+            {
+                name: 'formula_sum',
+                displayName: 'Formula Sum',
+                formula: '=SUM(table_3_metric_1)',
+            } satisfies FormulaTableCalculation,
+        ],
+    };
+
+    const result = compileMetricQuery({
+        explore: EXPLORE,
+        metricQuery,
+        warehouseSqlBuilder: warehouseClientMock,
+        availableParameters: [],
+    });
+
+    const formulaCalc = result.compiledTableCalculations.find(
+        (c) => c.name === 'formula_sum',
+    );
+
+    expect(formulaCalc?.compiledSql).toBe('SUM("table_3_metric_1") OVER ()');
+});
+
+test('Should throw error when formula aggregate references unknown column', () => {
+    const metricQuery = {
+        ...METRIC_QUERY_NO_CALCS,
+        tableCalculations: [
+            {
+                name: 'bad_sum',
+                displayName: 'Bad Sum',
+                formula: '=SUM(nonexistent_field)',
+            } satisfies FormulaTableCalculation,
+        ],
+    };
+
+    expect(() =>
+        compileMetricQuery({
+            explore: EXPLORE,
+            metricQuery,
+            warehouseSqlBuilder: warehouseClientMock,
+            availableParameters: [],
+        }),
+    ).toThrow();
+});
+
+test('Should compile a formula SUMIF as a window aggregate', () => {
+    const metricQuery = {
+        ...METRIC_QUERY_NO_CALCS,
+        tableCalculations: [
+            {
+                name: 'formula_sumif',
+                displayName: 'Formula SumIf',
+                formula: '=SUMIF(table_3_metric_1, table_3_metric_1 > 100)',
+            } satisfies FormulaTableCalculation,
+        ],
+    };
+
+    const result = compileMetricQuery({
+        explore: EXPLORE,
+        metricQuery,
+        warehouseSqlBuilder: warehouseClientMock,
+        availableParameters: [],
+    });
+
+    const formulaCalc = result.compiledTableCalculations.find(
+        (c) => c.name === 'formula_sumif',
+    );
+
+    expect(formulaCalc?.compiledSql).toBe(
+        'SUM(CASE WHEN ("table_3_metric_1" > 100) THEN "table_3_metric_1" END) OVER ()',
+    );
+});
+
+describe('compileAdditionalMetric preserves filter metadata (GLITCH-627)', () => {
+    const exploreWithTimestampDim = {
+        ...EXPLORE,
+        tables: {
+            ...EXPLORE.tables,
+            table1: {
+                ...EXPLORE.tables.table1,
+                dimensions: {
+                    ...EXPLORE.tables.table1.dimensions,
+                    created_at: {
+                        name: 'created_at',
+                        fieldType: FieldType.DIMENSION,
+                        type: DimensionType.TIMESTAMP,
+                        table: 'table1',
+                        label: 'created_at',
+                        tableLabel: 'table1',
+                        hidden: false,
+                        sql: '${TABLE}.created_at',
+                        compiledSql: '`some`.`table1`.`created_at`',
+                        tablesReferences: ['table1'],
+                    } satisfies CompiledDimension,
+                },
+            },
+        },
+    };
+
+    test('an additional metric with an absolute timestamp filter carries compiledTimestampFilters', () => {
+        const result = compileMetricQuery({
+            explore: exploreWithTimestampDim,
+            metricQuery: {
+                ...METRIC_QUERY_VALID_REFERENCES,
+                metrics: ['table1_filtered_count'],
+                tableCalculations: [],
+                additionalMetrics: [
+                    {
+                        name: 'filtered_count',
+                        table: 'table1',
+                        type: MetricType.COUNT,
+                        sql: '${TABLE}.dim_1',
+                        filters: [
+                            {
+                                id: 'f1',
+                                target: { fieldRef: 'table1.created_at' },
+                                operator: FilterOperator.EQUALS,
+                                values: ['2024-01-14T17:00:00.000Z'],
+                            },
+                        ],
+                    },
+                ],
+            },
+            warehouseSqlBuilder: warehouseClientMock,
+            availableParameters: [],
+        });
+
+        const compiled = result.compiledAdditionalMetrics?.find(
+            (m) => m.name === 'filtered_count',
+        );
+        expect(compiled?.compiledTimestampFilters).toHaveLength(1);
+        expect(compiled?.compiledTimestampFilters?.[0].fieldId).toBe(
+            'table1_created_at',
+        );
+        expect(compiled?.compiledSql).toContain(
+            compiled!.compiledTimestampFilters![0].compiledSql,
+        );
+    });
+
+    test('an additional metric with a relative date filter carries compiledRelativeDateFilters', () => {
+        const result = compileMetricQuery({
+            explore: exploreWithTimestampDim,
+            metricQuery: {
+                ...METRIC_QUERY_VALID_REFERENCES,
+                metrics: ['table1_recent_count'],
+                tableCalculations: [],
+                additionalMetrics: [
+                    {
+                        name: 'recent_count',
+                        table: 'table1',
+                        type: MetricType.COUNT,
+                        sql: '${TABLE}.dim_1',
+                        filters: [
+                            {
+                                id: 'f1',
+                                target: { fieldRef: 'table1.created_at' },
+                                operator: FilterOperator.IN_THE_PAST,
+                                values: [30],
+                                settings: {
+                                    unitOfTime: UnitOfTime.days,
+                                    completed: false,
+                                },
+                            },
+                        ],
+                    },
+                ],
+            },
+            warehouseSqlBuilder: warehouseClientMock,
+            availableParameters: [],
+        });
+
+        const compiled = result.compiledAdditionalMetrics?.find(
+            (m) => m.name === 'recent_count',
+        );
+        expect(compiled?.compiledRelativeDateFilters).toHaveLength(1);
+    });
+});
+
+describe('compilePostCalculationMetric', () => {
+    const sql = '"metric"';
+    const orderByClause = 'ORDER BY "week"';
+
+    const pivotedConfig: PivotConfiguration = {
+        indexColumn: { reference: 'week', type: VizIndexType.CATEGORY },
+        groupByColumns: [{ reference: 'employee' }],
+        valuesColumns: [],
+        sortBy: undefined,
+    };
+
+    const regularTableConfig: PivotConfiguration = {
+        indexColumn: { reference: 'week', type: VizIndexType.CATEGORY },
+        groupByColumns: [],
+        valuesColumns: [],
+        sortBy: undefined,
+    };
+
+    test('PERCENT_OF_TOTAL with no pivot configuration uses grand total', () => {
+        const result = compilePostCalculationMetric({
+            warehouseSqlBuilder: warehouseClientMock,
+            type: MetricType.PERCENT_OF_TOTAL,
+            sql,
+        });
+        expect(result).toBe(
+            '(CAST("metric" AS FLOAT) / CAST(NULLIF(SUM("metric") OVER(), 0) AS FLOAT))',
+        );
+    });
+
+    test('PERCENT_OF_TOTAL with row dimensions but no pivot uses grand total', () => {
+        // Regular table view (indexColumn set, no groupByColumns) — must NOT
+        // partition by the row dim, otherwise every row becomes 100%.
+        const result = compilePostCalculationMetric({
+            warehouseSqlBuilder: warehouseClientMock,
+            type: MetricType.PERCENT_OF_TOTAL,
+            sql,
+            pivotConfiguration: regularTableConfig,
+        });
+        expect(result).toBe(
+            '(CAST("metric" AS FLOAT) / CAST(NULLIF(SUM("metric") OVER(), 0) AS FLOAT))',
+        );
+    });
+
+    test('PERCENT_OF_TOTAL with pivot partitions by indexColumn (row total)', () => {
+        const result = compilePostCalculationMetric({
+            warehouseSqlBuilder: warehouseClientMock,
+            type: MetricType.PERCENT_OF_TOTAL,
+            sql,
+            pivotConfiguration: pivotedConfig,
+        });
+        expect(result).toBe(
+            '(CAST("metric" AS FLOAT) / CAST(NULLIF(SUM("metric") OVER(PARTITION BY "week"), 0) AS FLOAT))',
+        );
+    });
+
+    test('PERCENT_OF_TOTAL with pivot and array indexColumn partitions by all', () => {
+        const result = compilePostCalculationMetric({
+            warehouseSqlBuilder: warehouseClientMock,
+            type: MetricType.PERCENT_OF_TOTAL,
+            sql,
+            pivotConfiguration: {
+                ...pivotedConfig,
+                indexColumn: [
+                    { reference: 'week', type: VizIndexType.CATEGORY },
+                    { reference: 'region', type: VizIndexType.CATEGORY },
+                ],
+            },
+        });
+        expect(result).toBe(
+            '(CAST("metric" AS FLOAT) / CAST(NULLIF(SUM("metric") OVER(PARTITION BY "week", "region"), 0) AS FLOAT))',
+        );
+    });
+
+    test('RUNNING_TOTAL with pivot partitions by groupByColumns', () => {
+        const result = compilePostCalculationMetric({
+            warehouseSqlBuilder: warehouseClientMock,
+            type: MetricType.RUNNING_TOTAL,
+            sql,
+            pivotConfiguration: pivotedConfig,
+            orderByClause,
+        });
+        expect(result).toBe(
+            'SUM("metric") OVER (PARTITION BY "employee"ORDER BY "week" ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)',
+        );
+    });
+
+    test('PERCENT_OF_PREVIOUS with pivot partitions by groupByColumns', () => {
+        const result = compilePostCalculationMetric({
+            warehouseSqlBuilder: warehouseClientMock,
+            type: MetricType.PERCENT_OF_PREVIOUS,
+            sql,
+            pivotConfiguration: pivotedConfig,
+            orderByClause,
+        });
+        expect(result).toBe(
+            '(CAST("metric" AS FLOAT) / CAST(NULLIF(LAG("metric") OVER(PARTITION BY "employee"ORDER BY "week"), 0) AS FLOAT)) - 1',
+        );
+    });
+});
+
+describe('compileMetricQuery rejects injected sort field ids (PROD-9482)', () => {
+    const injectedFieldIds = [
+        'table1_dim_1" DESC --', // double-quote break-out
+        'table1_dim_1` DESC --', // backtick break-out (BigQuery/Databricks)
+        'table1_dim_1\\', // trailing backslash (BigQuery escape break-out)
+    ];
+
+    it.each(injectedFieldIds)(
+        'throws a CompileError for sort field id %j',
+        (fieldId) => {
+            expect(() =>
+                compileMetricQuery({
+                    explore: EXPLORE,
+                    metricQuery: {
+                        ...METRIC_QUERY_NO_CALCS,
+                        sorts: [{ fieldId, descending: false }],
+                    },
+                    warehouseSqlBuilder: warehouseClientMock,
+                    availableParameters: [],
+                }),
+            ).toThrow(/quote or backslash/);
+        },
+    );
+
+    it('rejects an injected sort before compiling a running-total table calculation that consumes it', () => {
+        expect(() =>
+            compileMetricQuery({
+                explore: EXPLORE,
+                metricQuery: {
+                    ...METRIC_QUERY_NO_CALCS,
+                    sorts: [
+                        { fieldId: 'table1_dim_1" DESC --', descending: false },
+                    ],
+                    tableCalculations: [
+                        {
+                            name: 'running_total',
+                            displayName: 'Running total',
+                            template: {
+                                type: TableCalculationTemplateType.RUNNING_TOTAL,
+                                fieldId: 'table_3_metric_1',
+                            },
+                        },
+                    ],
+                },
+                warehouseSqlBuilder: warehouseClientMock,
+                availableParameters: [],
+            }),
+        ).toThrow(/quote or backslash/);
+    });
+
+    it('preserves valid dimension, metric, and table-calculation sorts', () => {
+        expect(() =>
+            compileMetricQuery({
+                explore: EXPLORE,
+                metricQuery: {
+                    ...METRIC_QUERY_VALID_REFERENCES,
+                    sorts: [
+                        { fieldId: 'table1_dim_1', descending: false },
+                        { fieldId: 'table_3_metric_1', descending: true },
+                        { fieldId: 'calc2', descending: false },
+                    ],
+                },
+                warehouseSqlBuilder: warehouseClientMock,
+                availableParameters: [],
+            }),
+        ).not.toThrow();
+    });
+});
+
+describe('compileMetricQuery rejects injected generated identifiers and template refs (PROD-9485)', () => {
+    const injectedIdentifiers = [
+        'injected" DESC --',
+        'injected` DESC --',
+        'injected\\',
+    ];
+
+    it.each(injectedIdentifiers)(
+        'throws a CompileError for custom dimension id %j',
+        (id) => {
+            expect(() =>
+                compileMetricQuery({
+                    explore: EXPLORE,
+                    metricQuery: {
+                        ...METRIC_QUERY_NO_CALCS,
+                        dimensions: [...METRIC_QUERY_NO_CALCS.dimensions, id],
+                        customDimensions: [
+                            {
+                                id,
+                                name: 'Injected custom dimension',
+                                table: 'table1',
+                                type: CustomDimensionType.SQL,
+                                sql: '${TABLE}.dim_1',
+                                dimensionType: DimensionType.STRING,
+                            },
+                        ],
+                    },
+                    warehouseSqlBuilder: warehouseClientMock,
+                    availableParameters: [],
+                }),
+            ).toThrow(/quote or backslash/);
+        },
+    );
+
+    it.each(injectedIdentifiers)(
+        'throws a CompileError for additional metric name %j',
+        (name) => {
+            expect(() =>
+                compileMetricQuery({
+                    explore: EXPLORE,
+                    metricQuery: {
+                        ...METRIC_QUERY_NO_CALCS,
+                        metrics: [
+                            ...METRIC_QUERY_NO_CALCS.metrics,
+                            `table1_${name}`,
+                        ],
+                        additionalMetrics: [
+                            {
+                                name,
+                                table: 'table1',
+                                type: MetricType.COUNT,
+                                sql: '${TABLE}.dim_1',
+                            },
+                        ],
+                    },
+                    warehouseSqlBuilder: warehouseClientMock,
+                    availableParameters: [],
+                }),
+            ).toThrow(/quote or backslash/);
+        },
+    );
+
+    it.each(injectedIdentifiers)(
+        'throws a CompileError for table calculation name %j',
+        (name) => {
+            expect(() =>
+                compileMetricQuery({
+                    explore: EXPLORE,
+                    metricQuery: {
+                        ...METRIC_QUERY_NO_CALCS,
+                        tableCalculations: [
+                            {
+                                name,
+                                displayName: 'Injected table calculation',
+                                sql: '${table1.dim_1}',
+                            },
+                        ],
+                    },
+                    warehouseSqlBuilder: warehouseClientMock,
+                    availableParameters: [],
+                }),
+            ).toThrow(/quote or backslash/);
+        },
+    );
+
+    test('throws a CompileError for unknown template field references', () => {
+        expect(() =>
+            compileMetricQuery({
+                explore: EXPLORE,
+                metricQuery: {
+                    ...METRIC_QUERY_NO_CALCS,
+                    tableCalculations: [
+                        {
+                            name: 'percent_of_total',
+                            displayName: 'Percent of total',
+                            template: {
+                                type: TableCalculationTemplateType.PERCENT_OF_COLUMN_TOTAL,
+                                fieldId: 'not_in_query',
+                                partitionBy: [],
+                            },
+                        },
+                    ],
+                },
+                warehouseSqlBuilder: warehouseClientMock,
+                availableParameters: [],
+            }),
+        ).toThrow(/isn't included in the query/);
+    });
+
+    test('throws a CompileError for injected template order and partition references', () => {
+        expect(() =>
+            compileMetricQuery({
+                explore: EXPLORE,
+                metricQuery: {
+                    ...METRIC_QUERY_NO_CALCS,
+                    tableCalculations: [
+                        {
+                            name: 'windowed_total',
+                            displayName: 'Windowed total',
+                            template: {
+                                type: TableCalculationTemplateType.WINDOW_FUNCTION,
+                                windowFunction: WindowFunctionType.SUM,
+                                fieldId: 'table_3_metric_1',
+                                orderBy: [
+                                    {
+                                        fieldId: 'table1_dim_1" DESC --',
+                                        order: 'asc',
+                                    },
+                                ],
+                                partitionBy: ['table1_dim_1" DESC --'],
+                            },
+                        },
+                    ],
+                },
+                warehouseSqlBuilder: warehouseClientMock,
+                availableParameters: [],
+            }),
+        ).toThrow(/quote or backslash/);
+    });
 });

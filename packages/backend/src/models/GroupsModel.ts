@@ -1,23 +1,25 @@
 import {
     AlreadyExistsError,
     CreateGroup,
+    getErrorMessage,
     Group,
     GroupMember,
     GroupMembership,
     GroupWithMembers,
+    isSystemRole,
     NotFoundError,
     ParameterError,
     ProjectGroupAccess,
     ProjectMemberRole,
+    PromotionAction,
     UnexpectedDatabaseError,
     UpdateGroupWithMembers,
-    getErrorMessage,
-    isSystemRole,
     type KnexPaginateArgs,
     type KnexPaginatedData,
 } from '@lightdash/common';
 import { Knex } from 'knex';
 import { uniq } from 'lodash';
+import difference from 'lodash/difference';
 import differenceBy from 'lodash/differenceBy';
 import { DatabaseError } from 'pg';
 import { DbEmail, EmailTableName } from '../database/entities/emails';
@@ -26,6 +28,7 @@ import {
     GroupMembershipTableName,
 } from '../database/entities/groupMemberships';
 import { DbGroup, GroupTableName } from '../database/entities/groups';
+import { OrganizationMembershipsTableName } from '../database/entities/organizationMemberships';
 import {
     OrganizationTableName,
     type DbOrganization,
@@ -37,6 +40,7 @@ import {
 } from '../database/entities/projectGroupAccess';
 import { DbUser, UserTableName } from '../database/entities/users';
 import KnexPaginate from '../database/pagination';
+import { clearGroupExtraRoles } from './roleSetUtils';
 import { getColumnMatchRegexQuery } from './SearchModel/utils/search';
 
 export class GroupsModel {
@@ -59,7 +63,9 @@ export class GroupsModel {
             throw new NotFoundError(`No group found`);
         }
 
-        // Check what members exist and are part of the organization
+        // Check what members exist and are part of the organization.
+        // Internal user records (service accounts etc.) are not eligible
+        // for human group membership.
         const users = await trx('users')
             .innerJoin(
                 'organization_memberships',
@@ -70,6 +76,7 @@ export class GroupsModel {
                 'organization_memberships.organization_id',
                 group.organization_id,
             )
+            .where('users.is_internal', false)
             .whereIn('user_uuid', memberUuids)
             .select('users.user_id', 'user_uuid');
 
@@ -110,16 +117,18 @@ export class GroupsModel {
             name?: string; // will exact match on name
         },
         paginateArgs?: KnexPaginateArgs,
+        { trx = this.database }: { trx?: Knex } = {},
     ): Promise<KnexPaginatedData<Group[]>> {
-        let query = this.database('groups')
+        let query = trx('groups')
             .innerJoin(
                 'organizations',
                 'groups.organization_id',
                 'organizations.organization_id',
             )
-            .select<
-                (DbGroup & Pick<DbOrganization, 'organization_uuid'>)[]
-            >('groups.*', 'organizations.organization_uuid');
+            .select<(DbGroup & Pick<DbOrganization, 'organization_uuid'>)[]>(
+                'groups.*',
+                'organizations.organization_uuid',
+            );
 
         // Exact match for organization UUID
         if (filters.organizationUuid) {
@@ -188,7 +197,13 @@ export class GroupsModel {
                         Pick<DbUser, 'user_uuid' | 'first_name' | 'last_name'> &
                         Pick<DbEmail, 'email'>
                 >
-            >(`${GroupMembershipTableName}.group_uuid`, `${UserTableName}.user_uuid`, `${UserTableName}.first_name`, `${UserTableName}.last_name`, `${EmailTableName}.email`);
+            >(
+                `${GroupMembershipTableName}.group_uuid`,
+                `${UserTableName}.user_uuid`,
+                `${UserTableName}.first_name`,
+                `${UserTableName}.last_name`,
+                `${EmailTableName}.email`,
+            );
 
         if (filters.organizationUuid) {
             void membersQuery
@@ -226,12 +241,15 @@ export class GroupsModel {
         };
     }
 
-    async findUserInGroups(filters: {
-        userUuid: string;
-        organizationUuid: string;
-        groupUuids?: string[];
-    }): Promise<GroupMembership[]> {
-        const query = this.database(GroupMembershipTableName)
+    async findUserInGroups(
+        filters: {
+            userUuid: string;
+            organizationUuid: string;
+            groupUuids?: string[];
+        },
+        { trx = this.database }: { trx?: Knex } = {},
+    ): Promise<GroupMembership[]> {
+        const query = trx(GroupMembershipTableName)
             .innerJoin(
                 UserTableName,
                 `${GroupMembershipTableName}.user_id`,
@@ -259,10 +277,47 @@ export class GroupsModel {
             );
         }
 
-        const rows = await query;
+        const rows = await query.forShare();
         return rows.map((row) => ({
             groupUuid: row.group_uuid,
             userUuid: row.user_uuid,
+        }));
+    }
+
+    async findUserGroups(filters: {
+        userUuid: string;
+        organizationUuid: string;
+    }): Promise<Pick<Group, 'uuid' | 'name'>[]> {
+        const rows = await this.database(GroupMembershipTableName)
+            .innerJoin(
+                UserTableName,
+                `${GroupMembershipTableName}.user_id`,
+                `${UserTableName}.user_id`,
+            )
+            .innerJoin(
+                GroupTableName,
+                `${GroupMembershipTableName}.group_uuid`,
+                `${GroupTableName}.group_uuid`,
+            )
+            .innerJoin(
+                OrganizationTableName,
+                `${GroupTableName}.organization_id`,
+                `${OrganizationTableName}.organization_id`,
+            )
+            .where(`${UserTableName}.user_uuid`, filters.userUuid)
+            .where(
+                `${OrganizationTableName}.organization_uuid`,
+                filters.organizationUuid,
+            )
+            .select<Pick<DbGroup, 'group_uuid' | 'name'>[]>(
+                `${GroupTableName}.group_uuid`,
+                `${GroupTableName}.name`,
+            )
+            .orderBy(`${GroupTableName}.name`);
+
+        return rows.map((row) => ({
+            uuid: row.group_uuid,
+            name: row.name,
         }));
     }
 
@@ -324,9 +379,10 @@ export class GroupsModel {
                 'organizations.organization_id',
             )
             .where('group_uuid', groupUuid)
-            .select<
-                (DbGroup & Pick<DbOrganization, 'organization_uuid'>)[]
-            >('groups.*', 'organizations.organization_uuid');
+            .select<(DbGroup & Pick<DbOrganization, 'organization_uuid'>)[]>(
+                'groups.*',
+                'organizations.organization_uuid',
+            );
         if (group === undefined) {
             throw new NotFoundError(`No group found`);
         }
@@ -512,6 +568,7 @@ export class GroupsModel {
                     const newMembers = await trx
                         .select([
                             'groups.group_uuid',
+                            'users.user_uuid',
                             'users.user_id',
                             'organization_memberships.organization_id',
                         ])
@@ -533,13 +590,21 @@ export class GroupsModel {
                         .andWhere('groups.group_uuid', groupUuid);
 
                     if (newMembers.length !== membersToAdd.length) {
+                        const invalidUserUuids = difference(
+                            membersToAdd.map((member) => member.userUuid),
+                            newMembers.map((member) => member.user_uuid),
+                        ).join(', ');
                         throw new ParameterError(
-                            'Some provided user UUIDs are invalid',
+                            `Some provided user UUIDs are invalid: ${invalidUserUuids}`,
                         );
                     }
 
                     await trx('group_memberships')
-                        .insert(newMembers)
+                        .insert(
+                            newMembers.map(
+                                ({ user_uuid: _userUuid, ...member }) => member,
+                            ),
+                        )
                         .onConflict()
                         .ignore();
                 }
@@ -560,6 +625,163 @@ export class GroupsModel {
             }
         });
         return this.getGroupWithMembers(groupUuid, 10000);
+    }
+
+    async upsertGroupAsCode({
+        organizationUuid,
+        name,
+        memberEmails,
+        actorUserUuid,
+    }: {
+        organizationUuid: string;
+        name: string;
+        memberEmails: string[];
+        actorUserUuid: string;
+    }): Promise<{
+        action:
+            | PromotionAction.CREATE
+            | PromotionAction.UPDATE
+            | PromotionAction.NO_CHANGES;
+        groupUuid: string;
+    }> {
+        return this.database.transaction(async (trx) => {
+            const organization = await trx(OrganizationTableName)
+                .where('organization_uuid', organizationUuid)
+                .first('organization_id');
+            if (!organization) {
+                throw new NotFoundError('Cannot find organization');
+            }
+
+            const normalizedEmails = memberEmails.map((email) =>
+                email.toLowerCase(),
+            );
+            const members =
+                normalizedEmails.length === 0
+                    ? []
+                    : await trx(UserTableName)
+                          .innerJoin(
+                              OrganizationMembershipsTableName,
+                              `${UserTableName}.user_id`,
+                              `${OrganizationMembershipsTableName}.user_id`,
+                          )
+                          .innerJoin(
+                              EmailTableName,
+                              `${UserTableName}.user_id`,
+                              `${EmailTableName}.user_id`,
+                          )
+                          .where(
+                              `${OrganizationMembershipsTableName}.organization_id`,
+                              organization.organization_id,
+                          )
+                          .where(`${UserTableName}.is_internal`, false)
+                          .where(`${EmailTableName}.is_primary`, true)
+                          .whereRaw(`LOWER(??) = ANY(?::text[])`, [
+                              `${EmailTableName}.email`,
+                              normalizedEmails,
+                          ])
+                          .select<
+                              Array<
+                                  Pick<DbUser, 'user_id'> &
+                                      Pick<DbEmail, 'email'>
+                              >
+                          >(
+                              `${UserTableName}.user_id`,
+                              `${EmailTableName}.email`,
+                          );
+
+            const resolvedEmails = new Set(
+                members.map((member) => member.email.toLowerCase()),
+            );
+            const unresolvedEmails = normalizedEmails.filter(
+                (email) => !resolvedEmails.has(email),
+            );
+            if (unresolvedEmails.length > 0) {
+                throw new ParameterError(
+                    `Users are not members of this organization: ${unresolvedEmails.join(', ')}`,
+                );
+            }
+
+            const existingGroup = await trx(GroupTableName)
+                .where({
+                    organization_id: organization.organization_id,
+                    name,
+                })
+                .first<Pick<DbGroup, 'group_uuid'>>('group_uuid')
+                .forUpdate();
+
+            if (!existingGroup) {
+                const [createdGroup] = await trx(GroupTableName)
+                    .insert({
+                        organization_id: organization.organization_id,
+                        name,
+                        created_by_user_uuid: actorUserUuid,
+                        updated_by_user_uuid: actorUserUuid,
+                    })
+                    .returning<Pick<DbGroup, 'group_uuid'>[]>('group_uuid');
+                if (!createdGroup) {
+                    throw new UnexpectedDatabaseError('Failed to create group');
+                }
+                if (members.length > 0) {
+                    await trx(GroupMembershipTableName).insert(
+                        members.map((member) => ({
+                            group_uuid: createdGroup.group_uuid,
+                            user_id: member.user_id,
+                            organization_id: organization.organization_id,
+                        })),
+                    );
+                }
+                return {
+                    action: PromotionAction.CREATE,
+                    groupUuid: createdGroup.group_uuid,
+                };
+            }
+
+            const existingMemberships = await trx(GroupMembershipTableName)
+                .where('group_uuid', existingGroup.group_uuid)
+                .select<Pick<DbGroupMembership, 'user_id'>[]>('user_id');
+            const existingUserIds = existingMemberships
+                .map((membership) => membership.user_id)
+                .sort((left, right) => left - right);
+            const desiredUserIds = members
+                .map((member) => member.user_id)
+                .sort((left, right) => left - right);
+            const membershipChanged =
+                existingUserIds.length !== desiredUserIds.length ||
+                existingUserIds.some(
+                    (userId, index) => userId !== desiredUserIds[index],
+                );
+
+            if (!membershipChanged) {
+                return {
+                    action: PromotionAction.NO_CHANGES,
+                    groupUuid: existingGroup.group_uuid,
+                };
+            }
+
+            await trx(GroupMembershipTableName)
+                .where('group_uuid', existingGroup.group_uuid)
+                .delete();
+            if (members.length > 0) {
+                await trx(GroupMembershipTableName).insert(
+                    members.map((member) => ({
+                        group_uuid: existingGroup.group_uuid,
+                        user_id: member.user_id,
+                        organization_id: organization.organization_id,
+                    })),
+                );
+            }
+            await trx(GroupTableName)
+                .where('group_uuid', existingGroup.group_uuid)
+                .update({
+                    updated_at: new Date(),
+                    updated_by_user_uuid: actorUserUuid,
+                });
+
+            return {
+                action: PromotionAction.UPDATE,
+                groupUuid: existingGroup.group_uuid,
+            };
+        });
     }
 
     async addProjectAccess({
@@ -617,13 +839,23 @@ export class GroupsModel {
         }: Pick<ProjectGroupAccess, 'groupUuid' | 'projectUuid'>,
         updateAttributes: UpdateDBProjectGroupAccess,
     ): Promise<DBProjectGroupAccess> {
-        const query = this.database(ProjectGroupAccessTableName)
-            .update(updateAttributes)
-            .where('project_uuid', projectUuid)
-            .andWhere('group_uuid', groupUuid)
-            .returning('*');
+        const updateFields: UpdateDBProjectGroupAccess = {
+            role: updateAttributes.role,
+            ...(updateAttributes.role_uuid !== undefined
+                ? { role_uuid: updateAttributes.role_uuid }
+                : {}),
+        };
 
-        const rows = await query;
+        const rows = await this.database.transaction(async (trx) => {
+            const updated = await trx(ProjectGroupAccessTableName)
+                .update(updateFields)
+                .where('project_uuid', projectUuid)
+                .andWhere('group_uuid', groupUuid)
+                .returning('*');
+            // A singular write replaces the whole role set, so extras go too.
+            await clearGroupExtraRoles(trx, projectUuid, groupUuid);
+            return updated;
+        });
 
         if (rows.length === 0) {
             throw new UnexpectedDatabaseError(
@@ -663,6 +895,7 @@ export class GroupsModel {
         const userIdToInsert = (
             await this.database('users')
                 .where('user_uuid', userUuid)
+                .where('is_internal', false)
                 .first('user_id')
         )?.user_id;
         if (!userIdToInsert) {

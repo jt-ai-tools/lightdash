@@ -2,7 +2,7 @@ import {
     type DraggableProvidedDraggableProps,
     type DraggableProvidedDragHandleProps,
 } from '@hello-pangea/dnd';
-import { isField, type SortField } from '@lightdash/common';
+import { formatItemValue, isField, type SortField } from '@lightdash/common';
 import {
     ActionIcon,
     Box,
@@ -10,9 +10,10 @@ import {
     SegmentedControl,
     Text,
     Tooltip,
-} from '@mantine-8/core';
+} from '@mantine/core';
 import { IconGripVertical, IconMinus } from '@tabler/icons-react';
-import { forwardRef } from 'react';
+import { forwardRef, useMemo } from 'react';
+import { useColumns } from '../../hooks/useColumns';
 import {
     getSortDirectionOrder,
     getSortLabel,
@@ -64,6 +65,26 @@ const SortItem = forwardRef<HTMLDivElement, SortItemProps>(
 
         const selectedSortNullsFirst = getSortNullsFirstValue(sort);
 
+        const columns = useColumns();
+        const pivotLabel = useMemo(() => {
+            if (!sort.pivotValues?.length) return null;
+            return sort.pivotValues
+                .map((pv) => {
+                    const dimItem = columns.find((c) => c.id === pv.reference)
+                        ?.meta?.item;
+                    const dimLabel =
+                        dimItem && isField(dimItem)
+                            ? dimItem.label || dimItem.name
+                            : pv.reference;
+                    const valueLabel = dimItem
+                        ? (formatItemValue(dimItem, pv.value) ??
+                          String(pv.value))
+                        : String(pv.value);
+                    return `${dimLabel}=${valueLabel}`;
+                })
+                .join(', ');
+        }, [sort.pivotValues, columns]);
+
         if (!item) {
             return null;
         }
@@ -96,6 +117,12 @@ const SortItem = forwardRef<HTMLDivElement, SortItemProps>(
                         {(isField(item) ? item.label : item.name) ||
                             sort.fieldId}
                     </Text>
+
+                    {pivotLabel && (
+                        <Text fz="xs" c="dimmed">
+                            @ {pivotLabel}
+                        </Text>
+                    )}
                 </Group>
 
                 <Group gap="xs">
@@ -103,7 +130,6 @@ const SortItem = forwardRef<HTMLDivElement, SortItemProps>(
                         disabled={!isEditMode}
                         value={selectedSortDirection}
                         size="xs"
-                        radius="md"
                         color="ldDark.5"
                         data={getSortDirectionOrder(item).map((direction) => ({
                             label: getSortLabel(item, direction),
@@ -126,7 +152,6 @@ const SortItem = forwardRef<HTMLDivElement, SortItemProps>(
                         disabled={!isEditMode}
                         value={selectedSortNullsFirst}
                         size="xs"
-                        radius="md"
                         color="ldDark.5"
                         data={Object.entries(sortNullsFirstLabels).map(
                             ([value, label]) => ({
@@ -149,12 +174,7 @@ const SortItem = forwardRef<HTMLDivElement, SortItemProps>(
 
                     {isEditMode && (
                         <Tooltip label="Remove sort">
-                            <ActionIcon
-                                onClick={onRemoveSortField}
-                                size="xs"
-                                variant="subtle"
-                                color="ldGray.6"
-                            >
+                            <ActionIcon onClick={onRemoveSortField} size="xs">
                                 <MantineIcon icon={IconMinus} />
                             </ActionIcon>
                         </Tooltip>

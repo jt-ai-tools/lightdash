@@ -16,6 +16,7 @@ import {
 import { getVizIndexTypeFromSqlRunnerFieldType } from './BaseResultsRunner';
 import {
     executeDashboardSqlChartPivotQuery,
+    executeEmbedDashboardSqlChartPivotQuery,
     executeSqlChartPivotQuery,
     executeSqlPivotQuery,
 } from './executeQuery';
@@ -28,7 +29,8 @@ const convertSqlRunnerQueryToSqlRunnerPivotQuery = (
     SqlRunnerPivotQueryBody,
     'indexColumn' | 'groupByColumns' | 'valuesColumns'
 > => {
-    const index = fields.find((field) => field.name === query.pivot?.index[0]);
+    const indexReference = query.pivot?.index[0];
+    const index = fields.find((field) => field.name === indexReference);
     const values = query.pivot?.values.map((value) => {
         const customMetric = query.customMetrics?.find(
             (metric) => metric.name === value,
@@ -55,11 +57,18 @@ const convertSqlRunnerQueryToSqlRunnerPivotQuery = (
         return f;
     });
 
-    if (index === undefined || values === undefined || values.length === 0) {
+    // An index is optional: charts that aggregate every row into a single
+    // value (big number) pivot on values alone.
+    if (indexReference !== undefined && index === undefined) {
+        throw new Error(
+            'Unexpected error: incorrect pivot configuration, invalid index',
+        );
+    }
+    if (values === undefined || values.length === 0) {
         throw new Error('Unexpected error: incorrect pivot configuration');
     }
     return {
-        indexColumn: {
+        indexColumn: index && {
             reference: index.name,
             type: getVizIndexTypeFromSqlRunnerFieldType(index.type),
         },
@@ -79,6 +88,7 @@ export const getPivotQueryFunctionForSqlQuery = ({
     fields,
     context,
     parameters,
+    warehouseConnectionUuid,
 }: {
     projectUuid: string;
     limit?: number;
@@ -87,11 +97,10 @@ export const getPivotQueryFunctionForSqlQuery = ({
     fields: SqlRunnerField[];
     context?: QueryExecutionContext;
     parameters: ParametersValuesMap;
+    warehouseConnectionUuid?: string | null;
 }): RunPivotQuery => {
     return async (query: SqlRunnerQuery) => {
-        const index = query.pivot?.index[0];
-
-        if (index === undefined) {
+        if (!query.pivot?.values.length) {
             return {
                 queryUuid: undefined,
                 results: [],
@@ -117,6 +126,9 @@ export const getPivotQueryFunctionForSqlQuery = ({
                 sortBy,
             },
             parameters,
+            ...(warehouseConnectionUuid === undefined
+                ? {}
+                : { warehouseConnectionUuid }),
         });
 
         const columns: VizColumn[] = Object.keys(pivotResults.columns).map(
@@ -204,6 +216,49 @@ export const getDashboardSqlChartPivotChartData = async ({
         limit,
         parameters,
     });
+
+    const columns: VizColumn[] = Object.keys(pivotResults.columns).map(
+        (field) => ({
+            reference: field,
+        }),
+    );
+
+    return {
+        ...pivotResults,
+        columns,
+    };
+};
+
+export const getEmbedDashboardSqlChartPivotChartData = async ({
+    projectUuid,
+    tileUuid,
+    limit,
+    dashboardFilters,
+    dashboardSorts,
+    parameters,
+    invalidateCache,
+}: {
+    projectUuid: string;
+    tileUuid: string;
+    limit?: number;
+    dashboardFilters: DashboardFilters;
+    dashboardSorts: SortField[];
+    parameters?: ParametersValuesMap;
+    invalidateCache?: boolean;
+}): Promise<
+    PivotChartData & { queryUuid: string; originalColumns: ResultColumns }
+> => {
+    const pivotResults = await executeEmbedDashboardSqlChartPivotQuery(
+        projectUuid,
+        {
+            tileUuid,
+            dashboardFilters,
+            dashboardSorts,
+            limit,
+            parameters,
+            invalidateCache,
+        },
+    );
 
     const columns: VizColumn[] = Object.keys(pivotResults.columns).map(
         (field) => ({

@@ -1,4 +1,4 @@
-import moment from 'moment';
+import moment from 'moment-timezone';
 import { isWeekDay, type WeekDay } from './timeFrames';
 
 // from 0 (Monday) to 6 (Sunday) to 0 (Sunday) to 6 (Saturday)
@@ -28,3 +28,8 @@ export const getMomentDateWithCustomStartOfWeek = (
     }
     return moment(inp);
 };
+
+export const formatMilliseconds = (
+    ms: number,
+    fractionDigits: number = 2,
+): string => ms.toFixed(fractionDigits).replace(/\.?0+$/, '');

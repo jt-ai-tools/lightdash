@@ -3,6 +3,7 @@ import {
     ApiErrorPayload,
     ApiGetComments,
     ApiResolveComment,
+    assertRegisteredAccount,
     Comment,
 } from '@lightdash/common';
 import {
@@ -14,6 +15,7 @@ import {
     Patch,
     Path,
     Post,
+    Query,
     Request,
     Response,
     Route,
@@ -21,6 +23,8 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { toSessionUser } from '../auth/account';
+import { requireOAuthScopeOperation } from '../auth/oauthScopes/unchecked';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -56,8 +60,9 @@ export class CommentsController extends BaseController {
         @Body()
         body: Pick<Comment, 'text' | 'replyTo' | 'mentions' | 'textHtml'>,
     ): Promise<ApiCreateComment> {
+        assertRegisteredAccount(req.account);
         const commentId = await this.services.getCommentService().createComment(
-            req.user!,
+            toSessionUser(req.account),
             dashboardUuid,
             dashboardTileUuid,
             body.text,
@@ -86,10 +91,16 @@ export class CommentsController extends BaseController {
     async getComments(
         @Path() dashboardUuidOrSlug: string,
         @Request() req: express.Request,
+        @Query() resolved?: boolean,
     ): Promise<ApiGetComments> {
+        assertRegisteredAccount(req.account);
         const results = await this.services
             .getCommentService()
-            .findCommentsForDashboard(req.user!, dashboardUuidOrSlug);
+            .findCommentsForDashboard(
+                toSessionUser(req.account),
+                dashboardUuidOrSlug,
+                { resolved },
+            );
         this.setStatus(200);
         return {
             status: 'ok',
@@ -98,11 +109,12 @@ export class CommentsController extends BaseController {
     }
 
     /**
-     * Resolves a comment on a dashboard
+     * Resolves or unresolves a comment on a dashboard
      * @summary Resolve comment
      * @param req express request
      * @param dashboardUuid the uuid of the dashboard
      * @param commentId the uuid of the comment
+     * @param body whether the comment should be resolved
      */
     @Middlewares([
         allowApiKeyAuthentication,
@@ -116,10 +128,17 @@ export class CommentsController extends BaseController {
         @Path() dashboardUuid: string,
         @Path() commentId: string,
         @Request() req: express.Request,
+        @Body() body: { resolved: boolean },
     ): Promise<ApiResolveComment> {
+        assertRegisteredAccount(req.account);
         await this.services
             .getCommentService()
-            .resolveComment(req.user!, dashboardUuid, commentId);
+            .resolveComment(
+                toSessionUser(req.account),
+                dashboardUuid,
+                commentId,
+                body.resolved,
+            );
         this.setStatus(200);
         return {
             status: 'ok',
@@ -137,6 +156,7 @@ export class CommentsController extends BaseController {
         allowApiKeyAuthentication,
         isAuthenticated,
         unauthorisedInDemo,
+        requireOAuthScopeOperation('CommentsController.deleteComment'),
     ])
     @SuccessResponse('200', 'Success')
     @Delete('/dashboards/{dashboardUuid}/{commentId}')
@@ -146,9 +166,14 @@ export class CommentsController extends BaseController {
         @Path() commentId: string,
         @Request() req: express.Request,
     ): Promise<ApiResolveComment> {
+        assertRegisteredAccount(req.account);
         await this.services
             .getCommentService()
-            .deleteComment(req.user!, dashboardUuid, commentId);
+            .deleteComment(
+                toSessionUser(req.account),
+                dashboardUuid,
+                commentId,
+            );
         this.setStatus(200);
         return {
             status: 'ok',

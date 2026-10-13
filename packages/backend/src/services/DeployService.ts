@@ -1,0 +1,395 @@
+import { subject } from '@casl/ability';
+import {
+    Account,
+    calculateExploreWarningReport,
+    DeploySessionStatus,
+    Explore,
+    ExploreError,
+    ForbiddenError,
+    NotFoundError,
+    ProjectType,
+    SessionUser,
+    type AgentConnectionTaskEffect,
+    type ApiDeployExploresResults,
+    type ProjectDefaults,
+    type WeekDay,
+} from '@lightdash/common';
+import { DeploySessionModel } from '../models/DeploySessionModel';
+import { ProjectModel } from '../models/ProjectModel/ProjectModel';
+import { SchedulerClient } from '../scheduler/SchedulerClient';
+import { captureAgentConnectionTask } from '../utils/agentConnectionExecution';
+import { agentExecutionContext } from './AiAccessService/agentExecutionContext';
+import { BaseService } from './BaseService';
+import { NO_CLI_DEPLOY_SELECTION, type CliDeploySelection } from './cliDeploy';
+
+export type DeployExploreEnhancer = (
+    explores: (Explore | ExploreError)[],
+    context: { startOfWeek: WeekDay | null },
+) => (Explore | ExploreError)[];
+
+type ProjectServiceInterface = {
+    assertAgentConnectionEffect: (
+        projectUuid: string,
+        effect: AgentConnectionTaskEffect,
+    ) => Promise<unknown>;
+    assertConnectionPreAggregateRefresh: (
+        projectUuid: string,
+        explores?: (Explore | ExploreError)[],
+    ) => Promise<void>;
+    saveDeployExplores: (args: {
+        userUuid: string;
+        projectUuid: string;
+        explores: (Explore | ExploreError)[];
+        compilationSource: 'cli_deploy' | 'refresh_dbt' | 'create_project';
+        jobUuid?: string | null;
+        requestMethod?: string | null;
+        projectConfigDefaults?: ProjectDefaults;
+        cliVersion?: string | null;
+        complete?: boolean;
+        dbtModelNames?: string[];
+        cliDeploy: CliDeploySelection;
+    }) => Promise<string>;
+    trackCliSourceDeploy: (
+        args: {
+            userUuid: string;
+            projectUuid: string;
+            cliDeploy: CliDeploySelection;
+        },
+        outcome: { status: 'success' } | { status: 'error'; error: unknown },
+    ) => Promise<void>;
+};
+
+type DeployServiceArguments = {
+    deploySessionModel: DeploySessionModel;
+    projectModel: ProjectModel;
+    projectService: ProjectServiceInterface;
+    schedulerClient: SchedulerClient;
+    exploreEnhancer?: DeployExploreEnhancer;
+};
+
+export class DeployService extends BaseService {
+    private readonly deploySessionModel: DeploySessionModel;
+
+    private readonly projectModel: ProjectModel;
+
+    private readonly projectService: ProjectServiceInterface;
+
+    private readonly schedulerClient: SchedulerClient;
+
+    private readonly exploreEnhancer: DeployExploreEnhancer;
+
+    constructor(args: DeployServiceArguments) {
+        super({ serviceName: 'DeployService' });
+        this.deploySessionModel = args.deploySessionModel;
+        this.projectModel = args.projectModel;
+        this.projectService = args.projectService;
+        this.schedulerClient = args.schedulerClient;
+        this.exploreEnhancer = args.exploreEnhancer ?? ((e) => e);
+    }
+
+    private async trackCliSourceDeploy(
+        args: {
+            userUuid: string;
+            projectUuid: string;
+            cliDeploy: CliDeploySelection;
+        },
+        outcome: { status: 'success' } | { status: 'error'; error: unknown },
+    ): Promise<void> {
+        try {
+            await this.projectService.trackCliSourceDeploy(args, outcome);
+        } catch {
+            this.logger.warn('Failed to track CLI source deploy');
+        }
+    }
+
+    async startDeploySession(
+        account: Account,
+        projectUuid: string,
+    ): Promise<{ deploySessionUuid: string }> {
+        // Check deploy permission
+        const project =
+            await this.projectModel.getWithSensitiveFields(projectUuid);
+
+        // manage:DeployProject for non-preview projects (restrictable via custom roles)
+        // manage:DeployProject@self for preview projects created by the user
+        const auditedAbility = this.createAuditedAbility(account);
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('DeployProject', {
+                    projectUuid,
+                    organizationUuid: project.organizationUuid,
+                    upstreamProjectUuid: project.upstreamProjectUuid,
+                    type: project.type,
+                    createdByUserUuid: project.createdByUserUuid,
+                    metadata: {
+                        projectUuid,
+                        projectName: project.name,
+                    },
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                `User does not have permission to deploy to this project`,
+            );
+        }
+
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.projectService.assertConnectionPreAggregateRefresh(
+                projectUuid,
+            );
+
+        // Create a new deploy session
+        const sessionUuid = await this.deploySessionModel.createSession(
+            projectUuid,
+            account.user.id,
+        );
+
+        this.logger.info(
+            `Started deploy session ${sessionUuid} for project ${projectUuid}`,
+        );
+
+        return {
+            deploySessionUuid: sessionUuid,
+        };
+    }
+
+    async addDeployBatch(
+        user: SessionUser,
+        projectUuid: string,
+        sessionUuid: string,
+        explores: (Explore | ExploreError)[],
+        batchNumber: number,
+        complete?: boolean,
+    ): Promise<{ batchNumber: number; exploreCount: number }> {
+        if (agentExecutionContext.getStore()?.agentConnectionExecution)
+            await this.projectService.assertConnectionPreAggregateRefresh(
+                projectUuid,
+                explores,
+            );
+        const session = await this.deploySessionModel.getSession(sessionUuid);
+
+        // Validate ownership
+        if (session.projectUuid !== projectUuid) {
+            throw new ForbiddenError(
+                `Deploy session does not belong to this project`,
+            );
+        }
+
+        if (session.userUuid !== user.userUuid) {
+            throw new ForbiddenError(
+                `Deploy session does not belong to this user`,
+            );
+        }
+
+        if (session.status !== DeploySessionStatus.UPLOADING) {
+            throw new ForbiddenError(
+                `Deploy session is not in uploading state`,
+            );
+        }
+
+        try {
+            // Add explores to the staging table
+            await this.deploySessionModel.addBatch(
+                sessionUuid,
+                projectUuid,
+                explores,
+                batchNumber,
+                complete,
+            );
+
+            this.logger.info(
+                `Added batch ${batchNumber} with ${explores.length} explores to session ${sessionUuid}`,
+            );
+
+            return {
+                batchNumber,
+                exploreCount: explores.length,
+            };
+        } catch (error) {
+            // Mark session as failed if any error occurs
+            this.logger.error(
+                `Failed to add batch ${batchNumber} to deploy session ${sessionUuid}: ${error}`,
+            );
+
+            try {
+                await this.deploySessionModel.updateStatus(
+                    sessionUuid,
+                    DeploySessionStatus.FAILED,
+                );
+            } catch (updateError) {
+                this.logger.error(
+                    `Failed to update session status to FAILED for session ${sessionUuid}: ${updateError}`,
+                );
+            }
+
+            throw error;
+        }
+    }
+
+    async finalizeDeploy(
+        user: SessionUser,
+        projectUuid: string,
+        sessionUuid: string,
+        cliVersion?: string | null,
+        dbtModelNames?: string[],
+        cliDeploy: CliDeploySelection = NO_CLI_DEPLOY_SELECTION,
+    ): Promise<ApiDeployExploresResults & { status: DeploySessionStatus }> {
+        const deployAnalytics = {
+            userUuid: user.userUuid,
+            projectUuid,
+            cliDeploy,
+        };
+        const session = await this.deploySessionModel.getSession(sessionUuid);
+
+        // Validate ownership
+        if (session.projectUuid !== projectUuid) {
+            throw new ForbiddenError(
+                `Deploy session does not belong to this project`,
+            );
+        }
+
+        if (session.userUuid !== user.userUuid) {
+            throw new ForbiddenError(
+                `Deploy session does not belong to this user`,
+            );
+        }
+
+        if (session.status !== DeploySessionStatus.UPLOADING) {
+            throw new ForbiddenError(
+                `Deploy session is not in uploading state`,
+            );
+        }
+
+        const permissionProject =
+            await this.projectModel.getSummary(projectUuid);
+        const auditedAbility = this.createAuditedAbility(user);
+        if (
+            auditedAbility.cannot(
+                'manage',
+                subject('DeployProject', {
+                    projectUuid,
+                    organizationUuid: permissionProject.organizationUuid,
+                    upstreamProjectUuid: permissionProject.upstreamProjectUuid,
+                    type: permissionProject.type,
+                    createdByUserUuid: permissionProject.createdByUserUuid,
+                    metadata: {
+                        projectUuid,
+                        projectName: permissionProject.name,
+                    },
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                `User does not have permission to deploy to this project`,
+            );
+        }
+
+        if (agentExecutionContext.getStore()?.agentConnectionExecution) {
+            await this.projectService.assertConnectionPreAggregateRefresh(
+                projectUuid,
+            );
+            const data =
+                await this.deploySessionModel.getDeployData(sessionUuid);
+            await this.projectService.assertConnectionPreAggregateRefresh(
+                projectUuid,
+                data.explores,
+            );
+        }
+        try {
+            // Update status to finalizing
+            await this.deploySessionModel.updateStatus(
+                sessionUuid,
+                DeploySessionStatus.FINALIZING,
+            );
+
+            const project =
+                await this.projectModel.getWithSensitiveFields(projectUuid);
+
+            // Get all explores from the session and enhance them
+            // (e.g., EE generates virtual pre-aggregate explores from attached defs)
+            const deployData =
+                await this.deploySessionModel.getDeployData(sessionUuid);
+            const uploadedExplores = deployData.explores;
+            const explores = this.exploreEnhancer(uploadedExplores, {
+                startOfWeek: project.warehouseConnection?.startOfWeek ?? null,
+            });
+
+            this.logger.info(
+                `Finalizing deploy session ${sessionUuid} with ${explores.length} explores`,
+            );
+
+            // Use the existing saveExploresToCache method from ProjectService
+            // This ensures we maintain the same validation and caching logic
+            await this.projectService.saveDeployExplores({
+                userUuid: user.userUuid,
+                projectUuid,
+                explores,
+                compilationSource: 'cli_deploy',
+                jobUuid: null,
+                requestMethod: 'cli',
+                cliVersion,
+                complete: deployData.complete,
+                dbtModelNames,
+                cliDeploy,
+            });
+
+            // Schedule validation (same as in original finalizeDeploy)
+            if (agentExecutionContext.getStore()?.agentConnectionExecution)
+                await this.projectService.assertAgentConnectionEffect(
+                    projectUuid,
+                    'validateProject',
+                );
+            await this.schedulerClient.generateValidation({
+                ...captureAgentConnectionTask('validateProject', {
+                    userUuid: user.userUuid,
+                    organizationUuid: project.organizationUuid,
+                }),
+                userUuid: user.userUuid,
+                projectUuid,
+                context: 'cli',
+                organizationUuid: project.organizationUuid,
+            });
+
+            // Mark as completed
+            await this.deploySessionModel.updateStatus(
+                sessionUuid,
+                DeploySessionStatus.COMPLETED,
+            );
+
+            // Cleanup session data
+            await this.deploySessionModel.deleteSession(sessionUuid);
+
+            await this.trackCliSourceDeploy(deployAnalytics, {
+                status: 'success',
+            });
+
+            return {
+                exploreCount: explores.length,
+                warnings: calculateExploreWarningReport({ explores }),
+                status: DeploySessionStatus.COMPLETED,
+            };
+        } catch (error) {
+            await this.trackCliSourceDeploy(deployAnalytics, {
+                status: 'error',
+                error,
+            });
+            // Mark as failed on error
+            await this.deploySessionModel.updateStatus(
+                sessionUuid,
+                DeploySessionStatus.FAILED,
+            );
+            throw error;
+        }
+    }
+
+    async cleanupOldSessions(): Promise<void> {
+        const deletedCount =
+            await this.deploySessionModel.cleanupOldSessions(60); // Clean up sessions older than 1 hour
+        if (deletedCount > 0) {
+            this.logger.info(
+                `Cleaned up ${deletedCount} orphaned deploy sessions`,
+            );
+        }
+    }
+}

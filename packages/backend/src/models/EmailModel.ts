@@ -64,9 +64,12 @@ export class EmailModel {
             )
             .where('users.user_uuid', userUuid)
             .andWhere('is_primary', true)
-            .select<
-                DbEmailStatus[]
-            >(['emails.email', 'emails.is_verified', 'email_one_time_passcodes.created_at', 'email_one_time_passcodes.number_of_attempts']);
+            .select<DbEmailStatus[]>([
+                'emails.email',
+                'emails.is_verified',
+                'email_one_time_passcodes.created_at',
+                'email_one_time_passcodes.number_of_attempts',
+            ]);
         if (row === undefined) {
             throw new NotFoundError(
                 `Cannot find matching verification status for user's email`,
@@ -78,9 +81,11 @@ export class EmailModel {
     async createPrimaryEmailOtp({
         passcode,
         userUuid,
+        resetAttemptsIfOtpCreatedBefore,
     }: {
         passcode: string;
         userUuid: string;
+        resetAttemptsIfOtpCreatedBefore: Date;
     }): Promise<EmailStatus> {
         const hashedPasscode = await bcrypt.hash(
             passcode,
@@ -100,7 +105,10 @@ export class EmailModel {
                 UPDATE
                     SET passcode = EXCLUDED.passcode,
                     created_at = DEFAULT,
-                    number_of_attempts = DEFAULT
+                    number_of_attempts = CASE
+                        WHEN email_one_time_passcodes.created_at < ? THEN 0
+                        ELSE email_one_time_passcodes.number_of_attempts
+                    END
                 RETURNING email_id
             )
             SELECT emails.email, emails.is_verified, email_one_time_passcodes.created_at, email_one_time_passcodes.number_of_attempts
@@ -110,7 +118,7 @@ export class EmailModel {
             INNER JOIN inserted 
                 ON inserted.email_id = emails.email_id
         `,
-            [hashedPasscode, userUuid],
+            [hashedPasscode, userUuid, resetAttemptsIfOtpCreatedBefore],
         );
         return this.getPrimaryEmailStatus(userUuid);
     }
@@ -131,9 +139,13 @@ export class EmailModel {
             .innerJoin('users', 'users.user_id', 'emails.user_id')
             .where('users.user_uuid', userUuid)
             .andWhere('is_primary', true)
-            .select<
-                DbEmailStatus[]
-            >(['emails.email', 'emails.is_verified', 'email_one_time_passcodes.passcode', 'email_one_time_passcodes.created_at', 'email_one_time_passcodes.number_of_attempts']);
+            .select<DbEmailStatus[]>([
+                'emails.email',
+                'emails.is_verified',
+                'email_one_time_passcodes.passcode',
+                'email_one_time_passcodes.created_at',
+                'email_one_time_passcodes.number_of_attempts',
+            ]);
         const match =
             row !== undefined &&
             (await bcrypt.compare(passcode, row.passcode || ''));

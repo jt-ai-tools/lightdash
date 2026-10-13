@@ -1,18 +1,26 @@
-import { Box } from '@mantine-8/core';
+import { Box } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { IconFilterOff } from '@tabler/icons-react';
 import { type ECElementEvent } from 'echarts';
 import { type EChartsReactProps, type Opts } from 'echarts-for-react/lib/types';
-import { memo, useCallback, useEffect, useRef, useState, type FC } from 'react';
+import {
+    memo,
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type FC,
+} from 'react';
 import useEchartsFunnelConfig, {
     type FunnelSeriesDataPoint,
 } from '../../hooks/echarts/useEchartsFunnelConfig';
 import { useLegendDoubleClickSelection } from '../../hooks/echarts/useLegendDoubleClickSelection';
 import { useContextMenuPermissions } from '../../hooks/useContextMenuPermissions';
-import EChartsReact from '../EChartsReactWrapper';
-import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
 import LoadingChart from '../common/LoadingChart';
 import SuboptimalState from '../common/SuboptimalState/SuboptimalState';
+import EChartsReact from '../EChartsReactWrapper';
+import { useVisualizationContext } from '../LightdashVisualization/useVisualizationContext';
 import FunnelChartContextMenu, {
     type FunnelChartContextMenuProps,
 } from './FunnelChartContextMenu';
@@ -33,12 +41,18 @@ type FunnelChartProps = Omit<EChartsReactProps, 'option'> & {
     className?: string;
     onScreenshotReady?: () => void;
     onScreenshotError?: () => void;
+    enableContextMenu?: boolean;
 };
 
 const EchartOptions: Opts = { renderer: 'svg' };
 
 const FunnelChart: FC<FunnelChartProps> = memo(
-    ({ onScreenshotReady, onScreenshotError, ...props }) => {
+    ({
+        onScreenshotReady,
+        onScreenshotError,
+        enableContextMenu = true,
+        ...props
+    }) => {
         const { chartRef, isLoading, resultsData, minimal } =
             useVisualizationContext();
         const { selectedLegends, onLegendChange } =
@@ -114,6 +128,19 @@ const FunnelChart: FC<FunnelChartProps> = memo(
             close();
         }, [close]);
 
+        const onEvents = useMemo(
+            () => ({
+                ...(enableContextMenu
+                    ? {
+                          click: handleOpenContextMenu,
+                          oncontextmenu: handleOpenContextMenu,
+                      }
+                    : {}),
+                legendselectchanged: onLegendChange,
+            }),
+            [enableContextMenu, handleOpenContextMenu, onLegendChange],
+        );
+
         if (isLoading) return <LoadingChart />;
         if (!funnelChartOptions) return <EmptyChart />;
 
@@ -139,14 +166,10 @@ const FunnelChart: FC<FunnelChartProps> = memo(
                     option={funnelChartOptions}
                     notMerge
                     {...props}
-                    onEvents={{
-                        click: handleOpenContextMenu,
-                        oncontextmenu: handleOpenContextMenu,
-                        legendselectchanged: onLegendChange,
-                    }}
+                    onEvents={onEvents}
                 />
 
-                {shouldShowMenu && (
+                {enableContextMenu && shouldShowMenu && (
                     <FunnelChartContextMenu
                         value={menuProps?.value}
                         menuPosition={menuProps?.position}

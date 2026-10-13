@@ -1,12 +1,14 @@
 import {
+    BigNumberDataModel,
     CartesianChartDataModel,
     ChartKind,
-    PieChartDataModel,
-    TableDataModel,
     isVizBarChartConfig,
+    isVizBigNumberConfig,
     isVizLineChartConfig,
     isVizPieChartConfig,
     isVizTableConfig,
+    PieChartDataModel,
+    TableDataModel,
     type AllVizChartConfig,
     type IResultsRunner,
 } from '@lightdash/common';
@@ -36,6 +38,27 @@ export const getChartConfigAndOptions = (
                 options: pieChartDataModel.getResultOptions(),
                 config: pieConfig,
                 errors: pieChartDataModel.getConfigErrors(
+                    currentVizConfig?.fieldConfig,
+                ),
+            } as const;
+        case ChartKind.BIG_NUMBER:
+            if (currentVizConfig && !isVizBigNumberConfig(currentVizConfig)) {
+                throw new Error('Invalid config for big number');
+            }
+
+            const bigNumberDataModel = new BigNumberDataModel({
+                resultsRunner,
+                fieldConfig: currentVizConfig?.fieldConfig,
+            });
+
+            return {
+                type: chartType,
+                options: bigNumberDataModel.getResultOptions(),
+                config: bigNumberDataModel.mergeConfig(
+                    chartType,
+                    currentVizConfig,
+                ),
+                errors: bigNumberDataModel.getConfigErrors(
                     currentVizConfig?.fieldConfig,
                 ),
             } as const;

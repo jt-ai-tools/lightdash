@@ -6,6 +6,7 @@ import {
 } from '@lightdash/common';
 import { Checkbox, Group, SegmentedControl } from '@mantine/core';
 import { type FC } from 'react';
+import ColorSelector from '../ColorSelector';
 import { Config } from '../common/Config';
 
 type ValueOptionsProps = {
@@ -16,10 +17,14 @@ type ValueOptionsProps = {
     valueLabel: PieChartValueLabel;
     showValue: boolean;
     showPercentage: boolean;
+    valueLabelColor?: string;
+    defaultValueLabelColor?: string;
+    swatches?: string[];
 
     onValueLabelChange: (newValueLabel: PieChartValueLabel) => void;
     onToggleShowValue: (newValue: boolean) => void;
     onToggleShowPercentage: (newValue: boolean) => void;
+    onValueLabelColorChange?: (color: string | undefined) => void;
 };
 
 export const ValueOptions: FC<ValueOptionsProps> = ({
@@ -30,13 +35,17 @@ export const ValueOptions: FC<ValueOptionsProps> = ({
     valueLabel,
     showValue,
     showPercentage,
+    valueLabelColor,
+    defaultValueLabelColor,
+    swatches = [],
 
     onValueLabelChange,
     onToggleShowValue,
     onToggleShowPercentage,
+    onValueLabelColorChange,
 }) => (
     <>
-        <Group spacing="xs" noWrap>
+        <Group gap="xs" wrap="nowrap">
             <Config.Label>Value position</Config.Label>
             <SegmentedControl
                 value={isValueLabelOverriden ? 'mixed' : valueLabel}
@@ -48,32 +57,58 @@ export const ValueOptions: FC<ValueOptionsProps> = ({
                     label,
                     disabled: value === 'mixed',
                 }))}
-                onChange={(newValueLabel: PieChartValueLabel) => {
-                    onValueLabelChange(newValueLabel);
+                onChange={(value: string) => {
+                    onValueLabelChange(value as PieChartValueLabel);
                 }}
             />
         </Group>
 
         {valueLabel !== 'hidden' && (
-            <Group spacing="xs">
-                <Checkbox
-                    indeterminate={isShowValueOverriden}
-                    checked={showValue}
-                    onChange={(newValue) =>
-                        onToggleShowValue(newValue.currentTarget.checked)
-                    }
-                    label="Show value"
-                />
+            <>
+                <Group gap="xs">
+                    <Checkbox
+                        size="xs"
+                        indeterminate={isShowValueOverriden}
+                        checked={showValue}
+                        onChange={(newValue) =>
+                            onToggleShowValue(newValue.currentTarget.checked)
+                        }
+                        label="Show value"
+                    />
 
-                <Checkbox
-                    indeterminate={isShowPercentageOverriden}
-                    checked={showPercentage}
-                    onChange={(newValue) =>
-                        onToggleShowPercentage(newValue.currentTarget.checked)
-                    }
-                    label="Show percentage"
-                />
-            </Group>
+                    <Checkbox
+                        size="xs"
+                        indeterminate={isShowPercentageOverriden}
+                        checked={showPercentage}
+                        onChange={(newValue) =>
+                            onToggleShowPercentage(
+                                newValue.currentTarget.checked,
+                            )
+                        }
+                        label="Show percentage"
+                    />
+                </Group>
+
+                {onValueLabelColorChange && (
+                    <Group gap="xs" wrap="nowrap">
+                        <Config.Label>Label color</Config.Label>
+                        <ColorSelector
+                            color={valueLabelColor}
+                            defaultColor={defaultValueLabelColor}
+                            swatches={swatches}
+                            withAlpha
+                            ariaLabel="Select value label color"
+                            onColorChange={onValueLabelColorChange}
+                            onColorReset={
+                                valueLabelColor
+                                    ? () => onValueLabelColorChange(undefined)
+                                    : undefined
+                            }
+                            resetLabel="Use automatic color"
+                        />
+                    </Group>
+                )}
+            </>
         )}
     </>
 );

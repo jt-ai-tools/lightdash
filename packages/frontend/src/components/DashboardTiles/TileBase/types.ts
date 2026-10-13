@@ -1,4 +1,8 @@
-import { type ChartKind, type DashboardTab } from '@lightdash/common';
+import {
+    type ChartKind,
+    type ContentVerificationInfo,
+    type DashboardTab,
+} from '@lightdash/common';
 import { type ReactNode } from 'react';
 
 export type TileBaseProps<T> = {
@@ -6,19 +10,23 @@ export type TileBaseProps<T> = {
     belongsToDashboard?: boolean;
     title: string;
     titleLeftIcon?: ReactNode;
+    verification?: ContentVerificationInfo | null;
     chartName?: string;
     titleHref?: string;
     description?: string | null;
+    connectionName?: string | null;
     tile: T;
     isLoading?: boolean;
     hasError?: boolean;
     chartKind?: ChartKind | null;
     extraMenuItems?: ReactNode;
+    mobileMenuItems?: ReactNode;
     onDelete: (tile: T) => void;
     onEdit: (tile: T) => void;
     children?: ReactNode;
     extraHeaderElement?: ReactNode;
     visibleHeaderElement?: ReactNode;
+    hasNonMenuHeaderContent?: boolean;
     minimal?: boolean;
     tabs?: DashboardTab[];
     lockHeaderVisibility?: boolean;

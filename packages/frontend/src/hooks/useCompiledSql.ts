@@ -1,6 +1,5 @@
 import {
     derivePivotConfigurationFromChart,
-    FeatureFlags,
     getFieldsFromMetricQuery,
     type ApiCompiledQueryResults,
     type ApiError,
@@ -19,6 +18,7 @@ import {
     selectMetrics,
     selectParameters,
     selectPivotConfig,
+    selectPreAggCacheEnabled,
     selectQueryLimit,
     selectSorts,
     selectTableCalculations,
@@ -30,7 +30,6 @@ import { convertDateFilters } from '../utils/dateFilter';
 import { useExplore } from './useExplore';
 import { useProjectUuid } from './useProjectUuid';
 import useQueryError from './useQueryError';
-import { useServerFeatureFlag } from './useServerOrClientFeatureFlag';
 
 const getCompiledQuery = async (
     projectUuid: string,
@@ -38,12 +37,14 @@ const getCompiledQuery = async (
     query: MetricQuery,
     queryParameters?: ParametersValuesMap,
     pivotConfiguration?: PivotConfiguration,
+    usePreAggregateCache?: boolean,
 ) => {
     const timezoneFixQuery = {
         ...query,
         filters: convertDateFilters(query.filters),
         parameters: queryParameters,
         ...(pivotConfiguration && { pivotConfiguration }),
+        ...(usePreAggregateCache !== undefined && { usePreAggregateCache }),
     };
 
     return lightdashApi<ApiCompiledQueryResults>({
@@ -72,10 +73,9 @@ export const useCompiledSql = (
     const chartConfig = useExplorerSelector(selectChartConfig);
     const pivotConfig = useExplorerSelector(selectPivotConfig);
 
+    const preAggCacheEnabled = useExplorerSelector(selectPreAggCacheEnabled);
+
     const { data: explore } = useExplore(tableId);
-    const { data: useSqlPivotResults } = useServerFeatureFlag(
-        FeatureFlags.UseSqlPivotResults,
-    );
 
     const setErrorResponse = useQueryError();
     const metricQuery: MetricQuery = {
@@ -91,9 +91,8 @@ export const useCompiledSql = (
         timezone: timezone ?? undefined,
     };
 
-    // Derive pivot configuration when SQL pivot results are enabled
     let pivotConfiguration: PivotConfiguration | undefined;
-    if (useSqlPivotResults?.enabled && explore) {
+    if (explore) {
         const items = getFieldsFromMetricQuery(metricQuery, explore);
         pivotConfiguration = derivePivotConfigurationFromChart(
             { chartConfig, pivotConfig },
@@ -110,6 +109,7 @@ export const useCompiledSql = (
         timezone,
         queryParameters,
         pivotConfiguration,
+        preAggCacheEnabled,
     ];
     return useQuery<ApiCompiledQueryResults, ApiError>({
         queryKey,
@@ -120,6 +120,7 @@ export const useCompiledSql = (
                 metricQuery,
                 queryParameters,
                 pivotConfiguration,
+                preAggCacheEnabled,
             ),
         onError: (result) => setErrorResponse(result),
         keepPreviousData: true,
@@ -132,14 +133,31 @@ export const useCompiledSqlFromMetricQuery = ({
     tableName,
     projectUuid,
     metricQuery,
+    pivotConfiguration,
+    enabled = true,
 }: Partial<{
     tableName: string;
     projectUuid: string;
     metricQuery: MetricQuery;
+    pivotConfiguration: PivotConfiguration;
+    enabled: boolean;
 }>) => {
     return useQuery<ApiCompiledQueryResults, ApiError>({
-        queryKey: ['compiledQuery', tableName, metricQuery, projectUuid],
-        queryFn: () => getCompiledQuery(projectUuid!, tableName!, metricQuery!),
-        enabled: !!tableName && !!projectUuid && !!metricQuery,
+        queryKey: [
+            'compiledQuery',
+            tableName,
+            metricQuery,
+            projectUuid,
+            pivotConfiguration,
+        ],
+        queryFn: () =>
+            getCompiledQuery(
+                projectUuid!,
+                tableName!,
+                metricQuery!,
+                undefined,
+                pivotConfiguration,
+            ),
+        enabled: enabled && !!tableName && !!projectUuid && !!metricQuery,
     });
 };

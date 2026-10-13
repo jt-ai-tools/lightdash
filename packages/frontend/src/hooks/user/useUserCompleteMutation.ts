@@ -5,6 +5,8 @@ import {
 } from '@lightdash/common';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { lightdashApi } from '../../api';
+import useToaster from '../toaster/useToaster';
+import { type UserWithAbility } from './useUser';
 
 const completeUserQuery = async (data: CompleteUserArgs) =>
     lightdashApi<LightdashUser>({
@@ -13,15 +15,35 @@ const completeUserQuery = async (data: CompleteUserArgs) =>
         body: JSON.stringify(data),
     });
 
-export const useUserCompleteMutation = () => {
+type UserCompleteMutationOptions = {
+    onSuccess?: () => void;
+};
+
+export const useUserCompleteMutation = (
+    options?: UserCompleteMutationOptions,
+) => {
     const queryClient = useQueryClient();
+    const { showToastApiError } = useToaster();
     return useMutation<LightdashUser, ApiError, CompleteUserArgs>(
         completeUserQuery,
         {
             mutationKey: ['user_complete'],
-            onSuccess: async () => {
-                await queryClient.invalidateQueries(['user']);
+            onSuccess: async (completedUser) => {
+                queryClient.setQueryData<UserWithAbility>(
+                    ['user'],
+                    (currentUser) =>
+                        currentUser
+                            ? { ...currentUser, ...completedUser }
+                            : currentUser,
+                );
                 await queryClient.invalidateQueries(['organization']);
+                options?.onSuccess?.();
+            },
+            onError: ({ error }) => {
+                showToastApiError({
+                    title: 'Failed to complete setup',
+                    apiError: error,
+                });
             },
         },
     );

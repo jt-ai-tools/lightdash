@@ -1,7 +1,7 @@
 import {
+    assertUnreachable,
     CatalogItemIcon,
     CatalogType,
-    assertUnreachable,
     type CatalogItem,
 } from '@lightdash/common';
 import { Knex } from 'knex';
@@ -27,6 +27,7 @@ export type DbCatalog = {
     ai_hints: string[] | null;
     joined_tables: string[] | null;
     owner_user_uuid: string | null;
+    has_time_dimension: boolean;
 };
 
 export type DbCatalogIn = Pick<
@@ -47,6 +48,7 @@ export type DbCatalogIn = Pick<
     | 'ai_hints'
     | 'joined_tables'
     | 'owner_user_uuid'
+    | 'has_time_dimension'
 >;
 export type DbCatalogRemove = Pick<DbCatalog, 'project_uuid' | 'name'>;
 export type DbCatalogUpdate = Partial<

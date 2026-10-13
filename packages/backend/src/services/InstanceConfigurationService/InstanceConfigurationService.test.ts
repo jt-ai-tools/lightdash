@@ -37,6 +37,9 @@ const mockSessionUser: SessionUser = {
     abilityRules: {} as AnyType,
     isTrackingAnonymized: false,
     isMarketingOptedIn: false,
+    avatarUrl: null,
+    avatarGradient: null,
+    timezone: null,
     createdAt: new Date(),
     updatedAt: new Date(),
 };
@@ -67,31 +70,51 @@ const mockProject = {
 
 const createMockService = (overrides: AnyType = {}) => {
     const organizationModel = {
-        getOrgUuids: jest.fn(),
+        getOrgUuids: vi.fn(),
         ...overrides.organizationModel,
     };
 
     const projectModel = {
-        getDefaultProjectUuids: jest.fn(),
-        getWithSensitiveFields: jest.fn(),
-        update: jest.fn(),
+        getDefaultProjectUuids: vi.fn(),
+        getDefaultProjectUuidsByName: vi.fn(),
+        getSummary: vi.fn(),
+        getWithSensitiveFields: vi.fn(),
+        update: vi.fn(),
         ...overrides.projectModel,
     };
 
     const userModel = {
-        findSessionUserByPrimaryEmail: jest.fn(),
+        findSessionUserByPrimaryEmail: vi.fn(),
         ...overrides.userModel,
     };
 
     const personalAccessTokenModel = {
-        deleteAllTokensForUser: jest.fn(),
-        save: jest.fn(),
+        deleteAllTokensForUser: vi.fn(),
+        save: vi.fn(),
         ...overrides.personalAccessTokenModel,
     };
 
     const serviceAccountModel = {
-        save: jest.fn(),
+        save: vi.fn(),
         ...overrides.serviceAccountModel,
+    };
+
+    const userAttributesModel = {
+        find: vi.fn(),
+        create: vi.fn(),
+        update: vi.fn(),
+        ...overrides.userAttributesModel,
+    };
+
+    const groupsModel = {
+        find: vi.fn(),
+        ...overrides.groupsModel,
+    };
+
+    const rolesModel = {
+        getRolesByOrganizationUuid: vi.fn().mockResolvedValue([]),
+        getGroupProjectAccess: vi.fn().mockResolvedValue([]),
+        ...overrides.rolesModel,
     };
 
     const lightdashConfig = {
@@ -108,10 +131,16 @@ const createMockService = (overrides: AnyType = {}) => {
         organizationAllowedEmailDomainsModel: {} as AnyType,
         personalAccessTokenModel: personalAccessTokenModel as AnyType,
         emailModel: {} as AnyType,
-        projectService: {} as AnyType,
+        projectService: {
+            scheduleCompileProject: vi.fn(),
+            ...overrides.projectService,
+        } as AnyType,
         serviceAccountModel: serviceAccountModel as AnyType,
         embedModel: {} as AnyType,
-        encryptionUtil: { encrypt: jest.fn() } as AnyType,
+        encryptionUtil: { encrypt: vi.fn() } as AnyType,
+        userAttributesModel: userAttributesModel as AnyType,
+        groupsModel: groupsModel as AnyType,
+        rolesModel: rolesModel as AnyType,
     });
 };
 
@@ -119,19 +148,17 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
     let service: InstanceConfigurationService;
 
     beforeEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
     });
 
     describe('validation scenarios', () => {
         test('Do not throw error with default update setup config', async () => {
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest
-                        .fn()
-                        .mockResolvedValue(['org-1', 'org-2']),
+                    getOrgUuids: vi.fn().mockResolvedValue(['org-1', 'org-2']),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue(['project-1', 'project-2']),
                 },
@@ -146,9 +173,7 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
         test('should throw ParameterError when there are multiple organizations and I am updating service account', async () => {
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest
-                        .fn()
-                        .mockResolvedValue(['org-1', 'org-2']),
+                    getOrgUuids: vi.fn().mockResolvedValue(['org-1', 'org-2']),
                 },
                 updateSetup: {
                     serviceAccount: {
@@ -169,10 +194,10 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
         test('should throw ParameterError when there are multiple projects and I am updating project configuration', async () => {
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue(['project-1', 'project-2']),
                 },
@@ -196,23 +221,23 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
         test('should update API key for admin user when both token and email are provided', async () => {
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue([mockProjectUuid]),
                 },
                 userModel: {
-                    findSessionUserByPrimaryEmail: jest
+                    findSessionUserByPrimaryEmail: vi
                         .fn()
                         .mockResolvedValue(mockSessionUser),
                 },
                 personalAccessTokenModel: {
-                    deleteAllTokensForUser: jest
+                    deleteAllTokensForUser: vi
                         .fn()
                         .mockResolvedValue(undefined),
-                    save: jest.fn().mockResolvedValue(undefined),
+                    save: vi.fn().mockResolvedValue(undefined),
                 },
                 updateSetup: {
                     organization: {
@@ -248,15 +273,15 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
         test('should throw NotFoundError when admin user is not found', async () => {
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue([mockProjectUuid]),
                 },
                 userModel: {
-                    findSessionUserByPrimaryEmail: jest
+                    findSessionUserByPrimaryEmail: vi
                         .fn()
                         .mockResolvedValue(null),
                 },
@@ -273,12 +298,13 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
                 },
             });
 
-            await expect(service.updateInstanceConfiguration()).rejects.toThrow(
-                NotFoundError,
-            );
-            await expect(service.updateInstanceConfiguration()).rejects.toThrow(
-                `User ${mockAdminEmail} not found`,
-            );
+            await expect(
+                service.updateInstanceConfiguration(),
+            ).resolves.not.toThrow();
+
+            expect(
+                service['personalAccessTokenModel'].save,
+            ).not.toHaveBeenCalled();
         });
     });
 
@@ -291,19 +317,19 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
 
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue([mockProjectUuid]),
                 },
                 serviceAccountModel: {
-                    getAllForOrganization: jest
+                    getAllForOrganization: vi
                         .fn()
                         .mockResolvedValue(mockExistingServiceAccounts),
-                    delete: jest.fn().mockResolvedValue(undefined),
-                    save: jest.fn().mockResolvedValue(undefined),
+                    delete: vi.fn().mockResolvedValue(undefined),
+                    save: vi.fn().mockResolvedValue(undefined),
                 },
                 updateSetup: {
                     serviceAccount: {
@@ -345,16 +371,16 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
         test('should update dbt personal access token only', async () => {
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue([mockProjectUuid]),
-                    getWithSensitiveFields: jest
+                    getWithSensitiveFields: vi
                         .fn()
                         .mockResolvedValue(mockProject),
-                    update: jest.fn().mockResolvedValue(undefined),
+                    update: vi.fn().mockResolvedValue(undefined),
                 },
                 updateSetup: {
                     dbt: {
@@ -382,22 +408,23 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
                         personal_access_token: 'new-dbt-token',
                     },
                 },
+                null,
             );
         });
 
         test('should update all project configuration properties', async () => {
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue([mockProjectUuid]),
-                    getWithSensitiveFields: jest
+                    getWithSensitiveFields: vi
                         .fn()
                         .mockResolvedValue(mockProject),
-                    update: jest.fn().mockResolvedValue(undefined),
+                    update: vi.fn().mockResolvedValue(undefined),
                 },
                 updateSetup: {
                     organization: {},
@@ -427,6 +454,7 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
                         personal_access_token: 'new-dbt-token',
                     },
                 },
+                null,
             );
         });
     });
@@ -443,13 +471,13 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
 
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue([mockProjectUuid]),
-                    getWithSensitiveFields: jest
+                    getWithSensitiveFields: vi
                         .fn()
                         .mockResolvedValue(nonGitProject),
                 },
@@ -476,13 +504,13 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
 
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue([mockProjectUuid]),
-                    getWithSensitiveFields: jest
+                    getWithSensitiveFields: vi
                         .fn()
                         .mockResolvedValue(projectWithoutWarehouse),
                 },
@@ -504,10 +532,10 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
         test('should handle empty updateSetup configuration', async () => {
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue([mockProjectUuid]),
                 },
@@ -530,16 +558,16 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
 
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue([mockProjectUuid]),
-                    getWithSensitiveFields: jest
+                    getWithSensitiveFields: vi
                         .fn()
                         .mockResolvedValue(nonGitProject),
-                    update: jest.fn().mockResolvedValue(undefined),
+                    update: vi.fn().mockResolvedValue(undefined),
                 },
                 updateSetup: {
                     project: {
@@ -566,6 +594,7 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
                         ...nonGitProject.dbtConnection,
                     },
                 },
+                null,
             );
         });
     });
@@ -578,34 +607,34 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
 
             service = createMockService({
                 organizationModel: {
-                    getOrgUuids: jest.fn().mockResolvedValue([mockOrgUuid]),
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
                 },
                 projectModel: {
-                    getDefaultProjectUuids: jest
+                    getDefaultProjectUuids: vi
                         .fn()
                         .mockResolvedValue([mockProjectUuid]),
-                    getWithSensitiveFields: jest
+                    getWithSensitiveFields: vi
                         .fn()
                         .mockResolvedValue(mockProject),
-                    update: jest.fn().mockResolvedValue(undefined),
+                    update: vi.fn().mockResolvedValue(undefined),
                 },
                 userModel: {
-                    findSessionUserByPrimaryEmail: jest
+                    findSessionUserByPrimaryEmail: vi
                         .fn()
                         .mockResolvedValue(mockSessionUser),
                 },
                 personalAccessTokenModel: {
-                    deleteAllTokensForUser: jest
+                    deleteAllTokensForUser: vi
                         .fn()
                         .mockResolvedValue(undefined),
-                    save: jest.fn().mockResolvedValue(undefined),
+                    save: vi.fn().mockResolvedValue(undefined),
                 },
                 serviceAccountModel: {
-                    getAllForOrganization: jest
+                    getAllForOrganization: vi
                         .fn()
                         .mockResolvedValue(mockExistingServiceAccounts),
-                    delete: jest.fn().mockResolvedValue(undefined),
-                    save: jest.fn().mockResolvedValue(undefined),
+                    delete: vi.fn().mockResolvedValue(undefined),
+                    save: vi.fn().mockResolvedValue(undefined),
                 },
                 updateSetup: {
                     organization: {
@@ -684,7 +713,770 @@ describe('InstanceConfigurationService.updateInstanceConfiguration', () => {
                         personal_access_token: 'new-dbt-token',
                     },
                 },
+                null,
             );
+        });
+    });
+
+    describe('multi-project configuration update scenarios', () => {
+        const multiProjectSetup = [
+            {
+                name: 'Project Alpha',
+                warehouseConnection: {
+                    type: WarehouseTypes.DATABRICKS,
+                    serverHostName: 'alpha.databricks.com',
+                    httpPath: '/sql/1.0/warehouses/alpha',
+                    catalog: 'alpha_catalog',
+                    database: 'alpha_db',
+                    personalAccessToken: 'alpha-token',
+                },
+                dbtConnection: {
+                    type: DbtProjectType.GITHUB,
+                    authorization_method: 'personal_access_token',
+                    personal_access_token: 'alpha-dbt-token',
+                    repository: 'org/alpha-repo',
+                    branch: 'main',
+                    project_sub_path: '/',
+                },
+            },
+            {
+                name: 'Project Beta',
+                warehouseConnection: {
+                    type: WarehouseTypes.DATABRICKS,
+                    serverHostName: 'beta.databricks.com',
+                    httpPath: '/sql/1.0/warehouses/beta',
+                    catalog: 'beta_catalog',
+                    database: 'beta_db',
+                    personalAccessToken: 'beta-token',
+                },
+                dbtConnection: {
+                    type: DbtProjectType.GITHUB,
+                    authorization_method: 'personal_access_token',
+                    personal_access_token: 'beta-dbt-token',
+                    repository: 'org/beta-repo',
+                    branch: 'main',
+                    project_sub_path: '/',
+                },
+            },
+        ];
+
+        test('should update multiple projects matched by name', async () => {
+            const mockAlphaProject = {
+                ...mockProject,
+                name: 'Project Alpha',
+                projectUuid: 'alpha-uuid',
+            };
+            const mockBetaProject = {
+                ...mockProject,
+                name: 'Project Beta',
+                projectUuid: 'beta-uuid',
+            };
+
+            service = createMockService({
+                organizationModel: {
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
+                },
+                projectModel: {
+                    getDefaultProjectUuids: vi
+                        .fn()
+                        .mockResolvedValue([mockProjectUuid]),
+                    getDefaultProjectUuidsByName: vi
+                        .fn()
+                        .mockImplementation((name: string) => {
+                            if (name === 'Project Alpha')
+                                return Promise.resolve(['alpha-uuid']);
+                            if (name === 'Project Beta')
+                                return Promise.resolve(['beta-uuid']);
+                            return Promise.resolve([]);
+                        }),
+                    getWithSensitiveFields: vi
+                        .fn()
+                        .mockImplementation((uuid: string) => {
+                            if (uuid === 'alpha-uuid')
+                                return Promise.resolve(mockAlphaProject);
+                            if (uuid === 'beta-uuid')
+                                return Promise.resolve(mockBetaProject);
+                            return Promise.reject(
+                                new Error('Project not found'),
+                            );
+                        }),
+                    update: vi.fn().mockResolvedValue(undefined),
+                },
+                updateSetup: { projects: multiProjectSetup },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(service['projectModel'].update).toHaveBeenCalledTimes(2);
+            expect(service['projectModel'].update).toHaveBeenCalledWith(
+                'alpha-uuid',
+                expect.objectContaining({
+                    warehouseConnection:
+                        multiProjectSetup[0].warehouseConnection,
+                    dbtConnection: multiProjectSetup[0].dbtConnection,
+                }),
+                null,
+            );
+            expect(service['projectModel'].update).toHaveBeenCalledWith(
+                'beta-uuid',
+                expect.objectContaining({
+                    warehouseConnection:
+                        multiProjectSetup[1].warehouseConnection,
+                    dbtConnection: multiProjectSetup[1].dbtConnection,
+                }),
+                null,
+            );
+        });
+
+        test('should throw ParameterError when multiple projects share the same name', async () => {
+            service = createMockService({
+                organizationModel: {
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
+                },
+                projectModel: {
+                    getDefaultProjectUuids: vi
+                        .fn()
+                        .mockResolvedValue([mockProjectUuid]),
+                    getDefaultProjectUuidsByName: vi
+                        .fn()
+                        .mockResolvedValue([
+                            'duplicate-uuid-1',
+                            'duplicate-uuid-2',
+                        ]),
+                },
+                updateSetup: { projects: [multiProjectSetup[0]] },
+            });
+
+            await expect(service.updateInstanceConfiguration()).rejects.toThrow(
+                ParameterError,
+            );
+            await expect(service.updateInstanceConfiguration()).rejects.toThrow(
+                'Multiple projects found with name "Project Alpha"',
+            );
+        });
+
+        test('should create projects not found by name', async () => {
+            const newProjectUuid = 'new-project-uuid';
+            service = createMockService({
+                organizationModel: {
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
+                },
+                projectModel: {
+                    getDefaultProjectUuids: vi
+                        .fn()
+                        .mockResolvedValue([mockProjectUuid]),
+                    getDefaultProjectUuidsByName: vi.fn().mockResolvedValue([]),
+                    create: vi.fn().mockResolvedValue(newProjectUuid),
+                },
+                userModel: {
+                    findSessionUserByPrimaryEmail: vi
+                        .fn()
+                        .mockResolvedValue(mockSessionUser),
+                },
+                updateSetup: {
+                    organization: {
+                        admin: { email: mockAdminEmail },
+                    },
+                    projects: [multiProjectSetup[0]],
+                },
+            });
+
+            await expect(
+                service.updateInstanceConfiguration(),
+            ).resolves.not.toThrow();
+
+            expect(service['projectModel'].update).not.toHaveBeenCalled();
+            expect(service['projectModel'].create).toHaveBeenCalledWith(
+                mockUserId,
+                mockOrgUuid,
+                expect.objectContaining({
+                    name: multiProjectSetup[0].name,
+                }),
+            );
+        });
+
+        test('should not update projects when projects is not configured', async () => {
+            service = createMockService({
+                organizationModel: {
+                    getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
+                },
+                projectModel: {
+                    getDefaultProjectUuids: vi
+                        .fn()
+                        .mockResolvedValue([mockProjectUuid]),
+                },
+                updateSetup: {},
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(
+                service['projectModel'].getDefaultProjectUuidsByName,
+            ).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('user attributes update scenarios', () => {
+        const privilegedAttribute = {
+            name: 'is_privileged',
+            description: 'PII access',
+            attributeDefault: null,
+            groups: [{ group: 'Privileged Data Analyst', values: ['true'] }],
+        };
+
+        const updateSetupWithAttribute = {
+            organizationUuid: mockOrgUuid,
+            projects: [], // route through the (empty) multi-project no-op branch
+            userAttributes: [privilegedAttribute],
+        };
+
+        const orgWithSingleUuid = {
+            getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
+        };
+
+        test('creates a new attribute, resolving the group by name to its uuid', async () => {
+            const create = vi.fn();
+            const update = vi.fn();
+            service = createMockService({
+                updateSetup: updateSetupWithAttribute,
+                organizationModel: orgWithSingleUuid,
+                userAttributesModel: {
+                    find: vi.fn().mockResolvedValue([]),
+                    create,
+                    update,
+                },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({
+                        data: [
+                            { uuid: 'grp-1', name: 'Privileged Data Analyst' },
+                        ],
+                    }),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(create).toHaveBeenCalledWith(mockOrgUuid, {
+                name: 'is_privileged',
+                description: 'PII access',
+                attributeDefault: null,
+                users: [],
+                groups: [{ groupUuid: 'grp-1', values: ['true'] }],
+            });
+            expect(update).not.toHaveBeenCalled();
+        });
+
+        test('updates an existing attribute matched by name', async () => {
+            const create = vi.fn();
+            const update = vi.fn();
+            service = createMockService({
+                updateSetup: updateSetupWithAttribute,
+                organizationModel: orgWithSingleUuid,
+                userAttributesModel: {
+                    find: vi
+                        .fn()
+                        .mockResolvedValue([
+                            { uuid: 'attr-1', name: 'is_privileged' },
+                        ]),
+                    create,
+                    update,
+                },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({
+                        data: [
+                            { uuid: 'grp-1', name: 'Privileged Data Analyst' },
+                        ],
+                    }),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(update).toHaveBeenCalledWith(
+                mockOrgUuid,
+                'attr-1',
+                expect.objectContaining({
+                    name: 'is_privileged',
+                    groups: [{ groupUuid: 'grp-1', values: ['true'] }],
+                }),
+            );
+            expect(create).not.toHaveBeenCalled();
+        });
+
+        test('skips a group mapping when the group is not found, without throwing', async () => {
+            const create = vi.fn();
+            service = createMockService({
+                updateSetup: updateSetupWithAttribute,
+                organizationModel: orgWithSingleUuid,
+                userAttributesModel: {
+                    find: vi.fn().mockResolvedValue([]),
+                    create,
+                    update: vi.fn(),
+                },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({ data: [] }),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(create).toHaveBeenCalledWith(
+                mockOrgUuid,
+                expect.objectContaining({
+                    name: 'is_privileged',
+                    groups: [],
+                }),
+            );
+        });
+
+        test('does nothing when no userAttributes are configured', async () => {
+            const find = vi.fn();
+            service = createMockService({
+                updateSetup: { organizationUuid: mockOrgUuid, projects: [] },
+                organizationModel: orgWithSingleUuid,
+                userAttributesModel: {
+                    find,
+                    create: vi.fn(),
+                    update: vi.fn(),
+                },
+                groupsModel: { find: vi.fn() },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(find).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('group project access update scenarios', () => {
+        const orgWithSingleUuid = {
+            getOrgUuids: vi.fn().mockResolvedValue([mockOrgUuid]),
+        };
+
+        const baseEntry = {
+            groupName: 'Core Data Developer',
+            projectName: 'Production',
+            role: 'developer',
+        };
+
+        test('adds access for a new group resolved by name with a system role', async () => {
+            const addProjectAccess = vi.fn();
+            const updateProjectAccess = vi.fn();
+            service = createMockService({
+                updateSetup: {
+                    organizationUuid: mockOrgUuid,
+                    projects: [],
+                    groupProjectAccess: [baseEntry],
+                },
+                organizationModel: orgWithSingleUuid,
+                projectModel: {
+                    getDefaultProjectUuidsByName: vi
+                        .fn()
+                        .mockResolvedValue(['proj-1']),
+                    getSummary: vi.fn(),
+                },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({
+                        data: [{ uuid: 'grp-1', name: 'Core Data Developer' }],
+                    }),
+                    addProjectAccess,
+                    updateProjectAccess,
+                },
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi.fn().mockResolvedValue([]),
+                    getGroupProjectAccess: vi.fn().mockResolvedValue([]),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(addProjectAccess).toHaveBeenCalledWith({
+                groupUuid: 'grp-1',
+                projectUuid: 'proj-1',
+                role: 'developer',
+            });
+            expect(updateProjectAccess).not.toHaveBeenCalled();
+        });
+
+        test('resolves the project by projectUuid when provided', async () => {
+            const addProjectAccess = vi.fn();
+            const getSummary = vi.fn().mockResolvedValue({});
+            const getDefaultProjectUuidsByName = vi.fn();
+            service = createMockService({
+                updateSetup: {
+                    organizationUuid: mockOrgUuid,
+                    projects: [],
+                    groupProjectAccess: [
+                        {
+                            groupName: 'Core Data Developer',
+                            projectUuid: 'proj-uuid-9',
+                            role: 'editor',
+                        },
+                    ],
+                },
+                organizationModel: orgWithSingleUuid,
+                projectModel: { getSummary, getDefaultProjectUuidsByName },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({
+                        data: [{ uuid: 'grp-1', name: 'Core Data Developer' }],
+                    }),
+                    addProjectAccess,
+                    updateProjectAccess: vi.fn(),
+                },
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi.fn().mockResolvedValue([]),
+                    getGroupProjectAccess: vi.fn().mockResolvedValue([]),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(getSummary).toHaveBeenCalledWith('proj-uuid-9');
+            expect(getDefaultProjectUuidsByName).not.toHaveBeenCalled();
+            expect(addProjectAccess).toHaveBeenCalledWith({
+                groupUuid: 'grp-1',
+                projectUuid: 'proj-uuid-9',
+                role: 'editor',
+            });
+        });
+
+        test('resolves a custom role by name to its uuid', async () => {
+            const addProjectAccess = vi.fn();
+            service = createMockService({
+                updateSetup: {
+                    organizationUuid: mockOrgUuid,
+                    projects: [],
+                    groupProjectAccess: [
+                        {
+                            groupName: 'Data Analyst',
+                            projectName: 'Production',
+                            role: 'PII Analyst',
+                        },
+                    ],
+                },
+                organizationModel: orgWithSingleUuid,
+                projectModel: {
+                    getDefaultProjectUuidsByName: vi
+                        .fn()
+                        .mockResolvedValue(['proj-1']),
+                    getSummary: vi.fn(),
+                },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({
+                        data: [{ uuid: 'grp-2', name: 'Data Analyst' }],
+                    }),
+                    addProjectAccess,
+                    updateProjectAccess: vi.fn(),
+                },
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi
+                        .fn()
+                        .mockResolvedValue([
+                            { roleUuid: 'role-uuid-7', name: 'PII Analyst' },
+                        ]),
+                    getGroupProjectAccess: vi.fn().mockResolvedValue([]),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(addProjectAccess).toHaveBeenCalledWith({
+                groupUuid: 'grp-2',
+                projectUuid: 'proj-1',
+                role: 'role-uuid-7',
+            });
+        });
+
+        test('updates an existing access when the role differs', async () => {
+            const addProjectAccess = vi.fn();
+            const updateProjectAccess = vi.fn();
+            service = createMockService({
+                updateSetup: {
+                    organizationUuid: mockOrgUuid,
+                    projects: [],
+                    groupProjectAccess: [baseEntry], // role: 'developer'
+                },
+                organizationModel: orgWithSingleUuid,
+                projectModel: {
+                    getDefaultProjectUuidsByName: vi
+                        .fn()
+                        .mockResolvedValue(['proj-1']),
+                    getSummary: vi.fn(),
+                },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({
+                        data: [{ uuid: 'grp-1', name: 'Core Data Developer' }],
+                    }),
+                    addProjectAccess,
+                    updateProjectAccess,
+                },
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi.fn().mockResolvedValue([]),
+                    getGroupProjectAccess: vi.fn().mockResolvedValue([
+                        {
+                            groupUuid: 'grp-1',
+                            projectUuid: 'proj-1',
+                            roleUuid: 'viewer',
+                        },
+                    ]),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(updateProjectAccess).toHaveBeenCalledWith(
+                { groupUuid: 'grp-1', projectUuid: 'proj-1' },
+                { role: 'developer', role_uuid: null },
+            );
+            expect(addProjectAccess).not.toHaveBeenCalled();
+        });
+
+        test('is a no-op when the existing role already matches', async () => {
+            const addProjectAccess = vi.fn();
+            const updateProjectAccess = vi.fn();
+            service = createMockService({
+                updateSetup: {
+                    organizationUuid: mockOrgUuid,
+                    projects: [],
+                    groupProjectAccess: [baseEntry], // role: 'developer'
+                },
+                organizationModel: orgWithSingleUuid,
+                projectModel: {
+                    getDefaultProjectUuidsByName: vi
+                        .fn()
+                        .mockResolvedValue(['proj-1']),
+                    getSummary: vi.fn(),
+                },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({
+                        data: [{ uuid: 'grp-1', name: 'Core Data Developer' }],
+                    }),
+                    addProjectAccess,
+                    updateProjectAccess,
+                },
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi.fn().mockResolvedValue([]),
+                    getGroupProjectAccess: vi.fn().mockResolvedValue([
+                        {
+                            groupUuid: 'grp-1',
+                            projectUuid: 'proj-1',
+                            roleUuid: 'developer',
+                        },
+                    ]),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(addProjectAccess).not.toHaveBeenCalled();
+            expect(updateProjectAccess).not.toHaveBeenCalled();
+        });
+
+        test('skips (no throw) when the group is not found', async () => {
+            const addProjectAccess = vi.fn();
+            service = createMockService({
+                updateSetup: {
+                    organizationUuid: mockOrgUuid,
+                    projects: [],
+                    groupProjectAccess: [baseEntry],
+                },
+                organizationModel: orgWithSingleUuid,
+                projectModel: {
+                    getDefaultProjectUuidsByName: vi
+                        .fn()
+                        .mockResolvedValue(['proj-1']),
+                    getSummary: vi.fn(),
+                },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({ data: [] }),
+                    addProjectAccess,
+                    updateProjectAccess: vi.fn(),
+                },
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi.fn().mockResolvedValue([]),
+                    getGroupProjectAccess: vi.fn().mockResolvedValue([]),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(addProjectAccess).not.toHaveBeenCalled();
+        });
+
+        test('skips (no throw) when the project name is not found', async () => {
+            const addProjectAccess = vi.fn();
+            const find = vi.fn();
+            service = createMockService({
+                updateSetup: {
+                    organizationUuid: mockOrgUuid,
+                    projects: [],
+                    groupProjectAccess: [baseEntry],
+                },
+                organizationModel: orgWithSingleUuid,
+                projectModel: {
+                    getDefaultProjectUuidsByName: vi.fn().mockResolvedValue([]),
+                    getSummary: vi.fn(),
+                },
+                groupsModel: {
+                    find,
+                    addProjectAccess,
+                    updateProjectAccess: vi.fn(),
+                },
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi.fn().mockResolvedValue([]),
+                    getGroupProjectAccess: vi.fn().mockResolvedValue([]),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(addProjectAccess).not.toHaveBeenCalled();
+        });
+
+        test('skips (no throw) when a custom role name is not found', async () => {
+            const addProjectAccess = vi.fn();
+            service = createMockService({
+                updateSetup: {
+                    organizationUuid: mockOrgUuid,
+                    projects: [],
+                    groupProjectAccess: [
+                        {
+                            groupName: 'Data Analyst',
+                            projectName: 'Production',
+                            role: 'Nonexistent Role',
+                        },
+                    ],
+                },
+                organizationModel: orgWithSingleUuid,
+                projectModel: {
+                    getDefaultProjectUuidsByName: vi
+                        .fn()
+                        .mockResolvedValue(['proj-1']),
+                    getSummary: vi.fn(),
+                },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({
+                        data: [{ uuid: 'grp-2', name: 'Data Analyst' }],
+                    }),
+                    addProjectAccess,
+                    updateProjectAccess: vi.fn(),
+                },
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi.fn().mockResolvedValue([]),
+                    getGroupProjectAccess: vi.fn().mockResolvedValue([]),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(addProjectAccess).not.toHaveBeenCalled();
+        });
+
+        test('does nothing when no groupProjectAccess is configured', async () => {
+            const getGroupProjectAccess = vi.fn();
+            service = createMockService({
+                updateSetup: { organizationUuid: mockOrgUuid, projects: [] },
+                organizationModel: orgWithSingleUuid,
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi.fn(),
+                    getGroupProjectAccess,
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(getGroupProjectAccess).not.toHaveBeenCalled();
+        });
+
+        test('updates an existing access to a custom role with the viewer+role_uuid payload', async () => {
+            const updateProjectAccess = vi.fn();
+            service = createMockService({
+                updateSetup: {
+                    organizationUuid: mockOrgUuid,
+                    projects: [],
+                    groupProjectAccess: [
+                        {
+                            groupName: 'Data Analyst',
+                            projectName: 'Production',
+                            role: 'PII Analyst',
+                        },
+                    ],
+                },
+                organizationModel: orgWithSingleUuid,
+                projectModel: {
+                    getDefaultProjectUuidsByName: vi
+                        .fn()
+                        .mockResolvedValue(['proj-1']),
+                    getSummary: vi.fn(),
+                },
+                groupsModel: {
+                    find: vi.fn().mockResolvedValue({
+                        data: [{ uuid: 'grp-2', name: 'Data Analyst' }],
+                    }),
+                    addProjectAccess: vi.fn(),
+                    updateProjectAccess,
+                },
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi
+                        .fn()
+                        .mockResolvedValue([
+                            { roleUuid: 'role-uuid-7', name: 'PII Analyst' },
+                        ]),
+                    getGroupProjectAccess: vi.fn().mockResolvedValue([
+                        {
+                            groupUuid: 'grp-2',
+                            projectUuid: 'proj-1',
+                            roleUuid: 'developer',
+                        },
+                    ]),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(updateProjectAccess).toHaveBeenCalledWith(
+                { groupUuid: 'grp-2', projectUuid: 'proj-1' },
+                { role: 'viewer', role_uuid: 'role-uuid-7' },
+            );
+        });
+
+        test('skips (no throw) when getSummary rejects for a given projectUuid', async () => {
+            const addProjectAccess = vi.fn();
+            const find = vi.fn();
+            service = createMockService({
+                updateSetup: {
+                    organizationUuid: mockOrgUuid,
+                    projects: [],
+                    groupProjectAccess: [
+                        {
+                            groupName: 'Core Data Developer',
+                            projectUuid: 'missing-proj',
+                            role: 'developer',
+                        },
+                    ],
+                },
+                organizationModel: orgWithSingleUuid,
+                projectModel: {
+                    getDefaultProjectUuidsByName: vi.fn(),
+                    getSummary: vi
+                        .fn()
+                        .mockRejectedValue(new Error('not found')),
+                },
+                groupsModel: {
+                    find,
+                    addProjectAccess,
+                    updateProjectAccess: vi.fn(),
+                },
+                rolesModel: {
+                    getRolesByOrganizationUuid: vi.fn().mockResolvedValue([]),
+                    getGroupProjectAccess: vi.fn().mockResolvedValue([]),
+                },
+            });
+
+            await service.updateInstanceConfiguration();
+
+            expect(addProjectAccess).not.toHaveBeenCalled();
+            expect(find).not.toHaveBeenCalled();
         });
     });
 });

@@ -1,3 +1,9 @@
+import {
+    DimensionType,
+    FieldType,
+    ItemsMap,
+    type Dimension,
+} from '@lightdash/common';
 import * as fs from 'fs/promises';
 import moment from 'moment';
 import { Readable, Writable } from 'stream';
@@ -6,18 +12,23 @@ import { S3CacheClient } from '../../clients/Aws/S3CacheClient';
 import EmailClient from '../../clients/EmailClient/EmailClient';
 import { type FileStorageClient } from '../../clients/FileStorage/FileStorageClient';
 import { lightdashConfig } from '../../config/lightdashConfig';
+import { PreAggregateModel } from '../../ee/models/PreAggregateModel';
 import { AnalyticsModel } from '../../models/AnalyticsModel';
 import type { CatalogModel } from '../../models/CatalogModel/CatalogModel';
 import { ContentModel } from '../../models/ContentModel/ContentModel';
 import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
+import { type DocumentModel } from '../../models/DocumentModel';
 import { DownloadFileModel } from '../../models/DownloadFileModel';
 import { EmailModel } from '../../models/EmailModel';
 import { FeatureFlagModel } from '../../models/FeatureFlagModel/FeatureFlagModel';
 import { GroupsModel } from '../../models/GroupsModel';
 import { JobModel } from '../../models/JobModel/JobModel';
 import { OnboardingModel } from '../../models/OnboardingModel/OnboardingModel';
+import { OrganizationModel } from '../../models/OrganizationModel';
+import { OrganizationSettingsModel } from '../../models/OrganizationSettingsModel';
 import { OrganizationWarehouseCredentialsModel } from '../../models/OrganizationWarehouseCredentialsModel';
 import { ProjectCompileLogModel } from '../../models/ProjectCompileLogModel';
+import { ProjectDbtSourcesModel } from '../../models/ProjectDbtSourcesModel';
 import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
 import { ProjectParametersModel } from '../../models/ProjectParametersModel';
 import { SavedChartModel } from '../../models/SavedChartModel';
@@ -27,11 +38,18 @@ import { SshKeyPairModel } from '../../models/SshKeyPairModel';
 import type { TagsModel } from '../../models/TagsModel';
 import { UserAttributesModel } from '../../models/UserAttributesModel';
 import { UserModel } from '../../models/UserModel';
+import { UserOAuthGrantsModel } from '../../models/UserOAuthGrantsModel';
 import { UserWarehouseCredentialsModel } from '../../models/UserWarehouseCredentials/UserWarehouseCredentialsModel';
 import { WarehouseAvailableTablesModel } from '../../models/WarehouseAvailableTablesModel/WarehouseAvailableTablesModel';
+import { type WarehouseConnectionCompileModel } from '../../models/WarehouseConnectionCompileModel/WarehouseConnectionCompileModel';
+import { type WarehouseConnectionIdentityModel } from '../../models/WarehouseConnectionIdentityModel/WarehouseConnectionIdentityModel';
+import { WarehouseConnectionModel } from '../../models/WarehouseConnectionModel/WarehouseConnectionModel';
+import { WarehouseConnectionTablesModel } from '../../models/WarehouseConnectionTablesModel/WarehouseConnectionTablesModel';
 import { SchedulerClient } from '../../scheduler/SchedulerClient';
 import { EncryptionUtil } from '../../utils/EncryptionUtil/EncryptionUtil';
 import { AdminNotificationService } from '../AdminNotificationService/AdminNotificationService';
+import { type AiAccessService } from '../AiAccessService/AiAccessService';
+import { PermissionsService } from '../PermissionsService/PermissionsService';
 import { PersistentDownloadFileService } from '../PersistentDownloadFileService/PersistentDownloadFileService';
 import { PivotTableService } from '../PivotTableService/PivotTableService';
 import { ProjectService } from '../ProjectService/ProjectService';
@@ -40,19 +58,27 @@ import { CsvService } from './CsvService';
 import { itemMap, metricQuery } from './CsvService.mock';
 
 describe('Csv service', () => {
+    const createDownloadFile = vi.fn();
     const csvService = new CsvService({
         lightdashConfig,
         analytics: analyticsMock,
         userModel: {} as UserModel,
         projectService: new ProjectService({
+            refreshTokenRotation: { run: vi.fn() },
+            aiAccessService: {
+                resolvePlan: vi.fn(async () => null),
+            } as unknown as AiAccessService,
             lightdashConfig,
             analytics: analyticsMock,
             analyticsModel: {} as AnalyticsModel,
             dashboardModel: {} as DashboardModel,
+            documentModel: {} as DocumentModel,
             emailClient: {} as EmailClient,
             jobModel: {} as JobModel,
             onboardingModel: {} as OnboardingModel,
             projectModel: {} as ProjectModel,
+            projectDbtSourcesModel: {} as ProjectDbtSourcesModel,
+            preAggregateModel: {} as PreAggregateModel,
             s3CacheClient: {} as S3CacheClient,
             savedChartModel: {} as SavedChartModel,
             spaceModel: {} as SpaceModel,
@@ -60,6 +86,13 @@ describe('Csv service', () => {
             userAttributesModel: {} as UserAttributesModel,
             userWarehouseCredentialsModel: {} as UserWarehouseCredentialsModel,
             warehouseAvailableTablesModel: {} as WarehouseAvailableTablesModel,
+            warehouseConnectionModel: {} as WarehouseConnectionModel,
+            warehouseConnectionCompileModel:
+                {} as WarehouseConnectionCompileModel,
+            warehouseConnectionTablesModel:
+                {} as WarehouseConnectionTablesModel,
+            warehouseConnectionIdentityModel:
+                {} as WarehouseConnectionIdentityModel,
             emailModel: {
                 getPrimaryEmailStatus: (userUuid: string) => ({
                     isVerified: true,
@@ -74,18 +107,34 @@ describe('Csv service', () => {
             contentModel: {} as ContentModel,
             encryptionUtil: {} as EncryptionUtil,
             userModel: {} as UserModel,
+            userOAuthGrantsModel: {} as UserOAuthGrantsModel,
             featureFlagModel: {} as FeatureFlagModel,
             projectParametersModel: {} as ProjectParametersModel,
             organizationWarehouseCredentialsModel:
                 {} as OrganizationWarehouseCredentialsModel,
+            organizationModel: {} as OrganizationModel,
             projectCompileLogModel: {} as ProjectCompileLogModel,
             adminNotificationService: {} as AdminNotificationService,
+            permissionsService: new PermissionsService({
+                dashboardModel: {} as DashboardModel,
+            }),
             spacePermissionService: {} as SpacePermissionService,
+            directAccessService: {} as never,
+            organizationSettingsModel: {} as OrganizationSettingsModel,
+            getDataAppCustomSqlProvenance: async () => ({
+                tableCalculations: new Set(),
+                customDimensions: new Set(),
+                additionalMetrics: new Set(),
+            }),
         }),
-        fileStorageClient: {} as FileStorageClient,
+        fileStorageClient: {
+            isEnabled: () => false,
+        } as FileStorageClient,
         savedChartModel: {} as SavedChartModel,
         dashboardModel: {} as DashboardModel,
-        downloadFileModel: {} as DownloadFileModel,
+        downloadFileModel: {
+            createDownloadFile,
+        } as unknown as DownloadFileModel,
         schedulerClient: {} as SchedulerClient,
         projectModel: {} as ProjectModel,
         savedSqlModel: {} as SavedSqlModel,
@@ -94,8 +143,30 @@ describe('Csv service', () => {
             fileStorageClient: {} as FileStorageClient,
             downloadFileModel: {} as DownloadFileModel,
             persistentDownloadFileService: {} as PersistentDownloadFileService,
+            organizationSettingsModel: {} as OrganizationSettingsModel,
         }),
         persistentDownloadFileService: {} as PersistentDownloadFileService,
+    });
+
+    it('persists the owning project for a local CSV download', async () => {
+        createDownloadFile.mockClear();
+        createDownloadFile.mockResolvedValue(undefined);
+
+        const download = await csvService.downloadCsvFile({
+            csvContent: 'column\nvalue\n',
+            fileName: 'test-file',
+            projectUuid: 'project-uuid',
+            organizationUuid: 'organization-uuid',
+            createdByUserUuid: 'user-uuid',
+        });
+
+        expect(createDownloadFile).toHaveBeenCalledWith(
+            expect.any(String),
+            download.localPath,
+            'csv',
+            'project-uuid',
+        );
+        await fs.unlink(download.localPath);
     });
 
     it('Should convert rows to CSV with format', async () => {
@@ -243,6 +314,95 @@ $4.00,value_4,2020-03-16
         ]);
 
         expect(csv).toEqual(['$1.00', 'value_1', '2020-03-16 11:32:55.123']);
+    });
+
+    it('Should shift timestamp dimensions into the provided timezone', async () => {
+        const row = {
+            column_string: `value_1`,
+            column_timestamp: '2020-03-16T11:32:55.123Z',
+        };
+
+        const csv = CsvService.convertRowToCsv(
+            row,
+            itemMap,
+            false,
+            ['column_string', 'column_timestamp'],
+            'America/New_York',
+        );
+
+        expect(csv).toEqual(['value_1', '2020-03-16 07:32:55.123']);
+    });
+
+    it('Should not shift raw date dimensions (no TIMESTAMP base)', async () => {
+        const row = {
+            column_string: `value_1`,
+            column_date: '2020-03-16T02:32:55.000Z',
+        };
+
+        const csv = CsvService.convertRowToCsv(
+            row,
+            itemMap,
+            false,
+            ['column_string', 'column_date'],
+            'America/New_York',
+        );
+
+        expect(csv).toEqual(['value_1', '2020-03-16']);
+    });
+
+    it('Should not shift date dimensions day-truncated from a TIMESTAMP base (real DATE post-cast)', async () => {
+        // GLITCH-452: a day-or-coarser TIMESTAMP-base trunc compiles to a real
+        // DATE (a calendar value), so it is not timezone-shifted — same as a
+        // native DATE column, even under a non-UTC project tz.
+        const columnDay: Dimension = {
+            name: 'column_day',
+            description: undefined,
+            type: DimensionType.DATE,
+            hidden: false,
+            table: 'table',
+            tableLabel: 'table',
+            label: 'column day',
+            fieldType: FieldType.DIMENSION,
+            sql: '${TABLE}.column_day',
+            timeIntervalBaseDimensionType: DimensionType.TIMESTAMP,
+        };
+        const itemMapWithTruncatedDay: ItemsMap = {
+            ...itemMap,
+            column_day: columnDay,
+        };
+        const row = {
+            column_string: `value_1`,
+            column_day: '2020-03-16T02:32:55.000Z',
+        };
+
+        const csv = CsvService.convertRowToCsv(
+            row,
+            itemMapWithTruncatedDay,
+            false,
+            ['column_string', 'column_day'],
+            'America/New_York',
+        );
+
+        expect(csv).toEqual(['value_1', '2020-03-16']);
+    });
+
+    it('GLITCH-503: raw mode (onlyRaw) already emits bare YYYY-MM-DD for DATE fields', async () => {
+        // CSV runs formatTemporalCellForSpreadsheet before the onlyRaw check, so
+        // a day-grain DATE is bare in raw mode too (the XLSX gap was Excel-only).
+        const row = {
+            column_string: `value_1`,
+            column_date: '2020-03-16T02:32:55.000Z',
+        };
+
+        const csv = CsvService.convertRowToCsv(
+            row,
+            itemMap,
+            true,
+            ['column_string', 'column_date'],
+            'America/New_York',
+        );
+
+        expect(csv).toEqual(['value_1', '2020-03-16']);
     });
 
     it('Should generate csv file ids', async () => {

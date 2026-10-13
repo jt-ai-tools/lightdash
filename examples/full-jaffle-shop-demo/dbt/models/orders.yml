@@ -9,6 +9,120 @@ models:
     config:
       tags: ["core", "ai"]
       meta:
+        pre_aggregates:
+          - name: orders_daily_avg_demo
+            dimensions:
+              - status
+            metrics:
+              - average_order_size
+              - total_order_amount
+            time_dimension: order_date
+            granularity: day
+            sorts:
+              - fieldId: orders_order_date_day
+                descending: true
+          - name: orders_daily_avg_demo_2
+            dimensions:
+              - status
+              - order_source
+              - order_priority
+              - customers.first_name
+            metrics:
+              - average_order_size
+              - total_order_amount
+              - total_completed_order_amount
+            time_dimension: order_date
+            granularity: day
+          # External pre-aggregate candidates. Enable create_external_pre_aggregate_tables
+          # in dbt_project.yml before testing them locally.
+          - name: orders_ext_daily_status
+            table: '"jaffle"."orders_ext_daily_status_mv"'
+            dimensions:
+              - status
+              - order_source
+            metrics:
+              - total_order_amount
+              - average_order_size
+            time_dimension: order_date
+            granularity: day
+          - name: orders_ext_daily_joined
+            table: '"jaffle"."orders_ext_daily_joined_mv"'
+            dimensions:
+              - status
+              - customers.first_name
+            metrics:
+              - total_order_amount
+              - total_completed_order_amount
+            time_dimension: order_date
+            granularity: day
+          - name: sql_fields_daily
+            dimensions:
+              - status
+              - constant_one
+              - table_amount
+              - semantic_amount
+              - amount_plus_shipping
+              - amount_plus_shipping_band
+            metrics:
+              - basic_sql_metric
+              - table_ref_metric
+              - semantic_ref_metric
+              - mixed_expression_metric
+              - average_expression_metric
+            time_dimension: order_date
+            granularity: day
+          # e2e fixtures: count_distinct defs served on exact matches only,
+          # plus day/month twins for the grain-preference tie-break.
+          - name: orders_daily_unique_demo
+            dimensions:
+              - status
+            metrics:
+              - unique_order_count
+              - total_order_amount
+            time_dimension: order_date
+            granularity: day
+          - name: orders_ext_daily_unique
+            table: '"jaffle"."orders_ext_daily_unique_mv"'
+            dimensions:
+              - order_source
+            metrics:
+              - unique_order_count
+            time_dimension: order_date
+            granularity: day
+          - name: orders_source_daily_twin
+            dimensions:
+              - order_source
+            metrics:
+              - total_shipping_revenue
+            time_dimension: order_date
+            granularity: day
+          - name: orders_source_monthly_twin
+            dimensions:
+              - order_source
+            metrics:
+              - total_shipping_revenue
+            time_dimension: order_date
+            granularity: month
+          - name: orders_daily_number_metric_refs_demo
+            dimensions:
+              - shipping_method
+              - shipping_cost_tier
+            metrics:
+              - total_non_completed_order_amount
+              - total_order_amount
+              - total_completed_order_amount
+              - completion_percentage
+            time_dimension: order_date
+            granularity: day
+          - name: orders_daily_cross_model_number_metric_refs_demo
+            dimensions:
+              - status
+            metrics:
+              - order_amount_plus_average_customer_age
+              - total_order_amount
+              - customers.average_age
+            time_dimension: order_date
+            granularity: day
         primary_key: order_id
         spotlight:
           categories:
@@ -19,6 +133,10 @@ models:
             relationship: many-to-one
             label: Order Customer
             description: The customer who placed this order (many orders can belong to one customer)
+          - join: raw_order_statuses
+            label: Order Status
+            sql_on: ${orders.status} = ${raw_order_statuses.status}
+            relationship: many-to-one
         metrics:
           completion_percentage:
             spotlight:
@@ -32,6 +150,25 @@ models:
             drivers:
               - total_order_amount
               - total_completed_order_amount
+          # PROD-6869: Cross-model type:number referencing sum_distinct
+          # This metric references customers.total_order_amount_deduped (sum_distinct)
+          # from the joined customers model. Before the fix, this would fail
+          # with "invalid identifier" because the sum_distinct's deduplication
+          # CTE metadata was lost during cross-model reference compilation.
+          deduped_revenue_per_order:
+            type: number
+            sql: ${customers.total_order_amount_deduped} / NULLIF(${unique_order_count}, 0)
+            description: "Average deduped revenue per order. References a cross-model sum_distinct metric to test PROD-6869."
+            format: usd
+            round: 2
+          order_amount_plus_average_customer_age:
+            type: number
+            sql: ${total_order_amount} + ${customers.average_age}
+            description: "Example type:number metric that references a joined customers metric."
+            groups: ["pre-aggregations"]
+            drivers:
+              - total_order_amount
+              - customers.average_age
         default_time_dimension:
           field: order_date
           interval: MONTH
@@ -65,6 +202,26 @@ models:
                 type: count_distinct
                 spotlight:
                   categories: ["revenue_growth"]
+                  # Curate the default Metrics Explorer view: open segmented by
+                  # order source and pre-filtered to completed orders. Engineers
+                  # can switch to any of the other allowlisted dimensions.
+                  segment_by:
+                    - order_source
+                    - status
+                    - shipping_method
+                    - order_priority
+                    - fulfillment_center
+                    - is_completed
+                  filter_by:
+                    - status
+                    - order_source
+                    - shipping_method
+                    - order_priority
+                    - fulfillment_center
+                    - is_completed
+                  default_segment: order_source
+                  default_filter:
+                    status: completed
               completed_order_count:
                 label: Completed order count
                 description: Total number of completed orders
@@ -97,7 +254,8 @@ models:
                 round: 1
                 sql: CASE WHEN ${is_completed} THEN 1 ELSE 0 END
                 show_underlying_values:
-                  - amount
+                  - status
+                  - total_order_amount
                   - customers.first_name
                 spotlight:
                   owner: demo2@lightdash.com
@@ -154,13 +312,28 @@ models:
               filter_by: false
               segment_by: false
         type: string
+      - name: user_attribute_email_test
+        description: "Example of dimension based on a user attribute email"
+        meta:
+          dimension:
+            sql: |
+              CASE
+                WHEN ${ld.user.email} = 'demo@lightdash.com'
+                  THEN ${TABLE}.status
+                ELSE 'non-demo'
+              END
+            groups: ["pre-aggregations"]
+            spotlight:
+              filter_by: false
+              segment_by: false
+        type: string
       - name: order_date
         description: Date (UTC) that the order was placed
         config:
           meta:
             dimension:
               type: date
-              time_intervals: ["DAY", "WEEK", "MONTH", "YEAR", "MONTH_NAME", "DAY_OF_WEEK_NAME", "QUARTER_NAME"]
+              time_intervals: ["DAY", "WEEK", "MONTH", "YEAR", "MONTH_NAME", "DAY_OF_WEEK_NAME", "QUARTER_NAME", "fiscal_quarter", "biweekly"]
             metrics:
               date_of_first_order:
                 type: min
@@ -178,6 +351,19 @@ models:
                 # Hex colors are supported in both chart config and echarts
                 "placed": "#e6fa0f"
                 "completed": "#00FF00"
+              filter_autocomplete:
+                fetch_from_warehouse: false
+                values:
+                  - value: placed
+                    label: Placed order
+                  - value: shipped
+                    label: Shipped order
+                  - value: completed
+                    label: Completed order
+                  - value: return_pending
+                    label: Return pending
+                  - value: returned
+                    label: Returned order
         tests:
           - accepted_values:
               values:
@@ -198,6 +384,36 @@ models:
             dimension:
               format: usd
               round: 2
+            additional_dimensions:
+              constant_one:
+                type: number
+                label: Constant One
+                groups: ["pre-aggregations"]
+                sql: "1"
+              table_amount:
+                type: number
+                label: Table Amount
+                groups: ["pre-aggregations"]
+                sql: ${TABLE}.amount
+              semantic_amount:
+                type: number
+                label: Semantic Amount
+                groups: ["pre-aggregations"]
+                sql: ${amount}
+              amount_plus_shipping:
+                type: number
+                label: Amount Plus Shipping
+                groups: ["pre-aggregations"]
+                sql: ${TABLE}.amount + ${shipping_cost}
+              amount_plus_shipping_band:
+                type: string
+                label: Amount Plus Shipping Band
+                groups: ["pre-aggregations"]
+                sql: |
+                  CASE
+                    WHEN ${amount_plus_shipping} >= 100 THEN 'high'
+                    ELSE 'low'
+                  END
             metrics:
               average_order_size:
                 type: average
@@ -217,6 +433,10 @@ models:
                   interval: DAY
                 spotlight:
                   categories: ["revenue_growth"]
+              average_order_amount:
+                type: average
+                format: usd
+                round: 2
               amount_percent_of_previous:
                 type: percent_of_previous
                 sql: ${total_order_amount}
@@ -260,6 +480,58 @@ models:
                 type: number
                 format: "$#,##0.00"
                 sql: ${total_order_amount}-${total_completed_order_amount}
+              basic_sql_metric:
+                type: sum
+                label: Basic SQL Metric
+                groups: ["pre-aggregations"]
+                sql: "1"
+              table_ref_metric:
+                type: sum
+                label: Table Ref Metric
+                groups: ["pre-aggregations"]
+                sql: ${TABLE}.amount
+              semantic_ref_metric:
+                type: sum
+                label: Semantic Ref Metric
+                groups: ["pre-aggregations"]
+                sql: ${amount}
+              mixed_expression_metric:
+                type: sum
+                label: Mixed Expression Metric
+                groups: ["pre-aggregations"]
+                sql: ${TABLE}.amount + ${shipping_cost}
+              average_expression_metric:
+                type: average
+                label: Average Expression Metric
+                groups: ["pre-aggregations"]
+                sql: ${TABLE}.amount + ${shipping_cost}
+              parameterized_metric_test:
+                type: sum
+                label: Parameterized Metric Test
+                groups: ["pre-aggregations"]
+                sql: |
+                  CASE
+                    WHEN ${lightdash.parameters.date_dim_parameter} IS NOT NULL
+                      THEN ${TABLE}.amount
+                    ELSE 0
+                  END
+              user_attribute_email_metric_test:
+                type: sum
+                label: User Attribute Email Metric Test
+                groups: ["pre-aggregations"]
+                sql: |
+                  CASE
+                    WHEN ${ld.user.email} = 'demo@lightdash.com'
+                      THEN ${TABLE}.amount
+                    ELSE 0
+                  END
+              param_filter_metric_test:
+                type: sum
+                label: Param Filter Metric Test
+                groups: ["pre-aggregations"]
+                sql: ${amount}
+                filters:
+                  - date_dim_param_test: "param is greater"
         meta:
           dimension:
             type: number
@@ -345,6 +617,9 @@ models:
         description: Promotional code applied to the order
         config:
           meta:
+            dimension:
+              filter_autocomplete:
+                fetch_from_warehouse: false
             metrics:
               promo_usage_rate:
                 type: number
@@ -402,7 +677,7 @@ models:
                 type: string
                 label: Delivery Speed Tier
                 sql: |
-                  CASE 
+                  CASE
                     WHEN ${estimated_delivery_days} = 1 THEN 'Same/Next Day'
                     WHEN ${estimated_delivery_days} <= 3 THEN 'Fast (2-3 days)'
                     WHEN ${estimated_delivery_days} <= 5 THEN 'Standard (4-5 days)'
@@ -444,7 +719,7 @@ models:
                 type: string
                 label: Shipping Cost Tier
                 sql: |
-                  CASE 
+                  CASE
                   WHEN ${shipping_cost} < 10 THEN 'Low (<$10)'
                   WHEN ${shipping_cost} < 20 THEN 'Medium ($10-$20)'
                   WHEN ${shipping_cost} < 30 THEN 'High ($20-$30)'

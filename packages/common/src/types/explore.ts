@@ -4,6 +4,7 @@ import {
     type LineageGraph,
     type SupportedDbtAdapter,
 } from './dbt';
+import { type ExternalSourceRef } from './externalSources';
 import {
     type CompiledDimension,
     type CompiledMetric,
@@ -12,7 +13,10 @@ import {
     type Source,
 } from './field';
 import { type LightdashProjectConfig } from './lightdashProjectConfig';
+import { type ParametersValuesMap } from './parameters';
+import { type PreAggregateDef } from './preAggregate';
 import { type TableBase } from './table';
+import { type TimeFrames } from './timeFrames';
 
 export enum JoinRelationship {
     ONE_TO_MANY = 'one-to-many',
@@ -57,7 +61,26 @@ export type CompiledTable = TableBase & {
 export enum ExploreType {
     VIRTUAL = 'virtual',
     DEFAULT = 'default',
+    PRE_AGGREGATE = 'pre_aggregate',
+    EXTERNAL_SOURCE = 'external_source',
 }
+
+/**
+ * Explores created and owned by users in the app rather than compiled from
+ * dbt. They live only in the explore cache and must survive dbt recompiles.
+ */
+export const USER_MANAGED_EXPLORE_TYPES = [
+    ExploreType.VIRTUAL,
+    ExploreType.EXTERNAL_SOURCE,
+] as const;
+
+export const isUserManagedExplore = (explore: {
+    type?: ExploreType;
+}): boolean =>
+    explore.type !== undefined &&
+    (USER_MANAGED_EXPLORE_TYPES as readonly ExploreType[]).includes(
+        explore.type,
+    );
 
 export enum InlineErrorType {
     // Fatal error types (ExploreError - explore is broken)
@@ -67,6 +90,12 @@ export enum InlineErrorType {
     SKIPPED_JOIN = 'SKIPPED_JOIN',
     MISSING_TABLE = 'MISSING_TABLE',
     FIELD_ERROR = 'FIELD_ERROR',
+    SET_VALIDATION_ERROR = 'SET_VALIDATION_ERROR',
+    SHOW_UNDERLYING_VALUES_ERROR = 'SHOW_UNDERLYING_VALUES_ERROR',
+    INVALID_PARAMETER = 'INVALID_PARAMETER',
+    DUPLICATE_FIELD_NAME = 'DUPLICATE_FIELD_NAME',
+    MODEL_FILTER_ERROR = 'MODEL_FILTER_ERROR',
+    WAREHOUSE_COLUMN_ERROR = 'WAREHOUSE_COLUMN_ERROR',
 }
 
 export type InlineError = {
@@ -74,11 +103,28 @@ export type InlineError = {
     message: string;
 };
 
+export type PreAggregateSource = {
+    sourceExploreName: string;
+    preAggregateName: string;
+    // Present ⇒ external pre-aggregate: served from this table on the project warehouse
+    externalTable?: string;
+};
+
+export type CustomMetaValue = string | number | boolean;
+
 export type Explore = {
     name: string; // Must be sql friendly (a-Z, 0-9, _)
     label: string; // Friendly name
     tags: string[];
+    /** @deprecated Use `groups` instead */
     groupLabel?: string;
+    /**
+     * Nested groups for the sidebar (max 5 levels). Group keys resolve to
+     * labels/descriptions via the project-level `table_groups` config
+     * (fetched separately); missing keys fall back to using the key as
+     * the label.
+     */
+    groups?: string[];
     baseTable: string; // Must match a tableName in tables
     joinedTables: CompiledExploreJoin[]; // Must match a tableName in tables
     tables: { [tableName: string]: CompiledTable }; // All tables in this explore, potentially filtered by user attributes
@@ -89,6 +135,7 @@ export type Explore = {
     ymlPath?: string;
     sqlPath?: string;
     type?: ExploreType;
+    caseSensitive?: boolean; // When false, all string filters in this explore will be case insensitive. Default is true
     // Spotlight config for this explore
     spotlight?: {
         visibility: LightdashProjectConfig['spotlight']['default_visibility'];
@@ -96,17 +143,25 @@ export type Explore = {
         owner?: string; // model owner email (inherited by metrics)
     };
     aiHint?: string | string[];
+    customMeta?: Record<string, CustomMetaValue>;
     parameters?: LightdashProjectConfig['parameters'];
+    /** Project `granularity_labels` overrides, keyed by TimeFrames. Consumed
+     *  by the date zoom to relabel standard granularities. */
+    granularityLabels?: Partial<Record<TimeFrames, string>>;
+    savedParameterValues?: ParametersValuesMap; // Parameter values stored with virtual views
+    preAggregates?: PreAggregateDef[];
+    preAggregateSource?: PreAggregateSource;
+    /** Present ⇒ generated from an external source table (CSV upload, Google Sheet). */
+    externalSource?: ExternalSourceRef;
     /**
-     * Non-fatal warnings from partial compilation.
-     * Present when some joins or fields failed to compile but the explore is still usable.
-     * Only populated when PARTIAL_COMPILATION_ENABLED=true.
+     * Non-fatal compilation or validation warnings (e.g. fields that failed to
+     * compile, warehouse-rejected column references). The explore is still usable.
      */
     warnings?: InlineError[];
 };
 
 export type ExploreError = Partial<Explore> &
-    Pick<Explore, 'name' | 'label' | 'groupLabel'> & {
+    Pick<Explore, 'name' | 'label' | 'groupLabel' | 'groups'> & {
         errors: InlineError[];
     };
 
@@ -118,21 +173,64 @@ export const isExploreError = (
     explore: Explore | ExploreError,
 ): explore is ExploreError => 'errors' in explore;
 
+type ExploreSplitCandidateTable = Pick<CompiledTable, 'originalName'>;
+
+type ValidExploreSplitCandidateSource = {
+    name: string;
+    baseTable: string;
+    tables: Record<string, ExploreSplitCandidateTable>;
+};
+
+type FailedExploreSplitCandidateSource = {
+    name: string;
+    errors: unknown;
+    baseTable?: string;
+    tables?: Record<string, ExploreSplitCandidateTable>;
+};
+
+type ExploreSplitCandidateSource =
+    | ValidExploreSplitCandidateSource
+    | FailedExploreSplitCandidateSource;
+
+export const getExploreSplitCandidates = (
+    exploreName: string,
+    explores: ExploreSplitCandidateSource[],
+): string[] => {
+    const candidates = explores.flatMap((explore) => {
+        if ('errors' in explore) return [];
+        const baseTable = explore.tables[explore.baseTable];
+        // Package names can contain `__`, so match the qualified suffix rather
+        // than treating the separator as something we can parse.
+        return baseTable?.originalName === exploreName &&
+            explore.name.endsWith(`__${exploreName}`)
+            ? [explore.name]
+            : [];
+    });
+
+    return [...new Set(candidates)].sort();
+};
+
 type SummaryExploreFields =
     | 'name'
     | 'label'
     | 'tags'
     | 'groupLabel'
+    | 'groups'
     | 'type'
+    | 'preAggregateSource'
+    | 'externalSource'
     | 'aiHint'
+    | 'customMeta'
     | 'warnings';
 type SummaryExploreErrorFields =
     | 'name'
     | 'label'
     | 'tags'
     | 'groupLabel'
+    | 'groups'
     | 'type'
     | 'aiHint'
+    | 'customMeta'
     | 'errors';
 type SummaryExtraFields = {
     description?: string;
@@ -140,10 +238,17 @@ type SummaryExtraFields = {
     databaseName: string;
 };
 
+type SummaryBindingFields = {
+    warehouseConnectionUuid: string | null;
+};
+
 export type SummaryExplore =
-    | (Pick<Explore, SummaryExploreFields> & SummaryExtraFields)
+    | (Pick<Explore, SummaryExploreFields> &
+          SummaryExtraFields &
+          SummaryBindingFields)
     | (Pick<ExploreError, SummaryExploreErrorFields> &
-          Partial<SummaryExtraFields>);
+          Partial<SummaryExtraFields> &
+          SummaryBindingFields);
 
 /**
  * Check if a SummaryExplore is from an ExploreError (completely failed to compile).
@@ -152,7 +257,8 @@ export type SummaryExplore =
 export const isSummaryExploreError = (
     summary: SummaryExplore,
 ): summary is Pick<ExploreError, SummaryExploreErrorFields> &
-    Partial<SummaryExtraFields> =>
+    Partial<SummaryExtraFields> &
+    SummaryBindingFields =>
     'errors' in summary &&
     summary.errors !== null &&
     summary.errors !== undefined;

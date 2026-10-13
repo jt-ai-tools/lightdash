@@ -35,19 +35,25 @@ export const Display: React.FC = () => {
             <Config>
                 <Group>
                     <Config.Heading>Show legend</Config.Heading>
-                    <Switch checked={showLegend} onChange={toggleShowLegend} />
+                    <Switch
+                        size="xs"
+                        checked={showLegend}
+                        onChange={toggleShowLegend}
+                    />
                 </Group>
             </Config>
 
-            <Collapse in={showLegend}>
-                <Stack spacing="xs">
-                    <Group spacing="xs">
+            <Collapse expanded={showLegend}>
+                <Stack gap="xs">
+                    <Group gap="xs">
                         <Config.Label>Orientation</Config.Label>
                         <SegmentedControl
                             name="orient"
                             value={legendPosition}
-                            onChange={(val: PieChartLegendPosition) =>
-                                legendPositionChange(val)
+                            onChange={(val: string) =>
+                                legendPositionChange(
+                                    val as PieChartLegendPosition,
+                                )
                             }
                             data={Object.entries(PieChartLegendPositions).map(
                                 ([position, label]) => ({
@@ -60,6 +66,7 @@ export const Display: React.FC = () => {
                     <Group>
                         <Config.Label>Label max length</Config.Label>
                         <TextInput
+                            size="xs"
                             type="number"
                             value={legendMaxItemLength}
                             placeholder={PieChartLegendLabelMaxLengthDefault.toString()}

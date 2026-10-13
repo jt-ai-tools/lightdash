@@ -1,12 +1,16 @@
 import { ModelRepository } from '../models/ModelRepository';
 import { SchedulerClient } from '../scheduler/SchedulerClient';
 import { type OperationContext } from '../services/ServiceRepository';
+import { ApnsClient } from './Apns/ApnsClient';
 import { S3CacheClient } from './Aws/S3CacheClient';
 import { S3Client } from './Aws/S3Client';
 import EmailClient from './EmailClient/EmailClient';
+import { FcmClient } from './Fcm/FcmClient';
 import { type FileStorageClient } from './FileStorage/FileStorageClient';
 import { GoogleDriveClient } from './Google/GoogleDriveClient';
+import { GoogleChatClient } from './GoogleChat/GoogleChatClient';
 import { MicrosoftTeamsClient } from './MicrosoftTeams/MicrosoftTeamsClient';
+import { NatsClient } from './NatsClient';
 import { S3ResultsFileStorageClient } from './ResultsFileStorageClients/S3ResultsFileStorageClient';
 import { SlackClient } from './Slack/SlackClient';
 
@@ -16,13 +20,18 @@ import { SlackClient } from './Slack/SlackClient';
  */
 
 export interface ClientManifest {
+    apnsClient: ApnsClient;
+    fcmClient: FcmClient;
+    natsClient: NatsClient;
     emailClient: EmailClient;
     googleDriveClient: GoogleDriveClient;
     s3CacheClient: S3CacheClient;
     fileStorageClient: FileStorageClient;
     schedulerClient: SchedulerClient;
     slackClient: SlackClient;
+    googleChatClient: GoogleChatClient;
     msTeamsClient: MicrosoftTeamsClient;
+    preAggregateResultsFileStorageClient: S3ResultsFileStorageClient;
     resultsFileStorageClient: S3ResultsFileStorageClient;
 }
 
@@ -114,6 +123,38 @@ export class ClientRepository
      */
     protected clientInstances: Partial<ClientManifest> = {};
 
+    public getApnsClient(): ApnsClient {
+        return this.getClient(
+            'apnsClient',
+            () =>
+                new ApnsClient({
+                    config: this.context.lightdashConfig
+                        .mobilePushNotifications,
+                }),
+        );
+    }
+
+    public getFcmClient(): FcmClient {
+        return this.getClient(
+            'fcmClient',
+            () =>
+                new FcmClient({
+                    config: this.context.lightdashConfig
+                        .mobilePushNotifications,
+                }),
+        );
+    }
+
+    public getNatsClient(): NatsClient {
+        return this.getClient(
+            'natsClient',
+            () =>
+                new NatsClient({
+                    lightdashConfig: this.context.lightdashConfig,
+                }),
+        );
+    }
+
     public getEmailClient(): EmailClient {
         return this.getClient(
             'emailClient',
@@ -162,6 +203,7 @@ export class ClientRepository
                     lightdashConfig: this.context.lightdashConfig,
                     analytics: this.context.lightdashAnalytics,
                     schedulerModel: this.models.getSchedulerModel(),
+                    featureFlagModel: this.models.getFeatureFlagModel(),
                 }),
         );
     }
@@ -190,6 +232,21 @@ export class ClientRepository
                     lightdashConfig: this.context.lightdashConfig,
                 }),
         );
+    }
+
+    public getPreAggregateResultsFileStorageClient(): S3ResultsFileStorageClient {
+        return this.getClient(
+            'preAggregateResultsFileStorageClient',
+            () =>
+                new S3ResultsFileStorageClient({
+                    lightdashConfig: this.context.lightdashConfig,
+                    s3Config: this.context.lightdashConfig.preAggregates.s3,
+                }),
+        );
+    }
+
+    public getGoogleChatClient(): GoogleChatClient {
+        return this.getClient('googleChatClient', () => new GoogleChatClient());
     }
 
     public getMsTeamsClient(): MicrosoftTeamsClient {

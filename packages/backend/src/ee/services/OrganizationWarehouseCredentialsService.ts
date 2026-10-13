@@ -14,14 +14,13 @@ import {
 } from '@lightdash/common';
 import { LightdashAnalytics } from '../../analytics/LightdashAnalytics';
 import { OrganizationWarehouseCredentialsModel } from '../../models/OrganizationWarehouseCredentialsModel';
-import { UserModel } from '../../models/UserModel';
+import { UserOAuthGrantsModel } from '../../models/UserOAuthGrantsModel';
 import { BaseService } from '../../services/BaseService';
-import { UserService } from '../../services/UserService';
 
 type OrganizationWarehouseCredentialsServiceArguments = {
     analytics: LightdashAnalytics;
     organizationWarehouseCredentialsModel: OrganizationWarehouseCredentialsModel;
-    userModel: UserModel;
+    userOAuthGrantsModel: UserOAuthGrantsModel;
 };
 
 export class OrganizationWarehouseCredentialsService extends BaseService {
@@ -29,28 +28,28 @@ export class OrganizationWarehouseCredentialsService extends BaseService {
 
     private readonly organizationWarehouseCredentialsModel: OrganizationWarehouseCredentialsModel;
 
-    private readonly userModel: UserModel;
+    private readonly userOAuthGrantsModel: UserOAuthGrantsModel;
 
     constructor({
         analytics,
         organizationWarehouseCredentialsModel,
-        userModel,
+        userOAuthGrantsModel,
     }: OrganizationWarehouseCredentialsServiceArguments) {
         super();
         this.analytics = analytics;
         this.organizationWarehouseCredentialsModel =
             organizationWarehouseCredentialsModel;
-        this.userModel = userModel;
+        this.userOAuthGrantsModel = userOAuthGrantsModel;
     }
 
-    // eslint-disable-next-line class-methods-use-this
     private canManage(account: Account) {
+        const auditedAbility = this.createAuditedAbility(account);
         const { organizationUuid } = account.organization;
         if (!organizationUuid) {
             throw new ForbiddenError('User must be in an organization');
         }
         if (
-            account.user.ability.cannot(
+            auditedAbility.cannot(
                 'manage',
                 subject('OrganizationWarehouseCredentials', {
                     organizationUuid,
@@ -81,13 +80,14 @@ export class OrganizationWarehouseCredentialsService extends BaseService {
     async getAllSummaries(
         account: Account,
     ): Promise<OrganizationWarehouseCredentialsSummary[]> {
+        const auditedAbility = this.createAuditedAbility(account);
         const { organizationUuid } = account.organization;
         if (!organizationUuid) {
             throw new ForbiddenError('User must be in an organization');
         }
 
         if (
-            account.user.ability.cannot(
+            auditedAbility.cannot(
                 'view',
                 subject('OrganizationWarehouseCredentials', {
                     organizationUuid,
@@ -136,7 +136,7 @@ export class OrganizationWarehouseCredentialsService extends BaseService {
         return credentials;
     }
 
-    /* 
+    /*
     For SSO auth (like snowflake), we need to fetch the refresh token from the user model
     and store it in the organization warehouse credentials model.
     This is used to generate new access tokens on ProjectService.refreshCredentials
@@ -154,10 +154,11 @@ export class OrganizationWarehouseCredentialsService extends BaseService {
             data.credentials.authenticationType ===
                 SnowflakeAuthenticationType.SSO
         ) {
-            const refreshToken = await this.userModel.getRefreshToken(
-                userUuid,
-                OpenIdIdentityIssuerType.SNOWFLAKE,
-            );
+            const refreshToken =
+                await this.userOAuthGrantsModel.getRefreshToken(
+                    userUuid,
+                    OpenIdIdentityIssuerType.SNOWFLAKE,
+                );
             // We save the refresh token, so we can use it to generate new access tokens on ProjectService.refreshCredentials
             return {
                 ...data,

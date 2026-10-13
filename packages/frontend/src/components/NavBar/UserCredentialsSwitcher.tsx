@@ -1,4 +1,5 @@
-import { ActionIcon, getDefaultZIndex, Menu, Text } from '@mantine-8/core';
+import { allowsOptionalUserCredentials } from '@lightdash/common';
+import { Button, getDefaultZIndex, Menu, Text } from '@mantine/core';
 import { IconCheck, IconDatabaseCog, IconPlus } from '@tabler/icons-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
@@ -11,18 +12,15 @@ import {
 } from '../../hooks/userWarehouseCredentials/useProjectUserWarehouseCredentialsPreference';
 import { useProjectUserWarehouseCredentials } from '../../hooks/userWarehouseCredentials/useUserWarehouseCredentials';
 import useApp from '../../providers/App/useApp';
+import MantineIcon from '../common/MantineIcon';
 import { getWarehouseLabel } from '../ProjectConnection/ProjectConnectFlow/utils';
 import { CreateCredentialsModal } from '../UserSettings/MyWarehouseConnectionsPanel/CreateCredentialsModal';
-import MantineIcon from '../common/MantineIcon';
-
-const routesThatNeedWarehouseCredentials = [
-    '/projects/:projectUuid/tables/:tableId',
-    '/projects/:projectUuid/saved/:savedQueryUuid/:mode?',
-    '/projects/:projectUuid/dashboards/:dashboardUuid/:mode?',
-    '/projects/:projectUuid/sqlRunner',
-];
+import AppColorSchemeScope from './AppColorSchemeScope';
+import { useNavBarMenuProps } from './NavBarPortalContext';
+import { routesThatNeedWarehouseCredentials } from './routesThatNeedWarehouseCredentials';
 
 const UserCredentialsSwitcher = () => {
+    const menuProps = useNavBarMenuProps();
     const { user } = useApp();
     const location = useLocation();
     const [showCreateModalOnPageLoad, setShowCreateModalOnPageLoad] =
@@ -68,6 +66,17 @@ const UserCredentialsSwitcher = () => {
 
                 if (query.state.error) {
                     const error = query.state.error as any;
+                    // Re-open the credentials modal whenever a query fails
+                    // because the user has no warehouse credentials
+                    if (
+                        error?.error?.name ===
+                            'MissingWarehouseCredentialsError' &&
+                        activeProject?.warehouseConnection
+                            ?.requireUserCredentials
+                    ) {
+                        setShowCreateModalOnPageLoad(true);
+                        setIsCreatingCredentials(true);
+                    }
                     // Check if this is a SnowflakeTokenError and we have a Snowflake project
                     if (
                         error?.error?.name === 'SnowflakeTokenError' &&
@@ -77,7 +86,39 @@ const UserCredentialsSwitcher = () => {
                             ?.requireUserCredentials
                     ) {
                         console.info('Triggering reauth modal for Snowflake');
-                        // Trigger the reauth modal
+                        setShowCreateModalOnPageLoad(true);
+                        setIsCreatingCredentials(true);
+                    }
+                    if (
+                        error?.error?.name === 'DatabricksTokenError' &&
+                        activeProject?.warehouseConnection?.type ===
+                            'databricks' &&
+                        activeProject?.warehouseConnection
+                            ?.requireUserCredentials
+                    ) {
+                        console.info('Triggering reauth modal for Databricks');
+                        setShowCreateModalOnPageLoad(true);
+                        setIsCreatingCredentials(true);
+                    }
+                    if (
+                        error?.error?.name === 'BigqueryTokenError' &&
+                        activeProject?.warehouseConnection?.type ===
+                            'bigquery' &&
+                        activeProject?.warehouseConnection
+                            ?.requireUserCredentials
+                    ) {
+                        console.info('Triggering reauth modal for BigQuery');
+                        setShowCreateModalOnPageLoad(true);
+                        setIsCreatingCredentials(true);
+                    }
+                    if (
+                        error?.error?.name === 'RedshiftIamTokenError' &&
+                        activeProject?.warehouseConnection?.type ===
+                            'redshift' &&
+                        activeProject?.warehouseConnection
+                            ?.requireUserCredentials
+                    ) {
+                        console.info('Triggering reauth modal for Redshift');
                         setShowCreateModalOnPageLoad(true);
                         setIsCreatingCredentials(true);
                     }
@@ -116,12 +157,20 @@ const UserCredentialsSwitcher = () => {
         compatibleCredentials,
     ]);
 
+    // Show the switcher when personal credentials are mandatory, or when they
+    // are optional for this warehouse type and the user already has some
+    const isSwitcherVisible =
+        activeProject?.warehouseConnection?.requireUserCredentials ||
+        (allowsOptionalUserCredentials(activeProject?.warehouseConnection) &&
+            !!compatibleCredentials?.length);
+
     if (
         isLoadingCredentials ||
         isLoadingActiveProject ||
         isLoadingActiveProjectUuid ||
         !activeProjectUuid ||
-        !activeProject?.warehouseConnection?.requireUserCredentials
+        !activeProject ||
+        !isSwitcherVisible
     ) {
         return null;
     }
@@ -129,21 +178,23 @@ const UserCredentialsSwitcher = () => {
     return (
         <>
             <Menu
-                withArrow
-                shadow="lg"
                 position="bottom-end"
                 arrowOffset={16}
                 offset={-2}
                 zIndex={getDefaultZIndex('max')}
-                portalProps={{ target: '#navbar-header' }}
+                {...menuProps}
             >
                 <Menu.Target>
-                    <ActionIcon size="sm" pos="relative">
+                    <Button
+                        aria-label="Warehouse credentials"
+                        variant="default"
+                        size="xs"
+                    >
                         <MantineIcon
-                            data-testid="tile-icon-more"
                             icon={IconDatabaseCog}
+                            color="light-dark(var(--mantine-color-blue-6), var(--mantine-color-blue-4))"
                         />
-                    </ActionIcon>
+                    </Button>
                 </Menu.Target>
 
                 <Menu.Dropdown>
@@ -178,40 +229,44 @@ const UserCredentialsSwitcher = () => {
                 </Menu.Dropdown>
             </Menu>
             {isCreatingCredentials && (
-                <CreateCredentialsModal
-                    opened={isCreatingCredentials}
-                    title={
-                        showCreateModalOnPageLoad
-                            ? `Login to ${getWarehouseLabel(
-                                  activeProject.warehouseConnection?.type,
-                              )}`
-                            : undefined
-                    }
-                    description={
-                        showCreateModalOnPageLoad ? (
-                            <Text>
-                                The admin of your organization "
-                                {user.data?.organizationName}" requires that you
-                                login to{' '}
-                                {getWarehouseLabel(
-                                    activeProject.warehouseConnection?.type,
-                                )}{' '}
-                                to continue.
-                            </Text>
-                        ) : undefined
-                    }
-                    nameValue={
-                        showCreateModalOnPageLoad ? 'Default' : undefined
-                    }
-                    warehouseType={activeProject.warehouseConnection?.type}
-                    onSuccess={(data) => {
-                        mutate({
-                            projectUuid: activeProjectUuid,
-                            userWarehouseCredentialsUuid: data.uuid,
-                        });
-                    }}
-                    onClose={() => setIsCreatingCredentials(false)}
-                />
+                <AppColorSchemeScope>
+                    <CreateCredentialsModal
+                        opened={isCreatingCredentials}
+                        title={
+                            showCreateModalOnPageLoad
+                                ? `Login to ${getWarehouseLabel(
+                                      activeProject.warehouseConnection?.type,
+                                  )}`
+                                : undefined
+                        }
+                        description={
+                            showCreateModalOnPageLoad ? (
+                                <Text>
+                                    The admin of your organization "
+                                    {user.data?.organizationName}" requires that
+                                    you login to{' '}
+                                    {getWarehouseLabel(
+                                        activeProject.warehouseConnection?.type,
+                                    )}{' '}
+                                    to continue.
+                                </Text>
+                            ) : undefined
+                        }
+                        nameValue={
+                            showCreateModalOnPageLoad ? 'Default' : undefined
+                        }
+                        warehouseType={activeProject.warehouseConnection?.type}
+                        projectUuid={activeProjectUuid}
+                        projectName={activeProject.name}
+                        onSuccess={(data) => {
+                            mutate({
+                                projectUuid: activeProjectUuid,
+                                userWarehouseCredentialsUuid: data.uuid,
+                            });
+                        }}
+                        onClose={() => setIsCreatingCredentials(false)}
+                    />
+                </AppColorSchemeScope>
             )}
         </>
     );

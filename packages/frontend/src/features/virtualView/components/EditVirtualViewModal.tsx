@@ -1,9 +1,9 @@
-import { type Explore } from '@lightdash/common';
-import { Button, Center, Loader, Modal, Stack, Text } from '@mantine-8/core';
+import { ProjectType, type Explore } from '@lightdash/common';
+import { Button, Center, Loader, Modal, Stack, Text } from '@mantine/core';
 import { IconAlertCircle } from '@tabler/icons-react';
 import {
-    Suspense,
     lazy,
+    Suspense,
     useCallback,
     useState,
     useTransition,
@@ -14,11 +14,18 @@ import MantineModal, {
     type MantineModalProps,
 } from '../../../components/common/MantineModal';
 import {
+    BANNER_HEIGHT,
+    NAVBAR_HEIGHT,
+} from '../../../components/common/Page/constants';
+import {
     explorerActions,
     selectTableName,
     useExplorerDispatch,
     useExplorerSelector,
 } from '../../../features/explorer/store';
+import { useActiveProjectUuid } from '../../../hooks/useActiveProject';
+import { useProject } from '../../../hooks/useProject';
+import { useImpersonation } from '../../../hooks/user/useImpersonation';
 import useSearchParams from '../../../hooks/useSearchParams';
 import { defaultState } from '../../../providers/Explorer/defaultState';
 
@@ -41,6 +48,14 @@ export const EditVirtualViewModal: FC<Props> = ({
     const dispatch = useExplorerDispatch();
     const navigate = useNavigate();
     const tableName = useExplorerSelector(selectTableName);
+
+    const { activeProjectUuid } = useActiveProjectUuid();
+    const { data: project } = useProject(activeProjectUuid);
+    const isCurrentProjectPreview = project?.type === ProjectType.PREVIEW;
+    const { isImpersonating } = useImpersonation();
+    const navbarHeight =
+        NAVBAR_HEIGHT +
+        (isCurrentProjectPreview || isImpersonating ? BANNER_HEIGHT : 0);
 
     const [modalStep, setModalStep] = useState<
         'unsavedChanges' | 'editVirtualView' | undefined
@@ -69,12 +84,15 @@ export const EditVirtualViewModal: FC<Props> = ({
             <MantineModal
                 opened={opened}
                 onClose={onClose}
+                role="alertdialog"
                 title="You have unsaved changes"
                 icon={IconAlertCircle}
                 description="Are you sure you want to leave this page? Changes you've made to your query will not be saved."
                 actions={
                     <Button
                         color="red"
+                        data-tour-anchor="virtual-view-discard"
+                        data-tour-hint="Discard and continue"
                         onClick={() => {
                             startTransition(() => {
                                 handleClearQuery();
@@ -96,12 +114,12 @@ export const EditVirtualViewModal: FC<Props> = ({
             onClose={handleClose}
             size="97vw"
             centered={false}
-            yOffset="3vh"
+            yOffset={navbarHeight + 10}
             xOffset="2vw"
             closeOnClickOutside={false}
         >
             <Modal.Overlay />
-            <Modal.Content>
+            <Modal.Content data-tour-anchor="virtual-view-editor">
                 <Modal.Body p={0}>
                     <Suspense
                         fallback={
@@ -119,6 +137,8 @@ export const EditVirtualViewModal: FC<Props> = ({
                                 name: explore.name,
                                 label: explore.label,
                                 sql: explore.tables[activeTableName].sqlTable,
+                                savedParameterValues:
+                                    explore.savedParameterValues,
                                 onCloseEditVirtualView: onClose,
                             }}
                         />

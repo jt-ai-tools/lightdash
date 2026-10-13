@@ -1,4 +1,4 @@
-import { Box, Loader, Stack, Text, type StackProps } from '@mantine-8/core';
+import { Box, Loader, Stack, Text, type StackProps } from '@mantine/core';
 import { type FC, type ReactNode } from 'react';
 import MantineIcon, { type MantineIconProps } from '../MantineIcon';
 import classes from './SuboptimalState.module.css';
@@ -33,7 +33,10 @@ const SuboptimalState: FC<Props> = ({
             className={adaptive ? classes.container : undefined}
             style={{
                 alignItems: 'center',
-                ...rest?.style,
+                ...(typeof rest?.style === 'object' &&
+                !Array.isArray(rest.style)
+                    ? rest.style
+                    : {}),
             }}
         >
             {loading && (
@@ -65,6 +68,7 @@ const SuboptimalState: FC<Props> = ({
             {description && (
                 <Box c="dimmed" fz="xs" maw={400} mt={title ? -10 : 0}>
                     <Text
+                        component="div"
                         size="xs"
                         className={adaptive ? classes.description : undefined}
                         style={

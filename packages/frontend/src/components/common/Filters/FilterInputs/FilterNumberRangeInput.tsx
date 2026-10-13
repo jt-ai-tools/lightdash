@@ -2,7 +2,9 @@ import { Group, Stack, Text, type TextInputProps } from '@mantine/core';
 import isNil from 'lodash/isNil';
 import { type FC } from 'react';
 import z from 'zod';
+import { useUiStrings } from '../../../../ee/providers/Embed/useUiStrings';
 import FilterNumberInput from './FilterNumberInput';
+import styles from './FilterNumberRangeInput.module.css';
 
 interface Props extends Omit<TextInputProps, 'type' | 'value' | 'onChange'> {
     value?: unknown[];
@@ -14,16 +16,16 @@ const numberRangeSchema = z
     .superRefine(([min, max], ctx) => {
         if (isNil(min) || isNil(max)) {
             ctx.addIssue({
-                code: z.ZodIssueCode.custom,
-                message: 'Both values are required',
+                code: 'custom',
+                message: 'bothValuesRequired',
                 fatal: true,
             });
             return z.NEVER;
         }
         if (min > max) {
             ctx.addIssue({
-                code: z.ZodIssueCode.custom,
-                message: 'Minimum should be less than the maximum',
+                code: 'custom',
+                message: 'minLessThanMax',
             });
         }
     });
@@ -36,19 +38,27 @@ const FilterNumberRangeInput: FC<Props> = ({
     autoFocus,
     ...rest
 }) => {
+    const getUiString = useUiStrings();
     const validationResult = numberRangeSchema.safeParse(value);
-    const errorMessage = validationResult.error
-        ? validationResult.error.issues[0].message // only show one issue at a time
+    // only show one issue at a time; schema messages are UI-string key suffixes
+    const errorId = validationResult.error
+        ? validationResult.error.issues[0].message
         : undefined;
+    const errorMessage =
+        errorId === 'bothValuesRequired'
+            ? getUiString('filters.inputs.bothValuesRequired')
+            : errorId === 'minLessThanMax'
+              ? getUiString('filters.inputs.minLessThanMax')
+              : errorId;
 
     return (
-        <Stack spacing={2} w="100%">
-            <Group noWrap align="start" spacing="xs">
+        <Stack gap={2} w="100%">
+            <Group wrap="nowrap" align="start" gap="xs">
                 <FilterNumberInput
                     error={!!errorMessage}
                     disabled={disabled}
-                    autoFocus={true}
-                    placeholder="Min value"
+                    data-autofocus={autoFocus || undefined}
+                    placeholder={getUiString('filters.inputs.minValue')}
                     {...rest}
                     value={value?.[0]}
                     onChange={(newValue) => {
@@ -56,19 +66,14 @@ const FilterNumberRangeInput: FC<Props> = ({
                     }}
                 />
 
-                <Text
-                    color="dimmed"
-                    mt={7}
-                    sx={{ whiteSpace: 'nowrap' }}
-                    size="xs"
-                >
+                <Text c="dimmed" mt={7} className={styles.noWrap} fz="xs">
                     –
                 </Text>
 
                 <FilterNumberInput
                     error={!!errorMessage}
                     disabled={disabled}
-                    placeholder="Max value"
+                    placeholder={getUiString('filters.inputs.maxValue')}
                     {...rest}
                     value={value?.[1]}
                     onChange={(newValue) => {
@@ -77,7 +82,7 @@ const FilterNumberRangeInput: FC<Props> = ({
                 />
             </Group>
             {errorMessage && (
-                <Text color="red" size="xs">
+                <Text c="red" fz="xs">
                     {errorMessage}
                 </Text>
             )}

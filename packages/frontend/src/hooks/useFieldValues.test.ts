@@ -1,0 +1,647 @@
+import {
+    DimensionType,
+    FieldType,
+    FilterOperator,
+    QueryHistoryStatus,
+    type AndFilterGroup,
+    type FilterableItem,
+    WarehouseQueryError,
+} from '@lightdash/common';
+import { waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { lightdashApi } from '../api';
+import useEmbed from '../ee/providers/Embed/useEmbed';
+import { renderHookWithProviders } from '../testing/testUtils';
+import {
+    getFieldValuesAsync,
+    MAX_POLL_ATTEMPTS,
+    pollForFieldValueResults,
+    useFieldValues,
+} from './useFieldValues';
+
+vi.mock('../api', () => ({
+    lightdashApi: vi.fn(),
+}));
+
+vi.mock('../ee/providers/Embed/useEmbed', () => ({
+    default: vi.fn(() => ({ embedToken: undefined })),
+}));
+
+vi.mock('./useServerOrClientFeatureFlag', () => ({
+    useServerFeatureFlag: vi.fn(() => ({ data: { enabled: false } })),
+}));
+
+vi.mock('./useSessionTimezone', () => ({
+    useSessionTimezone: vi.fn(() => null),
+}));
+
+describe('pollForFieldValueResults', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('returns results immediately when status is READY', async () => {
+        const readyResult = {
+            status: QueryHistoryStatus.READY,
+            queryUuid: 'test-uuid',
+            rows: [],
+            columns: {},
+            metadata: { performance: {} },
+            pivotDetails: null,
+        };
+
+        vi.mocked(lightdashApi).mockResolvedValueOnce(readyResult as never);
+
+        const result = await pollForFieldValueResults(
+            'project-uuid',
+            'query-uuid',
+        );
+
+        expect(result).toEqual(readyResult);
+        expect(lightdashApi).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns error results without retrying', async () => {
+        const errorResult = {
+            status: QueryHistoryStatus.ERROR,
+            queryUuid: 'test-uuid',
+            error: 'Something went wrong',
+        };
+
+        vi.mocked(lightdashApi).mockResolvedValueOnce(errorResult as never);
+
+        const result = await pollForFieldValueResults(
+            'project-uuid',
+            'query-uuid',
+        );
+
+        expect(result).toEqual(errorResult);
+        expect(lightdashApi).toHaveBeenCalledTimes(1);
+    });
+
+    it('polls until READY with backoff', async () => {
+        const pendingResult = {
+            status: QueryHistoryStatus.PENDING,
+            queryUuid: 'test-uuid',
+        };
+        const readyResult = {
+            status: QueryHistoryStatus.READY,
+            queryUuid: 'test-uuid',
+            rows: [
+                {
+                    orders_status: {
+                        value: { raw: 'completed', formatted: 'completed' },
+                    },
+                },
+            ],
+            columns: {},
+            metadata: { performance: {} },
+            pivotDetails: null,
+        };
+
+        vi.mocked(lightdashApi)
+            .mockResolvedValueOnce(pendingResult as never)
+            .mockResolvedValueOnce(pendingResult as never)
+            .mockResolvedValueOnce(readyResult as never);
+
+        const pollPromise = pollForFieldValueResults(
+            'project-uuid',
+            'query-uuid',
+        );
+
+        // Advance through the two backoff delays (250ms, 500ms)
+        await vi.advanceTimersByTimeAsync(250);
+        await vi.advanceTimersByTimeAsync(500);
+
+        const result = await pollPromise;
+
+        expect(result).toEqual(readyResult);
+        expect(lightdashApi).toHaveBeenCalledTimes(3);
+    });
+
+    it('throws after MAX_POLL_ATTEMPTS', async () => {
+        const pendingResult = {
+            status: QueryHistoryStatus.PENDING,
+            queryUuid: 'test-uuid',
+        };
+
+        vi.mocked(lightdashApi).mockResolvedValue(pendingResult as never);
+
+        // Catch the rejection early to prevent unhandled rejection noise
+        const pollPromise = pollForFieldValueResults(
+            'project-uuid',
+            'query-uuid',
+        ).catch((e) => e);
+
+        // Advance timers enough for all attempts (backoff caps at 2s)
+        for (let i = 0; i < MAX_POLL_ATTEMPTS + 5; i++) {
+            await vi.advanceTimersByTimeAsync(2000);
+        }
+
+        const error = await pollPromise;
+        expect(error).toBeInstanceOf(WarehouseQueryError);
+        expect((error as Error).message).toBe('Field value search timed out.');
+
+        expect(lightdashApi).toHaveBeenCalledTimes(MAX_POLL_ATTEMPTS);
+    });
+});
+
+describe('getFieldValuesAsync', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    const executeResult = {
+        queryUuid: 'query-uuid',
+        cacheMetadata: { cacheHit: false },
+    };
+
+    it('maps rows using the results column key when the backend rewrites the fieldId', async () => {
+        // Aliased joins resolve to the original explore's field, so rows come
+        // back keyed by the rewritten id (e.g. generated_b_region instead of
+        // the requested join_1_region)
+        const readyResult = {
+            status: QueryHistoryStatus.READY,
+            queryUuid: 'query-uuid',
+            rows: [
+                {
+                    generated_b_region: {
+                        value: { raw: 'Agder', formatted: 'Agder' },
+                    },
+                },
+                {
+                    generated_b_region: {
+                        value: { raw: 'Alsace', formatted: 'Alsace' },
+                    },
+                },
+            ],
+            columns: {
+                generated_b_region: {
+                    type: 'string',
+                    reference: 'generated_b_region',
+                },
+            },
+            metadata: { performance: {} },
+            pivotDetails: null,
+        };
+
+        vi.mocked(lightdashApi)
+            .mockResolvedValueOnce(executeResult as never)
+            .mockResolvedValueOnce(readyResult as never);
+
+        const result = await getFieldValuesAsync(
+            'project-uuid',
+            'join_1',
+            'join_1_region',
+            '',
+            false,
+            undefined,
+        );
+
+        expect(result.results).toEqual(['Agder', 'Alsace']);
+    });
+
+    it('falls back to the requested fieldId when columns are missing', async () => {
+        const readyResult = {
+            status: QueryHistoryStatus.READY,
+            queryUuid: 'query-uuid',
+            rows: [
+                {
+                    orders_status: {
+                        value: { raw: 'completed', formatted: 'completed' },
+                    },
+                },
+            ],
+            columns: {},
+            metadata: { performance: {} },
+            pivotDetails: null,
+        };
+
+        vi.mocked(lightdashApi)
+            .mockResolvedValueOnce(executeResult as never)
+            .mockResolvedValueOnce(readyResult as never);
+
+        const result = await getFieldValuesAsync(
+            'project-uuid',
+            'orders',
+            'orders_status',
+            '',
+            false,
+            undefined,
+        );
+
+        expect(result.results).toEqual(['completed']);
+    });
+
+    it('builds resultsWithLabels from the value and label columns and dedups by value', async () => {
+        const executeResultWithLabel = {
+            queryUuid: 'query-uuid',
+            cacheMetadata: { cacheHit: false },
+            valueFieldId: 'users_user_id',
+            labelFieldId: 'users_user_name',
+        };
+        const readyResult = {
+            status: QueryHistoryStatus.READY,
+            queryUuid: 'query-uuid',
+            rows: [
+                {
+                    users_user_id: { value: { raw: 'u1', formatted: 'u1' } },
+                    users_user_name: {
+                        value: { raw: 'Alice', formatted: 'Alice' },
+                    },
+                },
+                {
+                    users_user_id: { value: { raw: 'u1', formatted: 'u1' } },
+                    users_user_name: {
+                        value: { raw: 'Alice dup', formatted: 'Alice dup' },
+                    },
+                },
+                {
+                    users_user_id: { value: { raw: 'u2', formatted: 'u2' } },
+                    users_user_name: { value: { raw: null, formatted: '' } },
+                },
+            ],
+            columns: {},
+            metadata: { performance: {} },
+            pivotDetails: null,
+        };
+
+        vi.mocked(lightdashApi)
+            .mockResolvedValueOnce(executeResultWithLabel as never)
+            .mockResolvedValueOnce(readyResult as never);
+
+        const result = await getFieldValuesAsync(
+            'project-uuid',
+            'users',
+            'users_user_id',
+            '',
+            false,
+            undefined,
+        );
+
+        expect(result.results).toEqual(['u1', 'u2']);
+        expect(result.resultsWithLabels).toEqual([
+            { value: 'u1', label: 'Alice' },
+            { value: 'u2', label: 'u2' },
+        ]);
+    });
+});
+
+describe('useFieldValues', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.mocked(lightdashApi).mockReset();
+    });
+
+    const fieldWithStaticAutocomplete: FilterableItem = {
+        name: 'status',
+        type: DimensionType.STRING,
+        table: 'orders',
+        tableLabel: 'Orders',
+        label: 'Status',
+        fieldType: FieldType.DIMENSION,
+        sql: '${TABLE}.status',
+        hidden: false,
+        filterAutocomplete: {
+            values: [
+                { value: 'active', label: 'Active customer' },
+                { value: 'trial', label: 'Trial account' },
+            ],
+            fetchFromWarehouse: false,
+        },
+    };
+
+    const fieldWithWarehouseAutocomplete: FilterableItem = {
+        ...fieldWithStaticAutocomplete,
+        filterAutocomplete: {
+            values: [
+                { value: 'active', label: 'Active customer' },
+                { value: 'trial', label: 'Trial account' },
+            ],
+            fetchFromWarehouse: true,
+        },
+    };
+
+    const warehouseField: FilterableItem = {
+        ...fieldWithStaticAutocomplete,
+        filterAutocomplete: { fetchFromWarehouse: true },
+    };
+
+    const filtersForCountry = (country: string): AndFilterGroup => ({
+        id: 'active-filters',
+        and: [
+            {
+                id: 'country-filter',
+                target: { fieldId: 'orders_country' },
+                operator: FilterOperator.EQUALS,
+                values: [country],
+            },
+        ],
+    });
+
+    it.each([filtersForCountry('France'), undefined])(
+        'clears retained suggestions immediately when active filters change to %j',
+        async (nextFilters) => {
+            vi.mocked(lightdashApi).mockResolvedValueOnce({
+                search: '',
+                results: ['London'],
+                cached: false,
+                refreshedAt: new Date(),
+            });
+            vi.mocked(lightdashApi).mockRejectedValueOnce(
+                new Error('Search failed'),
+            );
+
+            const { result, rerender } = renderHookWithProviders(
+                (filters: AndFilterGroup | undefined) =>
+                    useFieldValues(
+                        '',
+                        [],
+                        'project-uuid',
+                        warehouseField,
+                        undefined,
+                        filters,
+                        false,
+                        false,
+                        { retry: false },
+                    ),
+                undefined,
+                { initialProps: filtersForCountry('UK') },
+            );
+
+            await waitFor(() => {
+                expect(result.current.results).toEqual([{ value: 'London' }]);
+            });
+
+            rerender(nextFilters);
+
+            expect(result.current.results).toEqual([]);
+            await waitFor(() => {
+                expect(result.current.isError).toBe(true);
+            });
+            expect(result.current.results).toEqual([]);
+        },
+    );
+
+    it('preserves suggestions when only the filter group wrapper changes', async () => {
+        vi.mocked(lightdashApi).mockResolvedValue({
+            search: '',
+            results: ['London'],
+            cached: false,
+            refreshedAt: new Date(),
+        });
+        const { result, rerender } = renderHookWithProviders(
+            (filters: AndFilterGroup) =>
+                useFieldValues(
+                    '',
+                    [],
+                    'project-uuid',
+                    warehouseField,
+                    undefined,
+                    filters,
+                    false,
+                ),
+            undefined,
+            { initialProps: filtersForCountry('UK') },
+        );
+        await waitFor(() => {
+            expect(result.current.results).toEqual([{ value: 'London' }]);
+        });
+
+        rerender({ ...filtersForCountry('UK'), id: 'new-wrapper-id' });
+
+        expect(result.current.results).toEqual([{ value: 'London' }]);
+        expect(lightdashApi).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps autocomplete results independent for distinct active filters', async () => {
+        vi.mocked(lightdashApi)
+            .mockResolvedValueOnce({
+                search: '',
+                results: ['London'],
+                cached: false,
+                refreshedAt: new Date(),
+            })
+            .mockResolvedValueOnce({
+                search: '',
+                results: ['Paris'],
+                cached: false,
+                refreshedAt: new Date(),
+            });
+
+        const { result } = renderHookWithProviders(() => ({
+            uk: useFieldValues(
+                '',
+                [],
+                'project-uuid',
+                warehouseField,
+                undefined,
+                filtersForCountry('UK'),
+                false,
+            ),
+            france: useFieldValues(
+                '',
+                [],
+                'project-uuid',
+                warehouseField,
+                undefined,
+                filtersForCountry('France'),
+                false,
+            ),
+        }));
+
+        await waitFor(() => {
+            expect(result.current.uk.results).toEqual([{ value: 'London' }]);
+            expect(result.current.france.results).toEqual([{ value: 'Paris' }]);
+        });
+    });
+
+    it('avoids requesting field values when there is nothing to autocomplete', () => {
+        const fieldWithoutAutocompleteSource: FilterableItem = {
+            ...fieldWithStaticAutocomplete,
+            filterAutocomplete: {
+                fetchFromWarehouse: false,
+            },
+        };
+
+        const { result } = renderHookWithProviders(() =>
+            useFieldValues(
+                'act',
+                [],
+                'project-uuid',
+                fieldWithoutAutocompleteSource,
+                undefined,
+                undefined,
+            ),
+        );
+
+        expect(lightdashApi).not.toHaveBeenCalled();
+        expect(result.current.results).toEqual([]);
+    });
+
+    it('uses local filter autocomplete values and avoids requesting field values', () => {
+        const { result } = renderHookWithProviders(() =>
+            useFieldValues(
+                'customer',
+                [],
+                'project-uuid',
+                fieldWithStaticAutocomplete,
+                undefined,
+                undefined,
+            ),
+        );
+
+        expect(lightdashApi).not.toHaveBeenCalled();
+        expect(result.current.results).toEqual([
+            { value: 'active', label: 'Active customer' },
+        ]);
+    });
+
+    it('keeps YAML labels when suggestions or fetched results include the same raw value', async () => {
+        const staticResult = renderHookWithProviders(() =>
+            useFieldValues(
+                '',
+                ['active', 'prospect'],
+                'project-uuid',
+                fieldWithStaticAutocomplete,
+                undefined,
+                undefined,
+            ),
+        ).result;
+
+        expect(lightdashApi).not.toHaveBeenCalled();
+        expect(staticResult.current.results).toEqual([
+            { value: 'active', label: 'Active customer' },
+            { value: 'prospect' },
+            { value: 'trial', label: 'Trial account' },
+        ]);
+
+        vi.mocked(lightdashApi).mockResolvedValueOnce({
+            search: 'act',
+            results: ['active', 'prospect'],
+            cached: false,
+            refreshedAt: new Date('2026-06-29T09:00:00.000Z'),
+        } as never);
+
+        const fetchedResult = renderHookWithProviders(() =>
+            useFieldValues(
+                'act',
+                [],
+                'project-uuid',
+                fieldWithWarehouseAutocomplete,
+                undefined,
+                undefined,
+            ),
+        ).result;
+
+        await waitFor(() => {
+            expect(fetchedResult.current.results).toEqual([
+                { value: 'active', label: 'Active customer' },
+                { value: 'prospect' },
+                { value: 'trial', label: 'Trial account' },
+            ]);
+        });
+    });
+
+    it('forwards parameter values to embedded filter autocomplete', async () => {
+        vi.mocked(useEmbed).mockReturnValue({
+            embedToken: 'embed-token',
+        } as ReturnType<typeof useEmbed>);
+        vi.mocked(lightdashApi).mockResolvedValueOnce({
+            search: '',
+            results: [],
+            cached: false,
+            refreshedAt: new Date('2026-08-13T09:00:00.000Z'),
+        } as never);
+
+        renderHookWithProviders(() =>
+            useFieldValues(
+                '',
+                [],
+                'project-uuid',
+                {
+                    ...fieldWithWarehouseAutocomplete,
+                    filterAutocomplete: {
+                        values: [],
+                        fetchFromWarehouse: true,
+                    },
+                },
+                'filter-uuid',
+                undefined,
+                false,
+                false,
+                undefined,
+                { date_granularity: 'Month' },
+            ),
+        );
+
+        await waitFor(() => {
+            expect(lightdashApi).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    body: expect.stringContaining(
+                        '"parameters":{"date_granularity":"Month"}',
+                    ),
+                }),
+            );
+        });
+    });
+
+    it('uses the async field-values search for embedded dashboards', async () => {
+        vi.mocked(useEmbed).mockReturnValue({
+            embedToken: 'embed-token',
+            content: { type: 'dashboard', dashboardUuid: 'dashboard-uuid' },
+        } as unknown as ReturnType<typeof useEmbed>);
+        vi.mocked(lightdashApi)
+            .mockResolvedValueOnce({
+                queryUuid: 'query-uuid',
+                cacheMetadata: { cacheHit: false },
+                valueFieldId: 'orders_status',
+                labelFieldId: null,
+            } as never)
+            .mockResolvedValueOnce({
+                status: QueryHistoryStatus.READY,
+                rows: [
+                    {
+                        orders_status: {
+                            value: { raw: 'active', formatted: 'active' },
+                        },
+                    },
+                ],
+                columns: {
+                    orders_status: {
+                        reference: 'orders_status',
+                        type: DimensionType.STRING,
+                    },
+                },
+            } as never);
+
+        const { result } = renderHookWithProviders(() =>
+            useFieldValues(
+                '',
+                [],
+                'project-uuid',
+                warehouseField,
+                'filter-uuid',
+                undefined,
+                false,
+            ),
+        );
+
+        await waitFor(() => {
+            expect(lightdashApi).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    url: '/projects/project-uuid/query/field-values',
+                    version: 'v2',
+                }),
+            );
+        });
+        await waitFor(() => {
+            expect(result.current.results).toEqual([{ value: 'active' }]);
+        });
+    });
+});

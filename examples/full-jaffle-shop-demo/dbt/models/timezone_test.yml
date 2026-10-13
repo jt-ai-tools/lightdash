@@ -1,0 +1,119 @@
+version: 2
+
+models:
+  - name: timezone_test
+    description: >
+      Synthetic dataset for testing data timezone (warehouse session timezone)
+      behavior. 31 timestamptz events. When dataTimezone is set, DATE_TRUNC
+      boundaries shift, producing different per-bucket counts.
+
+      Rows 1-10: interior rows in Jan 15-16 2024 UTC.
+
+      Rows 11-18: boundary rows.
+        - 11 tokyo_midnight   2024-01-14 15:00Z  -> Tokyo DAY 2024-01-15
+        - 12 utc_midnight     2024-01-15 00:00Z  -> PP DAY 2024-01-14
+        - 13 dst_pre_spring   2024-03-10 06:30Z  -> NY HOUR 01:00 EST
+        - 14 dst_post_spring  2024-03-10 07:30Z  -> NY HOUR 03:00 EDT (02:00 gap)
+        - 15 dst_pre_fall     2024-11-03 05:30Z  -> NY 01:30 EDT
+        - 16 dst_post_fall    2024-11-03 06:30Z  -> NY 01:30 EST (fall-back; PG/DuckDB/Redshift same bucket as 15, CH/BQ may split)
+        - 17 year_boundary    2024-01-01 00:00Z  -> Tokyo YEAR 2024, PP YEAR 2023
+        - 18 month_boundary   2024-01-31 15:00Z  -> Tokyo MONTH 2024-02
+
+      Rows 19-31: monthly_dst series — one row per month, Jan 2024 → Jan 2025,
+      placed at noon America/New_York. DATE_TRUNC(month) in NYC produces a
+      continuous monthly axis that crosses both DST transitions (Mar 10 spring
+      forward, Nov 3 fall back). Used to exercise the cartesian category date
+      axis snap for non-UTC DST timezones.
+
+      Rows 32-33: dst_gap_wall_clock — the naive wall clock 2024-03-10 02:30
+      (row 32) does not exist in America/New_York (spring-forward gap), so
+      converting it maps past the real post-gap row 33 (03:00 EDT = 07:00Z).
+      Exercises operand-side MIN/MAX conversion: over rows 32-33,
+      MAX(convert(x)) = row 32's mapped instant while convert(MAX(x)) = 07:00Z
+      — the two placements disagree.
+    config:
+      # Delta gates TIMESTAMP_NTZ behind a table feature; non-Databricks
+      # adapters ignore tblproperties.
+      tblproperties:
+        delta.feature.timestampNtz: supported
+    meta:
+      group_label: timezones
+    columns:
+      - name: event_id
+        description: Unique event identifier (1-18).
+        meta:
+          dimension:
+            type: number
+      - name: event_timestamp
+        description: >
+          Timezone-aware event timestamp (timestamptz).
+
+          Interior-rows DAY counts:
+            UTC:             Jan 15 = 6, Jan 16 = 4
+            Pacific/Pago_Pago: Jan 14 = 4, Jan 15 = 4, Jan 16 = 2
+        meta:
+          dimension:
+            type: timestamp
+            time_intervals: [
+              RAW, MILLISECOND, SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR,
+              DAY_OF_WEEK_INDEX, DAY_OF_MONTH_NUM, DAY_OF_YEAR_NUM, WEEK_NUM,
+              MONTH_NUM, QUARTER_NUM, YEAR_NUM, HOUR_OF_DAY_NUM, MINUTE_OF_HOUR_NUM,
+              DAY_OF_WEEK_NAME, MONTH_NAME, QUARTER_NAME,
+            ]
+          metrics:
+            count:
+              type: count
+              description: Total number of events
+            max_event_ts:
+              type: max
+              description: Latest event timestamp (defined metric, tz formatting test)
+      - name: event_timestamp_raw_utc
+        description: >
+          Same instants as event_timestamp, but the dimension opts out of
+          project-timezone conversion via `convert_timezone: false`. Use it
+          alongside event_timestamp to verify the per-dimension override:
+          DAY/HOUR buckets here always reflect raw UTC, regardless of the
+          project timezone.
+
+          Interior-rows DAY counts (always UTC):
+            Jan 15 = 6, Jan 16 = 4
+        meta:
+          dimension:
+            type: timestamp
+            convert_timezone: false
+            time_intervals: [
+              RAW, MILLISECOND, SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR,
+              DAY_OF_WEEK_INDEX, DAY_OF_MONTH_NUM, DAY_OF_YEAR_NUM, WEEK_NUM,
+              MONTH_NUM, QUARTER_NUM, YEAR_NUM, HOUR_OF_DAY_NUM, MINUTE_OF_HOUR_NUM,
+              DAY_OF_WEEK_NAME, MONTH_NAME, QUARTER_NAME,
+            ]
+      - name: event_timestamp_ntz
+        description: >
+          Naive (timezone-less) variant of event_timestamp — the column under
+          test for data-timezone handling. Stores the same wall clocks with the
+          zone stripped, typed per warehouse via seeds.yml: timestamp
+          (Postgres/Redshift/DuckDB/Trino/Athena), DATETIME (BigQuery),
+          TIMESTAMP_NTZ (Snowflake, Databricks, Spark). ClickHouse has no naive
+          type, so there it stays an instant (DateTime64(3)) and data-timezone
+          rebasing does not apply. Use with dataTimezone to test naive handling.
+        meta:
+          dimension:
+            type: timestamp
+            time_intervals: [
+              RAW, MILLISECOND, SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR,
+              DAY_OF_WEEK_INDEX, DAY_OF_MONTH_NUM, DAY_OF_YEAR_NUM, WEEK_NUM,
+              MONTH_NUM, QUARTER_NUM, YEAR_NUM, HOUR_OF_DAY_NUM, MINUTE_OF_HOUR_NUM,
+              DAY_OF_WEEK_NAME, MONTH_NAME, QUARTER_NAME,
+            ]
+          metrics:
+            count_ntz:
+              type: count
+              description: Total number of events (NTZ)
+      - name: category
+        description: >
+          Event classification. "early_utc" (rows 1-4, 7-8) shifts to previous
+          day in negative-offset TZs. "mid_utc" (rows 5-6, 9-10) stays put.
+          Rows 11-18 use boundary-specific values (see model description).
+        meta:
+          dimension:
+            type: string

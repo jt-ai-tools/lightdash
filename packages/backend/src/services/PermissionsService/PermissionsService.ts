@@ -1,4 +1,10 @@
-import { AnonymousAccount, ForbiddenError, OssEmbed } from '@lightdash/common';
+import {
+    AnonymousAccount,
+    assertUnreachable,
+    ForbiddenError,
+    OssEmbed,
+    type UUID,
+} from '@lightdash/common';
 import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
 import { BaseService } from '../BaseService';
 
@@ -15,8 +21,8 @@ export class PermissionsService extends BaseService {
     }
 
     private async checkEmbeddedDashboardPermission(
-        dashboardUuid: string,
-        savedChartUuid: string,
+        dashboardUuid: UUID,
+        savedChartUuid: UUID,
         embed: OssEmbed,
     ) {
         if (
@@ -42,7 +48,7 @@ export class PermissionsService extends BaseService {
     }
 
     private static checkEmbeddedChartPermissions(
-        savedChartUuid: string,
+        savedChartUuid: UUID,
         embed: OssEmbed,
     ) {
         if (
@@ -58,7 +64,7 @@ export class PermissionsService extends BaseService {
      */
     async checkEmbedPermissions(
         account: AnonymousAccount,
-        savedChartUuid: string,
+        savedChartUuid: UUID,
     ) {
         const { embed } = account;
         const { content } = account.access;
@@ -69,21 +75,96 @@ export class PermissionsService extends BaseService {
             );
         }
 
-        if (content.type === 'dashboard' && content.dashboardUuid) {
-            return this.checkEmbeddedDashboardPermission(
+        switch (content.type) {
+            case 'dashboard':
+                if (!content.dashboardUuid) {
+                    throw new ForbiddenError(
+                        'Invalid access for embed permissions',
+                    );
+                }
+                return this.checkEmbeddedDashboardPermission(
+                    content.dashboardUuid,
+                    savedChartUuid,
+                    embed,
+                );
+            case 'chart':
+                if (!content.chartUuids.includes(savedChartUuid)) {
+                    throw new ForbiddenError(
+                        `Chart ${savedChartUuid} is not authorized by this token`,
+                    );
+                }
+                return PermissionsService.checkEmbeddedChartPermissions(
+                    savedChartUuid,
+                    embed,
+                );
+            case 'dataApp':
+                throw new ForbiddenError(
+                    'Data app embeds cannot access charts',
+                );
+            case 'aiAgent':
+                throw new ForbiddenError(
+                    'AI agent embeds cannot access charts',
+                );
+            case 'metricsCatalog':
+                throw new ForbiddenError(
+                    'Metrics catalog embeds cannot access charts',
+                );
+            case 'apiAccess':
+                throw new ForbiddenError(
+                    'API access embeds cannot access charts',
+                );
+            default:
+                return assertUnreachable(
+                    content.type,
+                    'Invalid access for embed permissions',
+                );
+        }
+    }
+
+    /**
+     * Determines if the given embed account has permission to access the
+     * provided SQL chart via its parent dashboard. SQL charts are only
+     * embeddable through a dashboard tile, so chart-scoped JWTs are rejected.
+     */
+    async checkEmbedSqlChartPermissions(
+        account: AnonymousAccount,
+        savedSqlUuid: string,
+    ) {
+        const { embed } = account;
+        const { content } = account.access;
+
+        if (!embed.projectUuid) {
+            throw new ForbiddenError(
+                'Project UUID is required to check embed permissions',
+            );
+        }
+
+        if (content.type !== 'dashboard' || !content.dashboardUuid) {
+            throw new ForbiddenError(
+                'SQL charts can only be embedded via a dashboard',
+            );
+        }
+
+        if (
+            !embed.allowAllDashboards &&
+            !embed.dashboardUuids.includes(content.dashboardUuid)
+        ) {
+            throw new ForbiddenError(
+                `Dashboard ${content.dashboardUuid} is not embedded`,
+            );
+        }
+
+        const sqlChartExists =
+            await this.dashboardModel.savedSqlChartExistsInDashboard(
+                embed.projectUuid,
                 content.dashboardUuid,
-                savedChartUuid,
-                embed,
+                savedSqlUuid,
+            );
+
+        if (!sqlChartExists) {
+            throw new ForbiddenError(
+                `This SQL chart does not belong to dashboard ${content.dashboardUuid}`,
             );
         }
-
-        if (content.type === 'chart') {
-            return PermissionsService.checkEmbeddedChartPermissions(
-                savedChartUuid,
-                embed,
-            );
-        }
-
-        throw new ForbiddenError('Invalid access for embed permissions');
     }
 }

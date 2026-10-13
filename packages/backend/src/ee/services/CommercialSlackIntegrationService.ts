@@ -1,4 +1,9 @@
-import { ForbiddenError, SessionUser, SlackSettings } from '@lightdash/common';
+import {
+    Account,
+    ForbiddenError,
+    SessionUser,
+    SlackSettings,
+} from '@lightdash/common';
 import {
     SlackIntegrationService,
     SlackIntegrationServiceArguments,
@@ -18,6 +23,20 @@ export class CommercialSlackIntegrationService extends SlackIntegrationService<C
         super(rest);
 
         this.aiAgentModel = aiAgentModel;
+    }
+
+    async getSlackInstallOptions(user: SessionUser) {
+        const { slackOptions, metadata } = await super.getSlackInstallOptions(
+            user,
+        );
+
+        return {
+            slackOptions: {
+                ...slackOptions,
+                scopes: this.slackClient.getRequiredScopes(),
+            },
+            metadata,
+        };
     }
 
     async getInstallationFromOrganizationUuid(user: SessionUser) {
@@ -46,22 +65,28 @@ export class CommercialSlackIntegrationService extends SlackIntegrationService<C
             hasRequiredScopes: this.slackClient.hasRequiredScopes(
                 installation.scopes,
             ),
+            features: this.slackClient.getFeatureAvailability(
+                installation.scopes,
+            ),
             slackChannelProjectMappings:
                 installation.slackChannelProjectMappings,
             aiThreadAccessConsent: installation.aiThreadAccessConsent,
             aiRequireOAuth: installation.aiRequireOAuth,
+            aiLinksOnly: installation.aiLinksOnly,
             aiMultiAgentChannelId: installation.aiMultiAgentChannelId,
             aiMultiAgentProjectUuids: installation.aiMultiAgentProjectUuids,
+            unfurlsEnabled: installation.unfurlsEnabled,
+            aiAgentsEnabled: installation.aiAgentsEnabled,
         };
 
         return response;
     }
 
-    async deleteInstallationFromOrganizationUuid(user: SessionUser) {
-        await super.deleteInstallationFromOrganizationUuid(user);
+    async deleteInstallationFromOrganizationUuid(account: Account) {
+        await super.deleteInstallationFromOrganizationUuid(account);
 
         await this.aiAgentModel.deleteSlackIntegrations({
-            organizationUuid: user.organizationUuid!,
+            organizationUuid: account.organization.organizationUuid!,
         });
     }
 }

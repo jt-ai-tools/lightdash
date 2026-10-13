@@ -1,13 +1,5 @@
 import { ChartKind } from '@lightdash/common';
-import {
-    ActionIcon,
-    Box,
-    Center,
-    Group,
-    Paper,
-    Tooltip,
-    useMantineTheme,
-} from '@mantine/core';
+import { ActionIcon, Group, Tooltip } from '@mantine/core';
 import { memo, type FC } from 'react';
 import MantineIcon from '../common/MantineIcon';
 import { getChartIcon } from '../common/ResourceIcon/utils';
@@ -20,68 +12,27 @@ type VisualizationActionIconProps = {
 };
 
 const VisualizationActionIcon: FC<VisualizationActionIconProps> = memo(
-    ({ chartKind, label, onClick, selected }) => {
-        const { colors, colorScheme } = useMantineTheme();
-        const ICON_SELECTED_COLOR =
-            colorScheme === 'light' ? colors.violet[6] : colors.violet[2];
-        const ICON_SELECTED_BG_COLOR =
-            colorScheme === 'light' ? colors.violet[0] : colors.violet[6];
-        const ICON_UNSELECTED_COLOR = colors.ldGray[9];
-
-        return (
-            <Tooltip variant="xs" label={label} withinPortal>
-                <Box>
-                    <ActionIcon
-                        onClick={onClick}
-                        w={32}
-                        h={32}
-                        data-testid={`visualization-${chartKind}`}
-                    >
-                        <Paper
-                            display="flex"
-                            w={32}
-                            h={32}
-                            component={Center}
-                            withBorder
-                            radius="sm"
-                            shadow={selected ? 'sm' : 'none'}
-                            sx={(theme) => ({
-                                backgroundColor: selected
-                                    ? ICON_SELECTED_BG_COLOR
-                                    : theme.colors.ldGray[0],
-                                '&[data-with-border]': {
-                                    borderColor: selected
-                                        ? ICON_SELECTED_COLOR
-                                        : 'none',
-                                },
-                            })}
-                        >
-                            <MantineIcon
-                                icon={getChartIcon(chartKind)}
-                                color={
-                                    selected
-                                        ? ICON_SELECTED_COLOR
-                                        : ICON_UNSELECTED_COLOR
-                                }
-                                fill={
-                                    selected
-                                        ? ICON_SELECTED_COLOR
-                                        : ICON_UNSELECTED_COLOR
-                                }
-                                transform={
-                                    chartKind === ChartKind.HORIZONTAL_BAR
-                                        ? 'rotate(90)'
-                                        : undefined
-                                }
-                                stroke={1.5}
-                                fillOpacity={0.1}
-                            />
-                        </Paper>
-                    </ActionIcon>
-                </Box>
-            </Tooltip>
-        );
-    },
+    ({ chartKind, label, onClick, selected }) => (
+        <Tooltip label={label}>
+            <ActionIcon
+                size="lg"
+                variant={selected ? 'light' : 'subtle'}
+                aria-label={label}
+                aria-pressed={selected}
+                onClick={onClick}
+                data-testid={`visualization-${chartKind}`}
+            >
+                <MantineIcon
+                    icon={getChartIcon(chartKind)}
+                    transform={
+                        chartKind === ChartKind.HORIZONTAL_BAR
+                            ? 'rotate(90)'
+                            : undefined
+                    }
+                />
+            </ActionIcon>
+        </Tooltip>
+    ),
 );
 
 export const VisualizationSwitcher = ({
@@ -96,10 +47,11 @@ export const VisualizationSwitcher = ({
         { label: 'Bar chart', value: ChartKind.VERTICAL_BAR },
         { label: 'Line chart', value: ChartKind.LINE },
         { label: 'Pie chart', value: ChartKind.PIE },
+        { label: 'Big value', value: ChartKind.BIG_NUMBER },
     ];
 
     return (
-        <Group spacing="xs">
+        <Group gap={4}>
             {AVAILABLE_VISUALIZATIONS.map((vis) => (
                 <VisualizationActionIcon
                     key={vis.label}

@@ -1,6 +1,7 @@
 import {
     ApiErrorPayload,
     ApiSuccess,
+    assertRegisteredAccount,
     KnexPaginateArgs,
     type ApiGetProjectParametersListResults,
     type ApiGetProjectParametersResults,
@@ -21,6 +22,7 @@ import {
     Tags,
 } from '@tsoa/runtime';
 import express from 'express';
+import { toSessionUser } from '../../auth/account';
 import {
     allowApiKeyAuthentication,
     isAuthenticated,
@@ -49,6 +51,7 @@ export class ParametersController extends BaseController {
         @Query() page?: number,
         @Query() pageSize?: number,
     ): Promise<ApiSuccess<ApiGetProjectParametersListResults>> {
+        assertRegisteredAccount(req.account);
         let paginateArgs: KnexPaginateArgs | undefined;
 
         if (pageSize && page) {
@@ -61,7 +64,7 @@ export class ParametersController extends BaseController {
         const results = await this.services
             .getProjectParametersService()
             .findProjectParametersPaginated(
-                req.user!,
+                req.account,
                 projectUuid,
                 paginateArgs,
                 { search, sortBy, sortOrder },
@@ -86,9 +89,11 @@ export class ParametersController extends BaseController {
         @Request() req: express.Request,
         @Query() names?: string[],
     ): Promise<ApiSuccess<ApiGetProjectParametersResults>> {
+        // Not assertRegisteredAccount: this endpoint also serves embed (JWT)
+        // dashboards. Project-scoped authorization happens in the service.
         const parameters = await this.services
             .getProjectParametersService()
-            .findProjectParameters(projectUuid, names);
+            .findProjectParameters(req.account!, projectUuid, names);
 
         const results: ApiGetProjectParametersResults =
             parameters.reduce<ApiGetProjectParametersResults>(
@@ -125,8 +130,9 @@ export class ParametersController extends BaseController {
         @Request() req: express.Request,
         @Body() parameters: LightdashProjectConfig['parameters'],
     ): Promise<ApiSuccess<undefined>> {
+        assertRegisteredAccount(req.account);
         await this.services.getProjectService().replaceProjectParameters({
-            user: req.user!,
+            user: toSessionUser(req.account),
             projectUuid,
             parameters,
         });

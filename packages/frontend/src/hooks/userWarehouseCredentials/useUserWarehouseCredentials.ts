@@ -2,6 +2,7 @@ import {
     type ApiError,
     type UpsertUserWarehouseCredentials,
     type UserWarehouseCredentials,
+    type UserWarehouseCredentialsWithAgentStatus,
 } from '@lightdash/common';
 import {
     useMutation,
@@ -13,17 +14,20 @@ import {
 import { lightdashApi } from '../../api';
 import useToaster from '../toaster/useToaster';
 
-const getUserWarehouseCredentials = async () =>
-    lightdashApi<UserWarehouseCredentials[]>({
+export const getUserWarehouseCredentials = async () =>
+    lightdashApi<UserWarehouseCredentialsWithAgentStatus[]>({
         url: `/user/warehouseCredentials`,
         method: 'GET',
         body: undefined,
     });
 
 export const useUserWarehouseCredentials = (
-    useQueryOptions?: UseQueryOptions<UserWarehouseCredentials[], ApiError>,
+    useQueryOptions?: UseQueryOptions<
+        UserWarehouseCredentialsWithAgentStatus[],
+        ApiError
+    >,
 ) => {
-    return useQuery<UserWarehouseCredentials[], ApiError>({
+    return useQuery<UserWarehouseCredentialsWithAgentStatus[], ApiError>({
         queryKey: ['user_warehouse_credentials'],
         queryFn: getUserWarehouseCredentials,
         ...useQueryOptions,
@@ -56,6 +60,7 @@ const createUserWarehouseCredentials = async (
         url: `/user/warehouseCredentials`,
         method: 'POST',
         body: JSON.stringify(data),
+        sensitive: true,
     });
 
 export const useUserWarehouseCredentialsCreateMutation = (
@@ -78,6 +83,7 @@ export const useUserWarehouseCredentialsCreateMutation = (
             await queryClient.invalidateQueries([
                 'project_user_warehouse_credentials',
             ]);
+            await queryClient.invalidateQueries(['ai-access']);
 
             showToastSuccess({
                 title: `Success! Warehouse connection was created.`,
@@ -101,6 +107,7 @@ const updateUserWarehouseCredentials = async (
         url: `/user/warehouseCredentials/${uuid}`,
         method: 'PATCH',
         body: JSON.stringify(data),
+        sensitive: true,
     });
 
 export const useUserWarehouseCredentialsUpdateMutation = (uuid: string) => {
@@ -117,6 +124,7 @@ export const useUserWarehouseCredentialsUpdateMutation = (uuid: string) => {
                 await queryClient.invalidateQueries([
                     'project_user_warehouse_credentials',
                 ]);
+                await queryClient.invalidateQueries(['ai-access']);
 
                 showToastSuccess({
                     title: `Success! Warehouse connection was updated.`,
@@ -153,6 +161,7 @@ export const useUserWarehouseCredentialsDeleteMutation = (uuid: string) => {
                 await queryClient.invalidateQueries([
                     'project_user_warehouse_credentials',
                 ]);
+                await queryClient.invalidateQueries(['ai-access']);
 
                 showToastSuccess({
                     title: `Success! Warehouse connection was deleted.`,

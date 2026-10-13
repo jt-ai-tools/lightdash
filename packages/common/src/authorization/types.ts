@@ -5,10 +5,34 @@ export type AbilityAction =
     | 'create'
     | 'delete'
     | 'export'
+    | 'impersonate'
     | 'manage'
     | 'promote'
     | 'update'
     | 'view';
+
+export const VIEWER_EMBED_SUBJECTS = [
+    'EmbedDashboardFilters',
+    'EmbedDashboardFilterAddition',
+    'EmbedDashboardParameters',
+    'EmbedCsvExport',
+    'EmbedDashboardCsvExport',
+    'EmbedImageExport',
+    'EmbedPagePdfExport',
+    'EmbedDateZoom',
+] as const satisfies readonly CaslSubjectNames[];
+
+export const INTERACTIVE_VIEWER_EMBED_SUBJECTS = [
+    'EmbedAiAgent',
+    'EmbedAiAgentDebug',
+    'EmbedExplore',
+    'EmbedUnderlyingData',
+    'EmbedDataApps',
+] as const satisfies readonly CaslSubjectNames[];
+
+export const DEVELOPER_EMBED_SUBJECTS = [
+    'EmbedCompiledSql',
+] as const satisfies readonly CaslSubjectNames[];
 
 interface Project {
     organizationUuid: string;
@@ -20,21 +44,58 @@ interface Organization {
 }
 
 export type CaslSubjectNames =
+    | 'AgentReadDiscover'
+    | 'AgentQuery'
+    | 'AgentRawSql'
+    | 'AgentContentWrite'
+    | 'AgentDelete'
+    | 'AgentPublish'
+    | 'AgentDeployUpload'
+    | 'AgentDbtWriteback'
+    | 'AgentExport'
+    | 'AgentAdministration'
+    | 'AgentExternalTools'
     | 'AiAgent'
+    | 'AiAgentDocument'
+    | 'AiAgentSkill'
     | 'AiAgentThread'
+    | 'AiDeepResearch'
     | 'Analytics'
     | 'ChangeCsvResults'
+    | 'CompiledSql'
     | 'CompileProject'
     | 'ContentAsCode'
+    | 'ContentVerification'
+    | 'VerifiedContent'
+    | 'CustomFields'
     | 'CustomSql'
+    | 'CustomSqlTableCalculations'
+    | 'DataApp'
+    | 'DataAppDependency'
     | 'Dashboard'
+    | 'Document'
+    | 'DeployProject'
     | 'DashboardComments'
-    | 'DashboardCsv'
-    | 'DashboardImage'
-    | 'DashboardPdf'
     | 'DeletedContent'
+    | 'EmbedAiAgent'
+    | 'EmbedAiAgentDebug'
+    | 'EmbedCompiledSql'
+    | 'EmbedDashboardFilters'
+    | 'EmbedDashboardFilterAddition'
+    | 'EmbedDashboardParameters'
+    | 'EmbedCsvExport'
+    | 'EmbedDashboardCsvExport'
+    | 'EmbedImageExport'
+    | 'EmbedPagePdfExport'
+    | 'EmbedDateZoom'
+    | 'EmbedExplore'
+    | 'EmbedUnderlyingData'
+    | 'EmbedDataApps'
     | 'Explore'
+    | 'ExternalConnection'
+    | 'ExternalSource'
     | 'ExportCsv'
+    | 'GitIntegration'
     | 'GoogleSheets'
     | 'Group'
     | 'InviteLink'
@@ -42,11 +103,18 @@ export type CaslSubjectNames =
     | 'JobStatus'
     | 'MetricsTree'
     | 'Organization'
+    | 'OrganizationAiAgent'
+    | 'OrganizationColorPalette'
+    | 'OrganizationDesign'
     | 'OrganizationMemberProfile'
     | 'OrganizationWarehouseCredentials'
     | 'PersonalAccessToken'
+    | 'PreAggregation'
     | 'PinnedItems'
     | 'Project'
+    | 'ProjectHomepage'
+    | 'Roadmap'
+    | 'Learn'
     | 'SavedChart'
     | 'ScheduledDeliveries'
     | 'SemanticViewer'
@@ -56,6 +124,7 @@ export type CaslSubjectNames =
     | 'SqlRunner'
     | 'Tags'
     | 'UnderlyingData'
+    | 'User'
     | 'Validation'
     | 'VirtualView';
 

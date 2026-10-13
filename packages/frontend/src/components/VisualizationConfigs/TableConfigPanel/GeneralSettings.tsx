@@ -1,17 +1,19 @@
 import { DragDropContext, type DropResult } from '@hello-pangea/dnd';
+import { isPivotRowValue } from '@lightdash/visualization/editor';
 import { Box, Checkbox, Stack, Switch, Tooltip } from '@mantine/core';
 import { useCallback, useMemo, useState, type FC } from 'react';
 import useToaster from '../../../hooks/toaster/useToaster';
 import { isTableVisualizationConfig } from '../../LightdashVisualization/types';
 import { useVisualizationContext } from '../../LightdashVisualization/useVisualizationContext';
 import { Config } from '../common/Config';
-import ColumnConfiguration from './ColumnConfiguration';
-import DroppableItemsList from './DroppableItemsList';
+import { RowLimitControls } from '../common/RowLimitControls';
 import { MAX_PIVOTS } from './constants';
+import DroppableItemsList from './DroppableItemsList';
 
 enum DroppableIds {
     COLUMNS = 'COLUMNS',
     ROWS = 'ROWS',
+    METRICS = 'METRICS',
 }
 
 const GeneralSettings: FC = () => {
@@ -24,6 +26,7 @@ const GeneralSettings: FC = () => {
     } = useVisualizationContext();
     const [isDragging, setIsDragging] = useState<boolean>(false);
     const { showToastError } = useToaster();
+
     const { dimensions } = resultsData?.metricQuery || {
         dimensions: [] as string[],
     };
@@ -41,9 +44,7 @@ const GeneralSettings: FC = () => {
     }: { columns: string[]; rows: string[]; metrics: string[] } =
         useMemo(() => {
             const columnFields = pivotDimensions ?? [];
-            const rowsFields = [...dimensions].filter(
-                (itemId) => !pivotDimensions?.includes(itemId),
-            );
+            const rowsFields = chartConfig?.rowFieldIds ?? [];
             const metricsFields = (chartConfig?.selectedItemIds ?? [])
                 .filter((id) => ![...columnFields, ...rowsFields].includes(id))
                 .sort(
@@ -54,7 +55,7 @@ const GeneralSettings: FC = () => {
                 rows: rowsFields,
                 metrics: metricsFields,
             };
-        }, [pivotDimensions, dimensions, chartConfig, columnOrder]);
+        }, [pivotDimensions, chartConfig, columnOrder]);
 
     const handleToggleMetricsAsRows = useCallback(() => {
         if (!chartConfig) return;
@@ -88,8 +89,22 @@ const GeneralSettings: FC = () => {
             setIsDragging(false);
             if (!destination) return;
 
+            const sourceItems =
+                source.droppableId === DroppableIds.COLUMNS
+                    ? columns
+                    : source.droppableId === DroppableIds.ROWS
+                      ? rows
+                      : metrics;
+            const fieldId = sourceItems[source.index];
+            const field = resultsData?.fields?.[fieldId];
+            const isValueField = isPivotRowValue(field);
+
             if (source.droppableId !== destination.droppableId) {
-                if (destination.droppableId === DroppableIds.COLUMNS) {
+                if (
+                    destination.droppableId === DroppableIds.COLUMNS &&
+                    source.droppableId === DroppableIds.ROWS &&
+                    dimensions.includes(fieldId)
+                ) {
                     if (columns.length >= MAX_PIVOTS) {
                         showToastError({
                             title: 'Maximum number of pivots reached',
@@ -97,15 +112,18 @@ const GeneralSettings: FC = () => {
                         return;
                     }
                     // Add pivot
-                    const fieldId = rows[source.index];
                     setPivotDimensions([
                         ...columns.slice(0, destination.index),
                         fieldId,
                         ...columns.slice(destination.index),
                     ]);
-                } else {
-                    // Remove pivot
-                    const fieldId = columns[source.index];
+                    chartConfig.setRowFieldIds?.(
+                        rows.filter((key) => key !== fieldId),
+                    );
+                } else if (
+                    destination.droppableId === DroppableIds.ROWS &&
+                    source.droppableId === DroppableIds.COLUMNS
+                ) {
                     const newPivotDimensions = columns.filter(
                         (key) => key !== fieldId,
                     );
@@ -117,6 +135,36 @@ const GeneralSettings: FC = () => {
                         handleToggleMetricsAsRows();
                     }
                     setPivotDimensions(newPivotDimensions);
+                    const newRowFields = [
+                        ...rows.slice(0, destination.index),
+                        fieldId,
+                        ...rows.slice(destination.index),
+                    ];
+                    chartConfig.setRowFieldIds?.(
+                        newPivotDimensions.length > 0
+                            ? newRowFields
+                            : newRowFields.filter((rowFieldId) =>
+                                  dimensions.includes(rowFieldId),
+                              ),
+                    );
+                } else if (
+                    destination.droppableId === DroppableIds.ROWS &&
+                    source.droppableId === DroppableIds.METRICS &&
+                    isValueField
+                ) {
+                    chartConfig.setRowFieldIds?.([
+                        ...rows.slice(0, destination.index),
+                        fieldId,
+                        ...rows.slice(destination.index),
+                    ]);
+                } else if (
+                    destination.droppableId === DroppableIds.METRICS &&
+                    source.droppableId === DroppableIds.ROWS &&
+                    isValueField
+                ) {
+                    chartConfig.setRowFieldIds?.(
+                        rows.filter((key) => key !== fieldId),
+                    );
                 }
             } else if (destination.droppableId === DroppableIds.COLUMNS) {
                 // Reorder pivot
@@ -129,15 +177,27 @@ const GeneralSettings: FC = () => {
                     fieldId,
                     ...columnsWithoutReorderField.slice(destination.index),
                 ]);
+            } else if (destination.droppableId === DroppableIds.ROWS) {
+                const rowsWithoutReorderField = rows.filter(
+                    (key) => key !== fieldId,
+                );
+                chartConfig.setRowFieldIds?.([
+                    ...rowsWithoutReorderField.slice(0, destination.index),
+                    fieldId,
+                    ...rowsWithoutReorderField.slice(destination.index),
+                ]);
             }
         },
         [
             columns,
             rows,
+            metrics,
             chartConfig,
             setPivotDimensions,
             showToastError,
             handleToggleMetricsAsRows,
+            dimensions,
+            resultsData?.fields,
         ],
     );
 
@@ -145,23 +205,35 @@ const GeneralSettings: FC = () => {
 
     const {
         isPivotTableEnabled,
+        isColumnVisible,
         canUseSubtotals,
         hideRowNumbers,
-        wrapColumnTitles,
         metricsAsRows,
         setHideRowNumbers,
-        setWrapColumnTitles,
         setShowColumnCalculation,
         setShowResultsTotal,
         setShowRowCalculation,
         setShowSubtotals,
+        setShowSubtotalsExpanded,
+        setShowRowGrouping,
         setShowTableNames,
         showColumnCalculation,
         showResultsTotal,
         showRowCalculation,
         showSubtotals,
+        showSubtotalsExpanded,
+        showRowGrouping,
         showTableNames,
+        rowLimit,
+        setRowLimit,
     } = chartConfig;
+    const canUseMetricsAsRows =
+        !!isPivotTableEnabled &&
+        metrics.some(
+            (fieldId) =>
+                isColumnVisible(fieldId) &&
+                isPivotRowValue(resultsData?.fields?.[fieldId]),
+        );
 
     return (
         <Stack>
@@ -187,10 +259,37 @@ const GeneralSettings: FC = () => {
                             droppableId={DroppableIds.ROWS}
                             itemIds={rows}
                             isDragging={isDragging}
-                            disableReorder={true}
+                            disableReorder={false}
                             placeholder={
-                                'Drag dimensions into this area to group your data'
+                                'Drag dimensions, metrics, or table calculations into this area'
                             }
+                        />
+
+                        <Config.Heading>Metrics</Config.Heading>
+                        <DroppableItemsList
+                            droppableId={DroppableIds.METRICS}
+                            itemIds={metrics}
+                            placeholder={
+                                'Drag metrics or table calculations into this area'
+                            }
+                            draggableItemIds={
+                                isPivotTableEnabled
+                                    ? metrics.filter((itemId) => {
+                                          const item =
+                                              resultsData?.fields?.[itemId];
+                                          return isPivotRowValue(item);
+                                      })
+                                    : []
+                            }
+                            isDragging={isDragging}
+                            disableReorder={true}
+                            getColumnConfigurationProps={() => ({
+                                syncFreezeWith: metricsAsRows
+                                    ? metrics
+                                    : undefined,
+                                hideFreezeToggle:
+                                    !!isPivotTableEnabled && !metricsAsRows,
+                            })}
                         />
                     </Config.Section>
                 </Config>
@@ -198,22 +297,21 @@ const GeneralSettings: FC = () => {
 
             <Config.Section>
                 <Config.Section>
-                    <Config.Heading>Metrics</Config.Heading>
+                    <Config.Heading>Metric layout</Config.Heading>
                     <Tooltip
-                        disabled={!!isPivotTableEnabled && !showSubtotals}
+                        disabled={canUseMetricsAsRows}
                         label={
-                            showSubtotals
-                                ? 'Metrics as rows are not available when subtotals are enabled'
+                            isPivotTableEnabled
+                                ? 'Move a metric or table calculation back to Metrics to use this layout'
                                 : 'To use metrics as rows, you need to move a dimension to "Columns"'
                         }
                         w={300}
-                        multiline
-                        withinPortal
                         position="top-start"
                     >
                         <Box>
                             <Switch
-                                disabled={!isPivotTableEnabled || showSubtotals}
+                                size="xs"
+                                disabled={!canUseMetricsAsRows}
                                 label="Show metrics as rows"
                                 labelPosition="right"
                                 checked={metricsAsRows}
@@ -225,15 +323,10 @@ const GeneralSettings: FC = () => {
             </Config.Section>
 
             <Config.Section>
-                {metrics.map((itemId) => (
-                    <ColumnConfiguration key={itemId} fieldId={itemId} />
-                ))}
-            </Config.Section>
-
-            <Config.Section>
                 <Config.Heading>Display</Config.Heading>
 
                 <Checkbox
+                    size="xs"
                     label="Show table names"
                     checked={showTableNames}
                     onChange={() => {
@@ -241,25 +334,30 @@ const GeneralSettings: FC = () => {
                     }}
                 />
                 <Checkbox
+                    size="xs"
                     label="Show row numbers"
                     checked={!hideRowNumbers}
                     onChange={() => {
                         setHideRowNumbers(!hideRowNumbers);
                     }}
                 />
-                <Checkbox
-                    label="Wrap column titles"
-                    checked={wrapColumnTitles}
-                    onChange={() => {
-                        setWrapColumnTitles(!wrapColumnTitles);
-                    }}
-                />
             </Config.Section>
+
+            {!isPivotTableEnabled && (
+                <Config.Section>
+                    <Config.Heading>Data</Config.Heading>
+                    <RowLimitControls
+                        rowLimit={rowLimit}
+                        onRowLimitChange={setRowLimit}
+                    />
+                </Config.Section>
+            )}
 
             <Config.Section>
                 <Config.Heading>Results</Config.Heading>
                 {isPivotTableEnabled ? (
                     <Checkbox
+                        size="xs"
                         label="Show row totals"
                         checked={showRowCalculation}
                         onChange={() => {
@@ -268,6 +366,7 @@ const GeneralSettings: FC = () => {
                     />
                 ) : null}
                 <Checkbox
+                    size="xs"
                     label="Show column totals"
                     checked={showColumnCalculation}
                     onChange={() => {
@@ -275,6 +374,7 @@ const GeneralSettings: FC = () => {
                     }}
                 />
                 <Checkbox
+                    size="xs"
                     label="Show number of results"
                     checked={showResultsTotal}
                     onChange={() => {
@@ -283,30 +383,68 @@ const GeneralSettings: FC = () => {
                 />
                 <Tooltip
                     disabled={canUseSubtotals}
-                    label={
-                        metricsAsRows
-                            ? 'Subtotals cannot be used with metrics as rows'
-                            : `Subtotals can only be used on tables with at least two ${
-                                  isPivotTableEnabled ? 'un-pivoted' : ''
-                              } dimensions`
-                    }
+                    label={`Subtotals can only be used on tables with at least two ${
+                        isPivotTableEnabled ? 'un-pivoted' : ''
+                    } dimensions`}
                     w={300}
-                    multiline
-                    withinPortal
                     position="top-start"
                 >
                     <Box>
                         <Checkbox
+                            size="xs"
                             label="Show subtotals"
-                            checked={
-                                canUseSubtotals &&
-                                !metricsAsRows &&
-                                showSubtotals
-                            }
+                            checked={canUseSubtotals && showSubtotals}
                             onChange={() => {
                                 setShowSubtotals(!showSubtotals);
                             }}
-                            disabled={!canUseSubtotals || metricsAsRows}
+                            disabled={!canUseSubtotals}
+                        />
+                    </Box>
+                </Tooltip>
+                <Checkbox
+                    size="xs"
+                    ml="lg"
+                    label="Expand subtotals by default"
+                    checked={showSubtotalsExpanded ?? false}
+                    onChange={() => {
+                        setShowSubtotalsExpanded(!showSubtotalsExpanded);
+                    }}
+                    disabled={!canUseSubtotals || !showSubtotals}
+                />
+                <Tooltip
+                    disabled={
+                        canUseSubtotals && !showSubtotals && !metricsAsRows
+                    }
+                    label={
+                        showSubtotals
+                            ? 'Row grouping is always on when subtotals are enabled.'
+                            : metricsAsRows
+                              ? 'Row grouping cannot be used with metrics as rows'
+                              : `Row grouping can only be used on tables with at least two ${
+                                    isPivotTableEnabled ? 'un-pivoted' : ''
+                                } dimensions`
+                    }
+                    w={300}
+                    position="top-start"
+                >
+                    <Box>
+                        <Checkbox
+                            size="xs"
+                            label="Group repeated row values"
+                            checked={
+                                showSubtotals ||
+                                (canUseSubtotals &&
+                                    !metricsAsRows &&
+                                    (showRowGrouping ?? false))
+                            }
+                            onChange={() => {
+                                setShowRowGrouping(!showRowGrouping);
+                            }}
+                            disabled={
+                                !canUseSubtotals ||
+                                metricsAsRows ||
+                                showSubtotals
+                            }
                         />
                     </Box>
                 </Tooltip>
