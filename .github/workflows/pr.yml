@@ -114,11 +114,17 @@ jobs:
     name: Build & Test
     runs-on: depot-ubuntu-24.04-8
     env:
-      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
-      TURBO_TEAM: ${{ vars.TURBO_TEAM }}
-      TURBO_API: https://cache.depot.dev
+      TURBO_TOKEN: ${{ github.repository == 'lightdash/lightdash' && secrets.TURBO_TOKEN || '' }}
+      TURBO_TEAM: ${{ github.repository == 'lightdash/lightdash' && vars.TURBO_TEAM || '' }}
+      TURBO_API: ${{ github.repository == 'lightdash/lightdash' && 'https://cache.depot.dev' || 'http://127.0.0.1:9' }}
       NODE_OPTIONS: "--max-old-space-size=8192"
     steps:
+      # Fork builds use only local cache; upstream keeps its existing cache and concurrency.
+      - name: Configure local-only fork build
+        if: ${{ github.repository != 'lightdash/lightdash' }}
+        run: |
+          echo 'TURBO_CACHE=local:rw' >> "$GITHUB_ENV"
+          echo 'TURBO_TELEMETRY_DISABLED=1' >> "$GITHUB_ENV"
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
